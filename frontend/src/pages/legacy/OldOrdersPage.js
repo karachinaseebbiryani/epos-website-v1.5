@@ -57,6 +57,7 @@ export default function OldOrdersPage() {
       } catch { /* ignore */ }
     })();
     fetchOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);// eslint runs only on first mount – fetchOrders ref not needed
 
   const openReceipt = (o) => {
