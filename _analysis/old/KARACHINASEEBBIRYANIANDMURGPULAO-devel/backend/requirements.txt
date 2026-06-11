@@ -1,0 +1,20 @@
+# Unpinned on purpose: pip will pick the newest wheel that matches your
+# installed Python version. This avoids "failed to build wheel" errors
+# on newer Python versions (3.13/3.14) where pinned versions might lack
+# prebuilt Windows wheels.
+#
+# If you need reproducible builds, pin these AFTER a successful install
+# with:  pip freeze > requirements.lock.txt
+
+fastapi
+uvicorn[standard]
+motor
+pymongo
+python-dotenv
+python-multipart
+httpx
+pytz
+bcrypt
+pyjwt
+APScheduler
+pydantic

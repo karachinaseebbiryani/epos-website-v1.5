@@ -1,0 +1,52 @@
+{
+  "summary": "Backend regression for P0-P4 patches. 16/17 tests PASS. One CRITICAL bug found: P1 loyalty diamonds are NOT credited to customer balance when an authenticated online order is marked 'delivered' — the PUT /api/online-orders/{id}/status endpoint returns 200 silently but the customers.diamond_balance never increases and no loyalty_transactions row is written. RCA: customer_id is stored on the order doc as a Python str (cust['_id'] is overwritten to str by get_current_customer), but the awarding code in PUT /online-orders/{id}/status queries db.customers with {'_id': customer_id} (string) where the collection key is an ObjectId, so update_one matches zero documents (modified_count=0) and the credit + transaction log are silently skipped. All other P0-P4 patches verified working: business-hours endpoint, weekly_schedule persistence, closed-order block (HTTP 400), phone validators (422 + accepts 11+ digit), public /feedback, /api/reviews new fields, admin reply endpoint with email_sent flag.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/online-orders/{id}/status (status=delivered)",
+        "issue": "Diamond reward never credited to customer.diamond_balance after delivery. Order has correct diamonds_earned (e.g. 50) but balance stays unchanged and no loyalty_transactions row is inserted. Root cause: customer_id stored as str on order doc, but db.customers._id is ObjectId — update_one({'_id': customer_id}) matches 0 docs. Reproduction: register a customer with valid 11-digit phone, place an authenticated /api/online-orders, then PUT status=delivered with admin token, then GET /api/loyalty/balance — balance is still 0.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tests_executed": [
+    {"name": "POS regression (admin login, /settings, /categories, /menu-items, /orders/today)", "result": "PASS"},
+    {"name": "GET /api/public/business-hours returns is_open/enabled/timezone/weekly_schedule/today/next_open_at", "result": "PASS"},
+    {"name": "GET /api/admin/online-settings includes business_hours_* + weekly_schedule (all 7 days)", "result": "PASS"},
+    {"name": "PUT /api/admin/online-settings persists weekly_schedule (mon close 22:30 round-trip)", "result": "PASS"},
+    {"name": "POST /api/customer/register rejects short phone with 422 ('phone must contain at least 11 digits')", "result": "PASS"},
+    {"name": "POST /api/online-orders rejects short phone with 422", "result": "PASS"},
+    {"name": "POST /api/online-orders BLOCKED with HTTP 400 'closed' when weekly_schedule fully closed", "result": "PASS"},
+    {"name": "POST /api/online-orders accepts valid 11-digit phone when open (24/7 BH override)", "result": "PASS"},
+    {"name": "POST /api/feedback (no auth) creates is_feedback=true review", "result": "PASS"},
+    {"name": "GET /api/reviews exposes admin_reply, replied_by, replied_at, is_feedback fields", "result": "PASS"},
+    {"name": "POST /api/admin/reviews/{id}/reply persists admin_reply + returns email_sent flag (false, SMTP not configured — expected)", "result": "PASS"},
+    {"name": "GET /api/loyalty/balance with Bearer token returns customer's diamond_balance", "result": "PASS"},
+    {"name": "Diamond credit on delivery + idempotency", "result": "FAIL", "details": "Expected balance to go from 0 -> 50 (diamonds_earned=50) but it stayed 0 after PUT status=delivered. Endpoint returned 200, no exception in logs, modified_count=0 because customer_id stored as str doesn't match ObjectId on customers._id."}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_p0p4.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [
+    "Fix loyalty awarding in PUT /api/online-orders/{order_id}/status (server.py ~line 2551-2580): customer_id is a string on the order doc — wrap with ObjectId() before querying db.customers. Suggested change: `result = await db.customers.update_one({'_id': ObjectId(customer_id)}, {...})` and `customer = await db.customers.find_one({'_id': ObjectId(customer_id)})`. Alternatively, store the ObjectId on the order doc at create time. Add a defensive check that logs a warning when modified_count == 0 so this kind of silent failure surfaces in logs."
+  ],
+  "critical_code_review_comments": [
+    "server.py: PUT /online-orders/{id}/status silently swallows the loyalty failure — modified_count==0 should at minimum logger.warning. Right now the API returns success while the user's promised reward is lost.",
+    "Type drift: get_current_customer mutates cust['_id'] to a str (line 2123), then create_online_order writes that string into the order doc (line 2444) — but elsewhere the code (e.g. /admin/loyalty/adjust line 4173) uses ObjectId(...). This inconsistency is the proximate cause of the loyalty credit bug and is likely to bite other features (e.g. /online-orders/me uses {'customer_id': cust['_id']} where cust['_id'] is also string, which happens to work because both sides are strings — but the customers collection lookup is the broken case).",
+    "compute_business_hours_status doesn't support overnight hours (e.g. 18:00 -> 02:00). Acceptable for MVP but worth noting; the helper has a comment about this already.",
+    "/api/admin/reviews/{id}/reply email_sent is correctly false when SMTP unconfigured — verified."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_p0p4.py (new)"
+  ],
+  "success_rate": {"backend": "94% (16/17)", "frontend": "not tested"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123. Customer: created on the fly via /api/customer/register (TEST_loyal_*@x.com).",
+  "seed_data_creation": "Each test creates its own TEST_-prefixed customers + reviews. Business hours are reset to defaults via session-scoped autouse fixture.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Re-run /app/backend/tests/test_iteration4_p0p4.py after main agent fixes the loyalty ObjectId bug. Note Karachi local time at test time is 05:04 PKT (outside default 10:00-23:00), so loyalty + accept-order tests temporarily set 24/7 hours and reset on teardown. SMTP is intentionally unconfigured — email_sent=false on review reply is expected, not a bug.",
+  "rca of the issue": "Order documents store customer_id = cust['_id'] where get_current_customer has already coerced cust['_id'] from ObjectId to str (server.py line 2123). The delivery handler at server.py line 2556 passes that string straight into db.customers.update_one({'_id': customer_id}, ...) — but the customers collection's _id is ObjectId, so the filter never matches, modified_count is 0, the transaction log block is skipped, and the API returns 200 with no warning. The fix is to wrap with ObjectId(customer_id) on both find_one and update_one (and ideally on the order create path as well, or alternatively keep _id as ObjectId on the cust dict and only stringify when serialising responses)."
+}

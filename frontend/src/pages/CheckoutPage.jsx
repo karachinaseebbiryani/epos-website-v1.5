@@ -1,0 +1,519 @@
+import { useState, useEffect } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { useCart } from "../contexts/CartContext";
+import { useAuth } from "../contexts/AuthContext";
+import api, { formatApiError } from "../lib/api";
+import { toast } from "sonner";
+import { Phone, MapPin, User, MessageSquare, Tag, Banknote, ArrowLeft, CreditCard, Building2, Smartphone, Store, Navigation, Loader2, UserPlus, UserCheck, Diamond, X as XIcon } from "lucide-react";
+import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
+import ClosedBanner from "../components/ClosedBanner";
+import useBusinessHours from "../hooks/useBusinessHours";
+
+const PAYMENT_LABELS = {
+    cod: { label: "Cash on Delivery", icon: Banknote, desc: "Pay when your order arrives" },
+    pay_at_restaurant: { label: "Pay at Restaurant", icon: Store, desc: "Pay in person if picking up" },
+    bank_transfer: { label: "Bank Transfer / EasyPaisa / JazzCash", icon: Building2, desc: "Transfer & share reference" },
+    card: { label: "Pay by Card", icon: CreditCard, desc: "Visa / Mastercard via Stripe" },
+};
+
+const GUEST_KEY = "knb_guest_v1";
+
+function loadGuestPrefill() {
+    try {
+        const raw = localStorage.getItem(GUEST_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+    } catch { return null; }
+}
+
+function saveGuestPrefill(form) {
+    try {
+        localStorage.setItem(GUEST_KEY, JSON.stringify({
+            customer_name: form.customer_name || "",
+            phone: form.phone || "",
+            address: form.address || "",
+            updated_at: new Date().toISOString(),
+        }));
+    } catch { /* */ }
+}
+
+export default function CheckoutPage() {
+    const { items, subtotal, clear } = useCart();
+    const { user } = useAuth();
+    const navigate = useNavigate();
+    const guest = !user ? loadGuestPrefill() : null;
+    const [authChoice, setAuthChoice] = useState(() => {
+        if (user) return "logged-in";
+        return guest ? "guest" : null; // null forces choice if first-time guest
+    });
+    const [form, setForm] = useState({
+        customer_name: user?.name || guest?.customer_name || "",
+        phone: user?.phone || guest?.phone || "",
+        address: guest?.address || "",
+        notes: "",
+        coupon_code: "",
+        payment_method: "cod",
+    });
+    const [coupon, setCoupon] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [settings, setSettings] = useState(null);
+    const [coords, setCoords] = useState(null);
+    const [delivery, setDelivery] = useState({ distance_km: null, fee: 0, in_range: true, free_delivery: false });
+    const [locating, setLocating] = useState(false);
+    // V2: track the customer's selected Diamond reward so we can show it as a chip and let
+    // them remove it. The actual Diamond debit happens server-side when the order is placed.
+    const [reward, setReward] = useState(() => {
+        try { const raw = localStorage.getItem("selected_reward"); return raw ? JSON.parse(raw) : null; } catch { return null; }
+    });
+    useEffect(() => {
+        const sync = () => {
+            try { const raw = localStorage.getItem("selected_reward"); setReward(raw ? JSON.parse(raw) : null); } catch { setReward(null); }
+        };
+        window.addEventListener("rewardSelectionChanged", sync);
+        window.addEventListener("storage", sync);
+        return () => {
+            window.removeEventListener("rewardSelectionChanged", sync);
+            window.removeEventListener("storage", sync);
+        };
+    }, []);
+    const removeReward = () => {
+        localStorage.removeItem("selected_reward");
+        setReward(null);
+        try { window.dispatchEvent(new Event("rewardSelectionChanged")); window.dispatchEvent(new Event("diamondsUpdated")); } catch { /* */ }
+        toast.success("Reward removed — your Diamonds stay in your balance");
+    };
+    const bh = useBusinessHours();
+    const isClosed = !!(bh && bh.enabled && !bh.is_open);
+
+    useEffect(() => {
+        api.get("/public/settings").then((r) => setSettings(r.data)).catch(() => { });
+    }, []);
+    useEffect(() => {
+        if (user) {
+            setAuthChoice("logged-in");
+            setForm((f) => ({ ...f, customer_name: user.name || f.customer_name, phone: user.phone || f.phone }));
+        }
+    }, [user]);
+
+    // Re-quote delivery whenever subtotal changes (free-delivery threshold may flip)
+    useEffect(() => {
+        if (!coords) return;
+        api.post("/delivery/quote", { ...coords, subtotal }).then(({ data }) => setDelivery(data)).catch(() => {});
+    }, [subtotal, coords]);
+
+    const detectLocation = () => {
+        if (!navigator.geolocation) { toast.error("Geolocation not supported"); return; }
+        setLocating(true);
+        navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+                const c = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                setCoords(c);
+                try {
+                    const { data } = await api.post("/delivery/quote", { ...c, subtotal });
+                    setDelivery(data);
+                    if (!data.in_range) {
+                        toast.error(`Sorry, you're ${data.distance_km}km away — outside our ${data.max_radius_km}km service area.`);
+                    } else if (data.free_delivery) {
+                        toast.success(`You're ${data.distance_km}km away. FREE delivery!`);
+                    } else {
+                        toast.success(`Delivery fee: Rs. ${data.fee} (${data.distance_km}km)`);
+                    }
+                } catch (err) { toast.error("Could not calculate delivery"); }
+                setLocating(false);
+            },
+            (err) => {
+                setLocating(false);
+                toast.error("Location permission denied. Please enable or enter manually below.");
+            },
+            { enableHighAccuracy: true, timeout: 15000 }
+        );
+    };
+
+    const setManualCoords = async (lat, lng) => {
+        const c = { lat: Number(lat), lng: Number(lng) };
+        setCoords(c);
+        try {
+            const { data } = await api.post("/delivery/quote", { ...c, subtotal });
+            setDelivery(data);
+        } catch { /* */ }
+    };
+
+    if (items.length === 0) {
+        return (
+            <div className="max-w-md mx-auto px-4 py-24 text-center">
+                <p className="text-neutral-500 mb-6">Your cart is empty.</p>
+                <Link to="/menu" className="text-brand-red font-semibold">Browse Menu</Link>
+            </div>
+        );
+    }
+
+    const applyCoupon = async () => {
+        const code = form.coupon_code.trim().toUpperCase();
+        if (!code) return;
+        try {
+            const { data } = await api.get("/offers");
+            const found = data.find((o) => (o.coupon_code || "").toUpperCase() === code && o.active);
+            if (!found) { setCoupon(null); toast.error("Invalid coupon code"); return; }
+            // V2: enforce minimum order on offers
+            const minAmount = Number(found.min_order_amount || 0);
+            if (minAmount > 0 && subtotal < minAmount) {
+                setCoupon(null);
+                toast.error(`Spend at least Rs. ${minAmount.toFixed(0)} to use ${found.coupon_code}. Add Rs. ${(minAmount - subtotal).toFixed(0)} more.`);
+                return;
+            }
+            // V2: prevent stacking discount coupon + Diamond DISCOUNT reward (free-item rewards are OK)
+            if (reward && (reward.reward_type === "discount_percent" || reward.reward_type === "discount_fixed")) {
+                setCoupon(null);
+                toast.error("You can use either a coupon OR a Diamond discount — not both. Remove your Diamond reward first to apply this coupon.");
+                return;
+            }
+            let discount = 0;
+            if (found.discount_percent) discount = (subtotal * found.discount_percent) / 100;
+            else if (found.discount_amount) discount = found.discount_amount;
+            setCoupon({ ...found, discount: Math.min(discount, subtotal) });
+            toast.success(`Coupon applied: ${found.title}`);
+        } catch (e) {
+            toast.error("Failed to validate coupon");
+        }
+    };
+
+    const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
+    const enabledMethods = settings?.payment_methods || { cod: true };
+
+    const submitOrder = async (e) => {
+        e.preventDefault();
+        if (isClosed) {
+            toast.error("Restaurant is currently closed. Please try again during business hours.");
+            return;
+        }
+        if (!form.customer_name.trim() || !form.phone.trim() || !form.address.trim()) {
+            toast.error("Please fill in name, phone and address"); return;
+        }
+        const phoneDigits = (form.phone || "").replace(/\D/g, "");
+        if (phoneDigits.length < 11) {
+            toast.error("Phone number must contain at least 11 digits"); return;
+        }
+        if (coords && !delivery.in_range) {
+            toast.error("Your location is outside our delivery area."); return;
+        }
+        setLoading(true);
+        try {
+            // Check if reward is selected
+            const selectedReward = localStorage.getItem('selected_reward');
+            const rewardId = selectedReward ? JSON.parse(selectedReward).id : null;
+            
+            const { data: order } = await api.post("/online-orders", {
+                items: items.map((i) => ({ item_id: i.item_id, name: i.name, price: i.price, quantity: i.quantity })),
+                total_price: subtotal,
+                customer_name: form.customer_name,
+                phone: form.phone,
+                address: form.address,
+                notes: form.notes,
+                payment_method: form.payment_method,
+                coupon_code: coupon?.coupon_code || null,
+                delivery_lat: coords?.lat || null,
+                delivery_lng: coords?.lng || null,
+                reward_id: rewardId, // NEW: Diamond reward redemption
+            });
+            
+            // Clear selected reward after order
+            localStorage.removeItem('selected_reward');
+            try { window.dispatchEvent(new Event("rewardSelectionChanged")); window.dispatchEvent(new Event("diamondsUpdated")); } catch { /* */ }
+            
+            // Show Diamonds to be earned after delivery
+            if (order.diamonds_earned && order.diamonds_earned > 0) {
+                setTimeout(() => {
+                    toast.success(`✨ You'll earn ${order.diamonds_earned} Diamonds when order is delivered!`, { duration: 5000 });
+                }, 1000);
+            }
+            
+            clear();
+            // Persist guest info so next checkout prefills automatically
+            if (!user) saveGuestPrefill(form);
+            // Branch by payment method
+            if (form.payment_method === "card") {
+                try {
+                    const { data: sess } = await api.post("/payments/stripe/create-session", {
+                        order_id: order.id,
+                        origin_url: window.location.origin,
+                    });
+                    window.location.href = sess.url;
+                    return;
+                } catch (err) {
+                    toast.error("Could not initiate card payment");
+                    navigate(`/order/${order.id}/success`, { state: { order } });
+                    return;
+                }
+            }
+            if (form.payment_method === "bank_transfer") {
+                navigate(`/order/${order.id}/bank-payment`, { state: { order, settings } });
+                return;
+            }
+            // COD or pay_at_restaurant
+            toast.success("Order placed successfully!");
+            navigate(`/order/${order.id}/success`, { state: { order } });
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail) || "Order failed");
+        } finally { setLoading(false); }
+    };
+
+    return (
+        <div className="max-w-5xl mx-auto px-4 md:px-8 py-12 md:py-16" data-testid="checkout-page">
+            <Link to="/cart" className="inline-flex items-center gap-2 text-neutral-500 hover:text-brand-red text-sm mb-6">
+                <ArrowLeft className="w-4 h-4" /> Back to cart
+            </Link>
+            <h1 className="font-display font-black text-4xl md:text-5xl text-brand-ink mb-10">Checkout</h1>
+
+            {isClosed && (
+                <div className="mb-6">
+                    <ClosedBanner inline />
+                </div>
+            )}
+
+            {/* Auth choice gate — only shown for new guests */}
+            {authChoice === null && !user && (
+                <AuthChoicePanel onContinueAsGuest={() => setAuthChoice("guest")} />
+            )}
+
+            {(authChoice !== null || user) && (
+            <>
+            {!user && authChoice === "guest" && (
+                <GuestStrip
+                    hasSavedInfo={Boolean(guest)}
+                    onClear={() => { localStorage.removeItem(GUEST_KEY); setForm((f) => ({ ...f, customer_name: "", phone: "", address: "" })); toast.success("Saved info cleared"); }}
+                />
+            )}
+
+            <form onSubmit={submitOrder} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 space-y-5">
+                    {/* Delivery details */}
+                    <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
+                        <h2 className="font-display font-bold text-lg mb-5">Delivery Details</h2>
+                        <div className="space-y-4">
+                            <Field icon={<User className="w-4 h-4" />} label="Full Name *" value={form.customer_name} onChange={(v) => setForm({ ...form, customer_name: v })} testid="checkout-name" />
+                            <Field icon={<Phone className="w-4 h-4" />} label="Phone Number * (11+ digits)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v.replace(/\D/g, "") })} testid="checkout-phone" type="tel" />
+                            <div>
+                                <label className="block text-sm font-semibold text-brand-ink mb-2">Delivery Address *</label>
+                                <div className="relative">
+                                    <MapPin className="w-4 h-4 absolute left-4 top-4 text-neutral-400" />
+                                    <textarea rows={3} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} data-testid="checkout-address"
+                                        placeholder="House no., Street, Area, City"
+                                        className="w-full pl-11 pr-4 py-3 bg-neutral-50 border border-transparent focus:border-brand-red focus:bg-white rounded-xl outline-none text-sm resize-none" />
+                                </div>
+                            </div>
+
+                            {/* Geolocation block */}
+                            <div className="bg-neutral-50 rounded-xl p-4">
+                                <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                                    <div>
+                                        <div className="text-sm font-semibold text-brand-ink">Delivery Distance</div>
+                                        <div className="text-xs text-neutral-500">For accurate delivery fee, share your location</div>
+                                    </div>
+                                    <button type="button" onClick={detectLocation} disabled={locating} data-testid="detect-location-button"
+                                        className="inline-flex items-center gap-2 bg-brand-yellow text-brand-ink rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-brand-yellow-dark hover:text-white disabled:opacity-50 transition-colors">
+                                        {locating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-3.5 h-3.5" />}
+                                        {locating ? "Detecting..." : "Use My Location"}
+                                    </button>
+                                </div>
+                                {coords && (
+                                    <div className="text-xs text-neutral-600" data-testid="location-result">
+                                        📍 {delivery.distance_km}km from restaurant ·{" "}
+                                        {delivery.in_range ? (
+                                            delivery.free_delivery ? <span className="text-green-700 font-bold">FREE delivery</span> : <span className="font-bold">Delivery: Rs. {delivery.fee}</span>
+                                        ) : <span className="text-red-600 font-bold">OUTSIDE service area ({delivery.max_radius_km}km max)</span>}
+                                    </div>
+                                )}
+                                {!coords && (
+                                    <details className="text-xs text-neutral-500">
+                                        <summary className="cursor-pointer hover:text-brand-red">Enter coordinates manually</summary>
+                                        <div className="grid grid-cols-2 gap-2 mt-2">
+                                            <input type="number" step="0.0001" placeholder="Latitude" data-testid="manual-lat"
+                                                onChange={(e) => { const lat = e.target.value; const lng = document.querySelector('[data-testid="manual-lng"]').value; if (lat && lng) setManualCoords(lat, lng); }}
+                                                className="px-3 py-2 bg-white border border-neutral-200 rounded-lg outline-none focus:border-brand-red" />
+                                            <input type="number" step="0.0001" placeholder="Longitude" data-testid="manual-lng"
+                                                onChange={(e) => { const lng = e.target.value; const lat = document.querySelector('[data-testid="manual-lat"]').value; if (lat && lng) setManualCoords(lat, lng); }}
+                                                className="px-3 py-2 bg-white border border-neutral-200 rounded-lg outline-none focus:border-brand-red" />
+                                        </div>
+                                    </details>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-semibold text-brand-ink mb-2">Order Notes (optional)</label>
+                                <div className="relative">
+                                    <MessageSquare className="w-4 h-4 absolute left-4 top-4 text-neutral-400" />
+                                    <textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} data-testid="checkout-notes"
+                                        placeholder="Less spicy, extra raita, etc."
+                                        className="w-full pl-11 pr-4 py-3 bg-neutral-50 border border-transparent focus:border-brand-red focus:bg-white rounded-xl outline-none text-sm resize-none" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* People also buy upsell — shown before Payment so customers can grab a side */}
+                    <PeopleAlsoBuy compact title="Add a side?" />
+
+                    {/* Payment method */}
+                    <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
+                        <h2 className="font-display font-bold text-lg mb-5">Payment Method</h2>
+                        <div className="space-y-2">
+                            {Object.entries(PAYMENT_LABELS).map(([key, info]) => {
+                                if (!enabledMethods[key]) return null;
+                                const Icon = info.icon;
+                                const selected = form.payment_method === key;
+                                return (
+                                    <label key={key} data-testid={`payment-${key}`}
+                                        className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition-colors ${selected ? "border-brand-red bg-brand-red/5" : "border-neutral-200 hover:border-neutral-300"}`}>
+                                        <input type="radio" name="payment_method" value={key} checked={selected} onChange={() => setForm({ ...form, payment_method: key })} className="accent-brand-red" />
+                                        <Icon className={`w-6 h-6 ${selected ? "text-brand-red" : "text-neutral-500"}`} />
+                                        <div className="flex-1">
+                                            <div className={`font-semibold ${selected ? "text-brand-ink" : "text-brand-ink"}`}>{info.label}</div>
+                                            <div className="text-xs text-neutral-500">{info.desc}</div>
+                                        </div>
+                                    </label>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Order Summary */}
+                <aside className="lg:sticky lg:top-24 self-start">
+                    <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
+                        <h2 className="font-display font-bold text-lg mb-4">Order Summary</h2>
+                        <div className="space-y-2 mb-4 max-h-48 overflow-auto pr-1">
+                            {items.map((i) => (
+                                <div key={i.item_id} className="flex justify-between text-sm">
+                                    <span className="text-neutral-600 truncate pr-2">{i.quantity}× {i.name}</span>
+                                    <span className="font-semibold whitespace-nowrap">Rs. {i.price * i.quantity}</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* V2: selected Diamond reward chip with remove */}
+                        {reward && (
+                            <div data-testid="checkout-reward-banner" className="mb-3 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-start gap-2">
+                                <Diamond className="w-4 h-4 text-amber-700 mt-0.5" fill="currentColor" />
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-xs font-bold text-amber-900 truncate">Reward: {reward.title}</div>
+                                    <div className="text-[11px] text-amber-700">Costs {reward.cost_diamonds} Diamonds — only deducted when the order is placed.</div>
+                                </div>
+                                <button type="button" onClick={removeReward} data-testid="checkout-reward-remove" className="text-amber-700 hover:text-red-600 p-1">
+                                    <XIcon className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        )}
+
+                        <div className="flex gap-2 mb-4">
+                            <div className="relative flex-1">
+                                <Tag className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                                <input type="text" placeholder="Coupon code" value={form.coupon_code} onChange={(e) => setForm({ ...form, coupon_code: e.target.value })} data-testid="checkout-coupon-input"
+                                    className="w-full pl-9 pr-3 py-2.5 bg-neutral-50 border border-transparent focus:border-brand-red focus:bg-white rounded-lg outline-none text-sm uppercase" />
+                            </div>
+                            <button type="button" onClick={applyCoupon} data-testid="checkout-coupon-apply" className="px-4 py-2.5 rounded-lg bg-brand-yellow text-brand-ink font-semibold text-sm hover:bg-brand-yellow-dark hover:text-white transition-colors">
+                                Apply
+                            </button>
+                        </div>
+
+                        <div className="border-t border-neutral-100 pt-4 space-y-1.5 text-sm">
+                            <div className="flex justify-between"><span className="text-neutral-500">Subtotal</span><span>Rs. {subtotal}</span></div>
+                            {coupon && <div className="flex justify-between text-green-600 font-semibold"><span>Discount</span><span>− Rs. {coupon.discount.toFixed(0)}</span></div>}
+                            <div className="flex justify-between">
+                                <span className="text-neutral-500">Delivery {delivery.distance_km !== null && `(${delivery.distance_km}km)`}</span>
+                                <span data-testid="checkout-delivery-fee" className={delivery.fee === 0 ? "text-green-600 font-semibold" : ""}>
+                                    {delivery.fee === 0 ? (delivery.distance_km !== null ? "Free" : "—") : `Rs. ${delivery.fee}`}
+                                </span>
+                            </div>
+                            <div className="flex justify-between pt-2 border-t border-neutral-100">
+                                <span className="font-display font-bold text-brand-ink">Total</span>
+                                <span data-testid="checkout-total" className="font-display font-black text-2xl text-brand-red">Rs. {total.toFixed(0)}</span>
+                            </div>
+                        </div>
+
+                        <button type="submit" disabled={loading || isClosed} data-testid="checkout-place-order"
+                            className="w-full mt-6 bg-brand-red hover:bg-brand-red-dark disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-full px-8 py-3.5 font-bold transition-colors">
+                            {isClosed ? "Closed — try again later" : (loading ? "Processing..." : `Place Order — Rs. ${total.toFixed(0)}`)}
+                        </button>
+                        <p className="text-[11px] text-neutral-400 text-center mt-3">Estimated delivery 30–45 min</p>
+                    </div>
+                </aside>
+            </form>
+            </>
+            )}
+        </div>
+    );
+}
+
+function AuthChoicePanel({ onContinueAsGuest }) {
+    return (
+        <div className="bg-white border border-neutral-100 rounded-2xl p-6 md:p-8 shadow-sm mb-8" data-testid="auth-choice-panel">
+            <div className="text-center mb-6">
+                <h2 className="font-display font-black text-2xl md:text-3xl text-brand-ink">Almost there!</h2>
+                <p className="text-neutral-500 text-sm mt-1">Sign in for faster checkout next time, or continue as a guest.</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Link
+                    to="/login?redirect=/checkout"
+                    data-testid="auth-choice-signin"
+                    className="border-2 border-brand-red text-brand-red hover:bg-brand-red hover:text-white rounded-2xl p-5 text-left transition-colors group"
+                >
+                    <div className="flex items-center gap-3 mb-2">
+                        <div className="w-10 h-10 rounded-full bg-red-50 group-hover:bg-white/20 inline-flex items-center justify-center"><UserCheck className="w-5 h-5" /></div>
+                        <span className="font-display font-bold text-lg">Sign In</span>
+                    </div>
+                    <p className="text-xs opacity-80">Already have an account? Earn loyalty points and re-order with one tap.</p>
+                </Link>
+                <Link
+                    to="/register?redirect=/checkout"
+                    data-testid="auth-choice-signup"
+                    className="border-2 border-brand-ink text-brand-ink hover:bg-brand-ink hover:text-white rounded-2xl p-5 text-left transition-colors group"
+                >
+                    <div className="flex items-center gap-3 mb-2">
+                        <div className="w-10 h-10 rounded-full bg-neutral-100 group-hover:bg-white/20 inline-flex items-center justify-center"><UserPlus className="w-5 h-5" /></div>
+                        <span className="font-display font-bold text-lg">Create Account</span>
+                    </div>
+                    <p className="text-xs opacity-80">30 seconds. Save your address & track orders forever.</p>
+                </Link>
+            </div>
+            <button
+                type="button"
+                onClick={onContinueAsGuest}
+                data-testid="auth-choice-guest"
+                className="w-full mt-4 text-sm font-semibold text-neutral-500 hover:text-brand-ink py-3 inline-flex items-center justify-center gap-1.5"
+            >
+                Continue as Guest <ArrowLeft className="w-3.5 h-3.5 rotate-180" />
+            </button>
+            <p className="text-[11px] text-neutral-400 text-center mt-1">We'll save your details on this device for next time.</p>
+        </div>
+    );
+}
+
+function GuestStrip({ hasSavedInfo, onClear }) {
+    return (
+        <div data-testid="guest-strip" className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 mb-6 flex items-center justify-between gap-3 text-sm">
+            <div className="flex items-center gap-2 min-w-0">
+                <UserPlus className="w-4 h-4 text-amber-600 shrink-0" />
+                <span className="text-amber-900 truncate">
+                    Continuing as guest{hasSavedInfo ? " — your saved info has been pre-filled" : ""}.
+                    {" "}<Link to="/register?redirect=/checkout" className="font-bold underline whitespace-nowrap">Create account</Link>
+                </span>
+            </div>
+            {hasSavedInfo && (
+                <button type="button" onClick={onClear} data-testid="guest-clear-info" className="text-[11px] text-amber-800 underline whitespace-nowrap">Clear saved info</button>
+            )}
+        </div>
+    );
+}
+
+function Field({ icon, label, type = "text", value, onChange, testid }) {
+    return (
+        <div>
+            <label className="block text-sm font-semibold text-brand-ink mb-2">{label}</label>
+            <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400">{icon}</span>
+                <input type={type} value={value} onChange={(e) => onChange(e.target.value)} data-testid={testid}
+                    className="w-full pl-11 pr-4 py-3 bg-neutral-50 border border-transparent focus:border-brand-red focus:bg-white rounded-xl outline-none text-sm" />
+            </div>
+        </div>
+    );
+}

@@ -1,0 +1,40 @@
+{
+  "summary": "Frontend-only regression test for the UnifiedLoginPage post-submit redirect bug from iteration_2. The fix (using window.location.replace + StaffAuthContext.login for atomic state update) works correctly. All three acceptance criteria pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "tests_executed": [
+    {
+      "name": "UnifiedLoginPage redirect after successful login",
+      "result": "PASS",
+      "details": "GET /admin/sign-in -> defaults pre-filled (admin@restaurant.com / admin123) -> click [data-testid='unified-login-submit'] -> URL changed to /admin/pos within ~1s. Both localStorage.staff_auth_token AND localStorage.knb_admin_token present. POSPage rendered ([data-testid='pos-page'] and [data-testid='ticket-panel'] both found). No console/page errors."
+    },
+    {
+      "name": "AdminLayout sidebar order regression",
+      "result": "PASS",
+      "details": "Sidebar shows 'POS OPERATIONS' section first (containing POS / Sales, Classic Dashboard, Menu Management, Inventory, Vendors, Expenses, Refunds, Order History, X / Z Reports, Full Settings) followed by 'ONLINE STORE' section second (Dashboard, Online Orders, Menu, Categories, Offers, Events, Settings). Confirmed via screenshot."
+    },
+    {
+      "name": "Backend /api/auth/login admin permissions count",
+      "result": "PASS",
+      "details": "POST /api/auth/login with admin@restaurant.com/admin123 -> role='admin', permissions count = 19, token present. No regression."
+    }
+  ],
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "UnifiedLoginPage.submit() uses window.location.replace() — this works but causes a full page reload (loss of any in-memory state). Acceptable trade-off for sign-in but worth noting; ideal long-term fix would be to ensure StaffGate reads user from a freshly-set context value via a render after setUser. The hard-redirect approach is robust and pragmatic for now.",
+    "useEffect at line 64-68 may fire navigate() in addition to the window.location.replace() in submit() if user state updates before the hard redirect is processed — both target the same route so it is harmless, but slightly duplicative."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123 (defaults pre-filled in unified login form)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The iteration_2 redirect bug is fully resolved. Login flow: UnifiedLoginPage -> POST /api/auth/login -> StaffAuthContext.login sets user state and stores staff_auth_token -> mirror to knb_admin_token -> window.location.replace('/admin/pos') -> hard reload -> StaffAuthProvider.checkAuth re-fetches /auth/me -> StaffGate passes -> POSPage renders. All confirmed working at https://project-handoff-12.preview.emergentagent.com.",
+  "rca of the issue": "Original iter2 bug: navigate() inside submit() ran before React committed the setUser state update from StaffAuthContext.login(), so when StaffGate (Op perm='pos') evaluated, user was still null and it redirected back to /admin/sign-in. Fix: use window.location.replace() which does a hard browser navigation; on the new page load, StaffAuthProvider's checkAuth reads staff_auth_token from localStorage, calls /auth/me, populates user fully before StaffGate evaluates. Verified: URL becomes /admin/pos within ~1s, POSPage testids present, both tokens in localStorage."
+}

@@ -1,0 +1,56 @@
+{
+  "summary": "Iteration 6 — Daily auto-send schedule (APScheduler) + WhatsApp via whatsapp-web.js Node service. Backend: 18/18 new tests in test_iter6_schedule_whatsapp.py PASS; full suite 92/93 (1 pre-existing inventory low_stock failure unrelated). Frontend: discovered & FIXED a critical TDZ bug — SettingsPage.js useEffect on line 109 referenced fetchScheduleStatus/fetchTimezones/fetchWaStatus which were declared with useCallback later in the file (lines 223/230/262), causing 'Cannot access fetchScheduleStatus before initialization' ReferenceError that broke the ENTIRE Settings page (including pre-existing Email tab). After moving the useEffect to after all useCallback declarations, all UI flows verified end-to-end: Schedule tab (time/tz/type/toggles/save/run-now with toast), WhatsApp tab (status card, QR modal renders data:image/png;base64 URL from node service, recipients add+persist+remove across reload, send-test correctly disabled when not connected, invalid phone shows toast). WhatsApp node service confirmed RUNNING under supervisor, generating QR; sends fail at isRegisteredUser as expected (no real phone scanned).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PUT /api/settings", "issue": "Invalid daily_report_time '99:99' or daily_report_timezone 'Foo/Bar' is persisted verbatim and only the reschedule throws (logged as ERROR). Spec is OK with 200 to avoid breaking the API, but a server-side validator (HH:MM 0-23/0-59 + zoneinfo lookup) would reject bad data at write-time and surface a clearer 422 to the UI."},
+      {"endpoint": "POST /api/whatsapp/test", "issue": "Returns 503 when node says 'WhatsApp not connected' (good), but if node is reachable and isRegisteredUser times out, surfaces 500 with raw error string. Acceptable for dev preview; consider mapping this to 503/400 with friendlier detail."},
+      {"endpoint": "POST /api/whatsapp/send-report", "issue": "When ALL sends fail returns 502 with detail={'message','failed'} as a dict (FastAPI normally serialises detail as string). Frontend must read detail.message — works but slightly unusual."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "SettingsPage", "issue": "[FIXED in this iter] TDZ ReferenceError: useEffect referenced fetchScheduleStatus / fetchTimezones / fetchWaStatus before their useCallback declarations. Moved useEffect block to immediately after fetchWaStatus useCallback. Without this fix the entire SettingsPage crashes on mount.", "selector": "SettingsPage.js line 109", "priority": "CRITICAL (now resolved)"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Settings → WhatsApp", "issues": ["Status card uses red 'Not connected' pill; works but a yellow 'Initializing...' state is not visually surfaced even though /status returns initializing=true while puppeteer boots. Minor UX polish."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter6_schedule_whatsapp.py",
+    "/app/test_reports/pytest/pytest_iter6.xml",
+    "/app/test_reports/pytest/pytest_iter6_full.xml"
+  ],
+  "action_items": [
+    "(Already done by testing agent) SettingsPage.js — moved useEffect after useCallback definitions to fix TDZ error. Verify no behavioral regression on Users / Tax / RestaurantInfo / Email / Data tabs (not retested but they share the same component; render order untouched).",
+    "(Optional) Server-side validation of daily_report_time (regex ^([01]\\d|2[0-3]):[0-5]\\d$) and timezone (zoneinfo.ZoneInfo lookup) in PUT /api/settings to return 422 instead of silently accepting invalid values.",
+    "(Optional) WhatsApp UI: surface 'Initializing…' yellow state when waStatus.initializing===true && !waStatus.ready && !waStatus.error.",
+    "(Pre-existing) /api/inventory/low_stock returns 405 — same as iter5; not in iter6 scope."
+  ],
+  "critical_code_review_comments": [
+    "SettingsPage.js — Hooks ordering bug (fixed). Going forward, recommend always placing useEffect blocks at the bottom of the component after all useCallback / useMemo declarations to avoid TDZ traps. Or consider a custom hook (e.g. useSettingsBootstrap) to encapsulate the bootstrap fetches.",
+    "server.py:_reschedule_daily_job — correctly catches CronTrigger errors and logs without raising; survives invalid time/tz from PUT /settings. Good.",
+    "server.py:_wa_get/_wa_post — uses settings.whatsapp_service_url with sane default; httpx timeouts explicit (5s status, 15s reset, 20-30s send). Good.",
+    "server.py:whatsapp_status — returns 200 with error string when node is down (does not raise 500). Good for UI polling.",
+    "server.py:whatsapp_send_report — 502 detail is a dict ({message, failed}). FastAPI accepts but standard practice is string detail or a custom response model. Frontend handles it but worth normalizing.",
+    "whatsapp-service/index.js — sound: persists session via LocalAuth, exposes /status /qr /send /reset, normalises phone to digits only, validates isRegisteredUser before send. listen on 127.0.0.1 only — good (proxy-only access).",
+    "supervisord_whatsapp.conf — correct PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium; autorestart=true; stopasgroup/killasgroup ensure puppeteer chromium children are killed on shutdown.",
+    "Schedule UI — schedule-time-input is a native time picker (correct, NOT browser default for date which is the rule); schedule-tz-select is a Select. Acceptable.",
+    "WhatsApp recipients UI — phone validation requires '+' prefix and digits, shown via toast on add. Good. Persistence verified across page reload."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/SettingsPage.js (MOVED useEffect to after fetchWaStatus useCallback to fix TDZ error)",
+    "/app/backend/tests/test_iter6_schedule_whatsapp.py (NEW — 18 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% on iter6 (18/18); 98.9% overall (92/93 — 1 pre-existing unrelated failure)",
+    "frontend": "100% on tested flows after the SettingsPage TDZ fix"
+  },
+  "test_credentials": "admin@restaurant.com / admin123",
+  "seed_data_creation": "Cleanup performed: TEST_cashier_iter6 user deleted; settings restored to {daily_report_time:'02:15', daily_report_timezone:'Asia/Karachi', auto_email_daily:false, auto_whatsapp_daily:false, whatsapp_recipients:[], auto_whatsapp_on_z_close:false}.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_iter6_schedule_whatsapp.py -v` (18 tests, ~3s, all pass). WhatsApp node service must be RUNNING (sudo supervisorctl status whatsapp). Critical frontend selectors for Settings: tab-schedule, tab-whatsapp, schedule-time-input, schedule-tz-select, schedule-type-select, auto-email-daily-toggle, auto-whatsapp-daily-toggle, save-schedule-btn, run-schedule-now-btn, wa-show-qr-btn, wa-qr-image, wa-qr-refresh-btn, wa-qr-done-btn, wa-send-test-btn, new-wa-name, new-wa-phone, add-wa-recipient-btn, save-wa-btn, auto-wa-on-z-toggle. The TDZ fix on SettingsPage.js was committed by this testing agent — main agent should keep useEffect AFTER all useCallback declarations going forward.",
+  "rca of the issue": "TDZ Bug RCA — JavaScript `const` declared via useCallback is in temporal dead zone until its declaration line executes. SettingsPage's useEffect at line 109 had a dependency array [fetchUsers, fetchSettings, fetchScheduleStatus, fetchTimezones, fetchWaStatus] where the last 3 were declared at lines 223/230/262. Even though useEffect's callback runs after render, React evaluates the dependency array eagerly on the very line it's reached, hence ReferenceError on first mount. Reproduction: open /settings as admin → red 'Uncaught runtime errors' overlay covers the page. Mitigation: physically moved the bootstrap useEffect to after all useCallback hooks. Long-term: enforce 'react-hooks/exhaustive-deps' eslint + position useEffects at component bottom or extract to custom hook."
+}

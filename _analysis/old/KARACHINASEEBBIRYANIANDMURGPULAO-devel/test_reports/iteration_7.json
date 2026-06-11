@@ -1,0 +1,52 @@
+{
+  "summary": "Iter7 — Cloudflare Tunnel (Remote Access) backend + frontend + setupProxy.js regression. Backend: 6/6 NEW tests in test_iter7_tunnel.py PASS (status no-log, status admin-only, refresh detects URL, watcher loop auto-update within 30s, settings persistence, notify-on-change does not crash). Backend logs CONFIRMED 'Notified email recipients of new tunnel URL' twice → notify hook reaches email/WA paths even though SMTP/WA not configured. setupProxy.js correctly bypasses on Emergent preview (REACT_APP_BACKEND_URL is set) → login + dashboard + all 7 settings tabs rendered without 'Invalid Host header'. CRITICAL TDZ BUG FOUND AND FIXED: SettingsPage.js useEffect at line 273 referenced fetchTunnelStatus before its useCallback declaration at line 338 → 'Cannot access fetchTunnelStatus before initialization' ReferenceError on every /settings mount → entire Settings page white-screened. Same pattern as iter6. Fix: moved fetchTunnelStatus useCallback above the bootstrap useEffect (next to fetchWaStatus). After fix, full UI flow verified: Remote Access tab → red 'No tunnel URL detected yet' panel; tunnel-notify-toggle defaults to checked, toggling persists across reload; creating /app/cloudflared.log with a fake trycloudflare URL → tunnel-refresh-btn click → green ONLINE banner with tunnel-url code element + copy/open buttons. Lint clean.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/tunnel/refresh", "issue": "Returns 200 with body {url:null, message:'No log file found yet'} when no log exists (status code is fine but spec example shows {url, log_path}). Frontend handles gracefully via toast 'No URL detected yet'."},
+      {"endpoint": "GET /api/tunnel/status", "issue": "log_path field returns empty string instead of the configured custom tunnel_log_path when that path doesn't exist on disk (because _resolve_tunnel_log_path returns '' on miss). Minor UX — user can't see what path was searched. Consider returning the configured path even if non-existent so the UI can hint where the log is expected."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "SettingsPage", "issue": "[FIXED in this iter] TDZ ReferenceError 'Cannot access fetchTunnelStatus before initialization' — useEffect dep array referenced fetchTunnelStatus before its useCallback declaration. Same class of bug as iter6's fetchScheduleStatus. Moved fetchTunnelStatus useCallback above bootstrap useEffect. ENTIRE Settings page was white-screened before the fix.", "selector": "SettingsPage.js line 273 vs line 338", "priority": "CRITICAL (now resolved)"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter7_tunnel.py",
+    "/app/test_reports/pytest/pytest_iter7.xml"
+  ],
+  "action_items": [
+    "(Already done by testing agent) SettingsPage.js — moved fetchTunnelStatus useCallback before bootstrap useEffect to fix TDZ error.",
+    "(Recurring pattern) Main agent should adopt a discipline: when adding ANY new useCallback that is consumed by an existing bootstrap useEffect, declare it ABOVE the useEffect or extract a custom hook. This is now the SECOND iteration in a row with the same bug class. Consider enforcing react-hooks/exhaustive-deps + an eslint rule for declaration order, or split the bootstrap useEffect by feature.",
+    "(Optional) GET /api/tunnel/status: surface configured tunnel_log_path in response even when the file does not exist, so the UI can show 'expected at: <path>'.",
+    "(Optional) Watcher loop: 15s poll interval is fine for owner-only use; if many recipients are added later, debounce notifications (e.g., do not re-notify if URL re-appears within 60s of previous notify) to avoid notification storms when log rotates."
+  ],
+  "critical_code_review_comments": [
+    "server.py:_TUNNEL_URL_RE = r'https://[a-z0-9-]+\\.trycloudflare\\.com' — correct, matches cloudflared quick-tunnel URL format. Reads last 64KB of log (good: bounded memory, picks most recent URL via matches[-1]).",
+    "server.py:tunnel_watcher_loop — uses last_seen guard so it only notifies on URL change; await asyncio.sleep(15); broad except prevents loop death. Solid.",
+    "server.py:_maybe_notify_tunnel_url_change — dead code: 'if last_seen is not None: pass' has no effect (still always notifies). Comment says 'always notify on change (including first detection after restart)' — fine, but the if/pass is misleading dead code; remove for clarity.",
+    "server.py:GET /tunnel/status — admin-only, excludes _id from mongodb projection ({'_id':0}). Good.",
+    "server.py:POST /tunnel/refresh — does NOT trigger _maybe_notify_tunnel_url_change. Means a manual refresh that picks up a NEW url updates the DB but the watcher loop will then re-detect the same URL on next 15s tick and notify (because last_seen in the loop is independent from the DB). Acceptable but means manual refresh + watcher creates a 0-15s delay before email/WA fires. Consider invoking notify directly from refresh endpoint when url changes.",
+    "SettingsPage.js — TDZ pattern (now fixed) is recurring; recommend extracting bootstrap fetches into a useSettingsBootstrap() custom hook to make declaration order impossible to break.",
+    "frontend/setupProxy.js — correct conditional bypass; only kicks in when REACT_APP_BACKEND_URL is empty. Won't affect Emergent preview. Good.",
+    "package.json — 'proxy' field correctly REMOVED. Confirmed login + all 7 settings tabs work on Emergent preview after this revert.",
+    "windows-setup/1_INSTALL.bat / 2_START_RestoPOS.vbs / STOP_RESTOPOS.bat — not testable in this dev preview (no Windows runner) but spec is internally consistent."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/SettingsPage.js (moved fetchTunnelStatus useCallback above bootstrap useEffect; removed duplicate declaration further down)",
+    "/app/backend/tests/test_iter7_tunnel.py (NEW — 6 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% on iter7 (6/6 tunnel tests)",
+    "frontend": "100% on tested flows after the SettingsPage TDZ fix"
+  },
+  "test_credentials": "admin@restaurant.com / admin123",
+  "seed_data_creation": "None. Cleanup performed: rm /app/cloudflared.log; db.tunnel.delete_many({}); settings tunnel_notify_on_change reset to true and tunnel_log_path reset to ''.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_iter7_tunnel.py -v` (~34s — includes a 30s wait for watcher loop). Critical frontend selectors: tab-remote, tunnel-refresh-btn, tunnel-notify-toggle (Checkbox inside label), tunnel-url (code element, only present when url exists), tunnel-copy-btn, tunnel-open-btn. To test the full flow manually: write `echo 'INF | https://x.trycloudflare.com |' > /app/cloudflared.log` then either click tunnel-refresh-btn or wait 15s for watcher. The TDZ fix mirrors iter6's — main agent must keep the discipline of declaring useCallbacks BEFORE any useEffect that depends on them.",
+  "rca of the issue": "TDZ Bug RCA (iter7) — SettingsPage.js had useEffect at line 273 with fetchTunnelStatus in its dep array, but fetchTunnelStatus was declared via useCallback at line 338. Even though the useEffect callback runs after render, React reads the dependency array eagerly when reaching the line, hitting the temporal dead zone. Reproduction: open /settings as admin → red 'Uncaught runtime errors: Cannot access fetchTunnelStatus before initialization' overlay. Fix applied: physically moved the fetchTunnelStatus useCallback to immediately after fetchWaStatus useCallback (i.e., BEFORE the bootstrap useEffect on line 273), and removed the now-duplicate declaration in the Tunnel helpers block. Long-term mitigation: extract a useSettingsBootstrap() custom hook OR enforce eslint rule that all useCallbacks/useMemos appear before any useEffect that uses them."
+}

@@ -1,0 +1,49 @@
+{
+  "summary": "V2 iteration 1 backend testing — ALL 15/15 tests PASS. Verified: (1) /api/customer/google with invalid credential returns 401 'Invalid Google login' (not 500/404). (2) /api/customer/facebook with invalid access_token returns 401 'Facebook token is not valid'. (3) POST /api/offers accepts min_order_amount and echoes it; GET /api/offers?active_only=false includes it. (4) Coupon MIN1500 (min_order_amount=1550) rejects orders with total<1550 (400) and accepts when total>=min. (5) Reward stacking — coupon + reward whose reward_type=discount_fixed returns 400 with message mentioning coupon + Diamond/discount cannot be combined (server.py line ~2524). (6) GET /api/admin/reviews?status=all no longer crashes on feedback rows where order_id=None — returns array with is_feedback=true and order_id=''. (7) GET /api/track/{id} exposes prep_time_min (default 30), response_deadline_seconds (0..120 for pending), accepted_at, delivery_fee_overridden. (8) PUT /api/online-orders/{id}/operations updates prep_time_min=45 (reflected in /track), free_delivery=true sets delivery_fee=0 + overridden=true, delivery_fee_override=200 sets delivery_fee=200; returns 400 on delivered orders. (9) Happy paths: admin login, online order create -> accept -> track, create -> reject(out_of_stock) -> track all green.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tests_executed": [
+    {"name": "TestSocialLoginInvalid::test_google_invalid_token_returns_401", "result": "PASS"},
+    {"name": "TestSocialLoginInvalid::test_facebook_invalid_token_returns_401", "result": "PASS"},
+    {"name": "TestOffersMinOrderAmount::test_create_offer_echoes_min_order_amount", "result": "PASS"},
+    {"name": "TestCouponMinOrderEnforcement::test_below_min_rejected_400", "result": "PASS"},
+    {"name": "TestCouponMinOrderEnforcement::test_above_min_accepted", "result": "PASS"},
+    {"name": "TestRewardStacking::test_coupon_plus_discount_reward_rejected_400", "result": "PASS", "details": "End-to-end: registered TEST_stack_* customer, granted 5000 diamonds via /api/admin/loyalty/adjust, created discount_fixed reward of 50/100 diamonds, created stackable coupon (no min). Posting order with both coupon_code and reward_id returned 400 with the exact stacking-violation message."},
+    {"name": "TestAdminReviewsNoCrash::test_feedback_then_get_admin_reviews", "result": "PASS"},
+    {"name": "TestPublicTrackV2Fields::test_track_exposes_v2_fields", "result": "PASS"},
+    {"name": "TestOrderOperations::test_prep_time_update (45 min reflected in /track)", "result": "PASS"},
+    {"name": "TestOrderOperations::test_free_delivery", "result": "PASS"},
+    {"name": "TestOrderOperations::test_delivery_fee_override (=200)", "result": "PASS"},
+    {"name": "TestOrderOperations::test_operations_blocked_on_delivered_order (400)", "result": "PASS"},
+    {"name": "TestHappyPathRegressions::test_admin_login", "result": "PASS"},
+    {"name": "TestHappyPathRegressions::test_create_accept_track", "result": "PASS"},
+    {"name": "TestHappyPathRegressions::test_create_reject_with_reason (out_of_stock)", "result": "PASS"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration6_v2.py",
+    "/app/test_reports/pytest/iteration6_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Social login error paths are clean — invalid Google credential -> 401 via try/except around g_id_token.verify_oauth2_token (server.py ~2247-2252); invalid Facebook token -> 401 either via debug_token RequestError or explicit is_valid=false check (server.py ~2280-2289). No 500s slipped through. Good.",
+    "min_order_amount round-trip on offers is correctly stored as float (server.py 2083, 3216) and enforced before discount calc in create_online_order (server.py 2476-2478). Error message mentions the coupon code which is good for UX.",
+    "Reward stacking rule at server.py line 2523-2524 raises HTTPException(400) only for reward_type in ('discount_percent','discount_fixed') AND coupon_used set — confirmed via live test. Free-item rewards still stack with coupons (path skipped at line 2530), matching the spec.",
+    "/api/admin/reviews now guards ObjectId(None) (server.py 4192-4197) — defensive try/except + falsy check on oid. Output normalises order_id to '' for feedback rows, is_feedback=True surfaced. Good fix.",
+    "update_order_operations: 'delivered/cancelled/rejected' terminal-state guard at line 2925-2926 returns 400 with a sensible 'Cannot modify a {status} order' detail. Total is correctly recomputed when delivery_fee is overridden (subtotal - discount - reward_discount + new_fee). prep_time_min bounds 1..240 enforced.",
+    "response_deadline_seconds is a per-request derived value (server.py 4124-4138) using ORDER_RESPONSE_WINDOW_SEC env (default 120s); returns 0 for non-pending orders. Clean.",
+    "Minor: /api/offers returns 200 (not 201) on POST — inconsistent with REST convention but matches existing pattern across the codebase; not worth changing."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration6_v2.py (new, 15 tests, ~280 lines)"
+  ],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "not tested (skipped per request)"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123. Customer fixtures: TEST_stack_<uuid>@x.com registered on the fly. Diamonds granted via /api/admin/loyalty/adjust. Coupons: pre-seeded MIN1500 (reused), TESTMIN<rand>, TESTSTK<rand>.",
+  "seed_data_creation": "Session fixture forces 24/7 schedule (weekly_schedule dict keyed by day) and restores 10:00-23:00 on teardown. Tests create TEST_-prefixed offers, rewards, customers, feedback rows. No teardown deletes — left in place for next iteration's reuse (volume is tiny).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 6 added test_iteration6_v2.py covering all V2 backend changes. Note: /api/admin/online-settings expects weekly_schedule as a DICT (keyed by mon..sun), NOT a list — previous iterations sometimes passed a list which would 422. The session-scope ensure_24_7 fixture in this file is reusable. Social login endpoints cannot be tested with real tokens here (no Google/FB token issuer in the test env); we only verified the negative path. For the positive path, a manual UI test or a mocked g_id_token.verify_oauth2_token is needed. Frontend testing of social login UI, reward chip, response countdown, AdminOrders operations panel is pending per the request.",
+  "rca of the issue": "n/a — all V2 endpoints behaved as specified. The earlier admin-reviews 500 (when order_id=None) is now fixed (verified). The coupon+reward stacking error path raises before any DB mutation, so no orphan reward or partial diamond deduction is possible."
+}

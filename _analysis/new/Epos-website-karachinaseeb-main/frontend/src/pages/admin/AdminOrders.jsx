@@ -1,0 +1,527 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+import api, { formatApiError, API } from "../../lib/api";
+import {
+    Printer, RefreshCw, Image as ImageIcon, BellRing, BellOff, CheckCircle2,
+    XCircle, Pencil, Plus, Minus, Trash2, PhoneCall, Volume2, VolumeX,
+} from "lucide-react";
+import { toast } from "sonner";
+import ThermalReceipt from "../../components/ThermalReceipt";
+
+// Statuses surfaced as filter chips. We keep all legacy statuses so existing POS flows still work.
+const STATUSES = ["pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "rejected", "cancelled"];
+
+const REJECT_REASONS = [
+    { value: "out_of_stock", label: "Out of stock" },
+    { value: "closed", label: "Kitchen closed" },
+    { value: "other", label: "Other" },
+];
+
+const POLL_MS = 4000; // 4-second polling per requirement (3-5s)
+const ALERT_AUDIO_SRC = "/order-alert.wav";
+
+export default function AdminOrders() {
+    const [orders, setOrders] = useState([]);
+    const [filter, setFilter] = useState("all");
+    const [loading, setLoading] = useState(true);
+    const [printOrder, setPrintOrder] = useState(null);
+    const [rejectFor, setRejectFor] = useState(null);
+    const [modifyFor, setModifyFor] = useState(null);
+    const [busyId, setBusyId] = useState(null);
+    const [muted, setMuted] = useState(false);
+    const [audioBlocked, setAudioBlocked] = useState(false);
+
+    const audioRef = useRef(null);
+    const lastPendingIdRef = useRef(null);
+    const pendingCountRef = useRef(0);
+
+    const load = useCallback(async () => {
+        try {
+            const { data } = await api.get("/online-orders", { params: { status: filter } });
+            setOrders(data);
+        } catch (err) {
+            toast.error("Failed to load orders");
+        } finally {
+            setLoading(false);
+        }
+    }, [filter]);
+
+    useEffect(() => { setLoading(true); load(); }, [load]);
+
+    // Continuous polling (every 4s) for both order list AND pending count alert.
+    useEffect(() => {
+        const tick = async () => {
+            try {
+                const { data } = await api.get("/online-orders/pending-count");
+                const count = data.pending_count || 0;
+                pendingCountRef.current = count;
+                // Trigger refresh whenever the latest pending changes (new order arrived) OR every tick.
+                if (data.latest_id && data.latest_id !== lastPendingIdRef.current) {
+                    lastPendingIdRef.current = data.latest_id;
+                    load();
+                } else {
+                    load();
+                }
+                manageAlertSound(count);
+            } catch (e) { /* silent — keep polling */ }
+        };
+        const t = setInterval(tick, POLL_MS);
+        return () => clearInterval(t);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [muted]);
+
+    const manageAlertSound = (count) => {
+        const el = audioRef.current;
+        if (!el) return;
+        if (count > 0 && !muted) {
+            if (el.paused) {
+                el.currentTime = 0;
+                const p = el.play();
+                if (p && typeof p.then === "function") {
+                    p.then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+                }
+            }
+        } else {
+            if (!el.paused) {
+                el.pause();
+                el.currentTime = 0;
+            }
+        }
+    };
+
+    const enableAudio = () => {
+        const el = audioRef.current;
+        if (!el) return;
+        el.muted = false;
+        el.play().then(() => { setAudioBlocked(false); el.pause(); }).catch(() => {});
+        manageAlertSound(pendingCountRef.current);
+    };
+
+    // Accept / Reject / Modify action handlers
+    const acceptOrder = async (id) => {
+        setBusyId(id);
+        try {
+            await api.post(`/online-orders/${id}/accept`);
+            toast.success("Order accepted — customer notified");
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        } finally { setBusyId(null); }
+    };
+
+    const submitReject = async (id, reason) => {
+        setBusyId(id);
+        try {
+            await api.post(`/online-orders/${id}/reject`, { reason });
+            toast.success("Order rejected — customer notified");
+            setRejectFor(null);
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        } finally { setBusyId(null); }
+    };
+
+    const updateStatus = async (id, status) => {
+        try {
+            await api.put(`/online-orders/${id}/status`, { status });
+            toast.success("Status updated");
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        }
+    };
+
+    const verifyPayment = async (id) => {
+        try {
+            await api.put(`/online-orders/${id}/payment-status`, { payment_status: "paid" });
+            toast.success("Payment verified");
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        }
+    };
+
+    const viewScreenshot = async (path) => {
+        try {
+            const token = localStorage.getItem("knb_admin_token");
+            const resp = await fetch(`${API}/files/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+            if (!resp.ok) throw new Error("Failed");
+            const blob = await resp.blob();
+            window.open(URL.createObjectURL(blob), "_blank");
+        } catch (err) {
+            toast.error("Could not load screenshot");
+        }
+    };
+
+    const handlePrint = async (order) => {
+        setPrintOrder(order);
+        setTimeout(() => {
+            window.print();
+            api.put(`/online-orders/${order.id}/printed`).catch(() => { });
+            setTimeout(() => setPrintOrder(null), 500);
+        }, 300);
+    };
+
+    const pendingTotal = orders.filter((o) => o.status === "pending").length;
+
+    return (
+        <div data-testid="admin-orders-page">
+            {/* Looping ringing audio (managed by manageAlertSound) */}
+            <audio ref={audioRef} src={ALERT_AUDIO_SRC} loop preload="auto" data-testid="order-alert-audio" />
+
+            <div className="flex items-end justify-between flex-wrap gap-3 mb-6">
+                <div>
+                    <h1 className="font-display font-black text-3xl md:text-4xl text-brand-ink">Online Orders</h1>
+                    <p className="text-neutral-500 mt-1">Manage incoming customer orders · auto-refreshes every {POLL_MS / 1000}s</p>
+                </div>
+                <div className="flex items-center gap-2">
+                    {pendingTotal > 0 && !muted && (
+                        <span data-testid="ringing-indicator" className="inline-flex items-center gap-2 bg-brand-red text-white rounded-full px-3 py-2 text-xs font-semibold animate-pulse">
+                            <BellRing className="w-4 h-4" /> {pendingTotal} new order{pendingTotal > 1 ? "s" : ""} — awaiting action
+                        </span>
+                    )}
+                    <button
+                        onClick={() => setMuted((m) => !m)}
+                        data-testid="toggle-mute-btn"
+                        className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors ${muted ? "bg-neutral-200 text-neutral-700 hover:bg-neutral-300" : "bg-brand-ink text-white hover:bg-brand-red"}`}
+                    >
+                        {muted ? <><VolumeX className="w-4 h-4" /> Unmute</> : <><Volume2 className="w-4 h-4" /> Mute</>}
+                    </button>
+                    <button onClick={load} data-testid="orders-refresh" className="inline-flex items-center gap-2 bg-white border border-neutral-200 rounded-full px-4 py-2 text-sm font-semibold hover:bg-neutral-100">
+                        <RefreshCw className="w-4 h-4" /> Refresh
+                    </button>
+                </div>
+            </div>
+
+            {audioBlocked && pendingTotal > 0 && (
+                <button onClick={enableAudio} data-testid="enable-audio-banner" className="w-full mb-4 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-4 py-3 text-sm font-semibold flex items-center justify-between hover:bg-amber-100">
+                    <span className="flex items-center gap-2"><BellOff className="w-4 h-4" /> Browser blocked the alert sound. Click to enable.</span>
+                    <span className="text-xs underline">Tap to allow</span>
+                </button>
+            )}
+
+            <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-3 mb-5 -mx-1 px-1">
+                {["all", ...STATUSES].map((s) => (
+                    <button key={s} onClick={() => setFilter(s)} data-testid={`orders-filter-${s}`}
+                        className={`whitespace-nowrap px-4 py-2 rounded-full text-xs font-semibold uppercase tracking-wider transition-colors ${filter === s ? "bg-brand-red text-white" : "bg-white border border-neutral-200 text-brand-ink hover:bg-neutral-100"}`}>
+                        {s.replace(/_/g, " ")}
+                    </button>
+                ))}
+            </div>
+
+            {loading && orders.length === 0 ? (
+                <div className="text-center py-16 text-neutral-400">Loading...</div>
+            ) : orders.length === 0 ? (
+                <div className="bg-white border border-neutral-200 rounded-2xl p-10 text-center text-neutral-500" data-testid="orders-empty">No orders match this filter.</div>
+            ) : (
+                <div className="space-y-3">
+                    {orders.map((o) => (
+                        <OrderCard
+                            key={o.id} o={o}
+                            busyId={busyId}
+                            onAccept={() => acceptOrder(o.id)}
+                            onReject={() => setRejectFor(o)}
+                            onModify={() => setModifyFor(o)}
+                            onUpdateStatus={(s) => updateStatus(o.id, s)}
+                            onVerifyPayment={() => verifyPayment(o.id)}
+                            onViewScreenshot={viewScreenshot}
+                            onPrint={() => handlePrint(o)}
+                        />
+                    ))}
+                </div>
+            )}
+
+            {printOrder && <ThermalReceipt order={printOrder} />}
+
+            {rejectFor && (
+                <RejectModal
+                    order={rejectFor}
+                    busy={busyId === rejectFor.id}
+                    onClose={() => setRejectFor(null)}
+                    onConfirm={(reason) => submitReject(rejectFor.id, reason)}
+                />
+            )}
+            {modifyFor && (
+                <ModifyModal
+                    order={modifyFor}
+                    onClose={() => { setModifyFor(null); load(); }}
+                    onConfirmed={() => { setModifyFor(null); load(); }}
+                />
+            )}
+        </div>
+    );
+}
+
+function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, onVerifyPayment, onViewScreenshot, onPrint }) {
+    const isPending = o.status === "pending";
+    const isRejected = o.status === "rejected";
+    const isAccepted = o.status === "accepted";
+    const isModifiedAwaiting = o.modified && o.modification_pending;
+    const ringClass = isPending ? "ring-2 ring-brand-red ring-offset-2 animate-pulse-ring" : "";
+    const bgClass = isPending ? "bg-red-50/60 border-brand-red/40" : isRejected ? "bg-neutral-50 border-neutral-200 opacity-70" : "bg-white border-neutral-200";
+
+    return (
+        <div data-testid={`admin-order-${o.id}`} className={`border rounded-2xl p-5 transition-all ${bgClass} ${ringClass}`}>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                    <div className="text-xs text-neutral-500 uppercase font-semibold tracking-wider">Order</div>
+                    <div className="font-display font-bold text-lg flex items-center gap-2">
+                        #{o.receipt_no}
+                        {isPending && <span className="text-[10px] uppercase font-bold bg-brand-red text-white px-2 py-0.5 rounded-full animate-pulse">NEW</span>}
+                        {o.modified && <span className="text-[10px] uppercase font-bold bg-amber-500 text-white px-2 py-0.5 rounded-full">Modified</span>}
+                    </div>
+                    <div className="text-xs text-neutral-500 mt-1">{new Date(o.created_at).toLocaleString()}</div>
+                </div>
+                <div className="md:col-span-2">
+                    <div className="text-xs text-neutral-500 uppercase font-semibold tracking-wider">Customer</div>
+                    <div className="font-semibold">{o.customer_name}</div>
+                    <div className="text-sm text-neutral-600">
+                        <a href={`tel:${o.phone}`} className="hover:text-brand-red inline-flex items-center gap-1"><PhoneCall className="w-3.5 h-3.5" />{o.phone}</a>
+                    </div>
+                    <div className="text-xs text-neutral-500 mt-1 line-clamp-2">{o.address}</div>
+                </div>
+                <div className="text-right md:text-left">
+                    <div className="text-xs text-neutral-500 uppercase font-semibold tracking-wider">Total</div>
+                    <div className="font-display font-black text-2xl text-brand-red">Rs. {o.total_price?.toFixed(0)}</div>
+                    <div className="text-xs text-neutral-500 uppercase">{o.payment_method?.toUpperCase()}</div>
+                    <PaymentBadge status={o.payment_status} />
+                </div>
+            </div>
+
+            <ul className="mt-3 pt-3 border-t border-neutral-100 text-sm space-y-1">
+                {o.items.map((it, idx) => (
+                    <li key={idx} className="flex justify-between text-neutral-700">
+                        <span>{it.quantity}× {it.name}</span>
+                        <span>Rs. {(it.price * it.quantity).toFixed(0)}</span>
+                    </li>
+                ))}
+            </ul>
+
+            {o.notes && <div className="mt-2 text-xs bg-yellow-50 text-yellow-800 p-2 rounded">📝 {o.notes}</div>}
+            {isRejected && o.rejection_reason && (
+                <div data-testid={`order-rejection-${o.id}`} className="mt-2 text-xs bg-red-50 border border-red-200 text-red-800 p-2 rounded">
+                    <strong>Rejected:</strong> {humanReason(o.rejection_reason)}
+                </div>
+            )}
+            {isModifiedAwaiting && (
+                <div className="mt-2 text-xs bg-amber-50 border border-amber-300 text-amber-900 p-2 rounded">
+                    📞 Items were edited. <strong>Phone the customer</strong>, then click <strong>Confirm Modified</strong> in the edit panel.
+                </div>
+            )}
+
+            {/* Action row */}
+            <div className="mt-4 flex flex-wrap gap-2 items-center">
+                {isPending && (
+                    <>
+                        <button
+                            onClick={onAccept}
+                            disabled={busyId === o.id}
+                            data-testid={`order-accept-${o.id}`}
+                            className="inline-flex items-center gap-2 bg-green-600 text-white rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-green-700 transition-colors disabled:opacity-60"
+                        >
+                            <CheckCircle2 className="w-4 h-4" /> Accept Order
+                        </button>
+                        <button
+                            onClick={onReject}
+                            disabled={busyId === o.id}
+                            data-testid={`order-reject-${o.id}`}
+                            className="inline-flex items-center gap-2 bg-red-600 text-white rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-red-700 transition-colors disabled:opacity-60"
+                        >
+                            <XCircle className="w-4 h-4" /> Reject Order
+                        </button>
+                        <button
+                            onClick={onModify}
+                            disabled={busyId === o.id}
+                            data-testid={`order-modify-${o.id}`}
+                            className="inline-flex items-center gap-2 bg-amber-500 text-white rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-amber-600 transition-colors disabled:opacity-60"
+                        >
+                            <Pencil className="w-4 h-4" /> Modify Order
+                        </button>
+                    </>
+                )}
+
+                {!isPending && !isRejected && (
+                    <select value={o.status} onChange={(e) => onUpdateStatus(e.target.value)} data-testid={`order-status-${o.id}`}
+                        className="bg-neutral-50 border border-neutral-200 rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-wider outline-none focus:border-brand-red">
+                        {STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
+                    </select>
+                )}
+
+                {isAccepted && o.modified && !o.modification_pending && (
+                    <button onClick={onModify} data-testid={`order-edit-again-${o.id}`} className="inline-flex items-center gap-2 bg-white border border-amber-300 text-amber-700 rounded-full px-4 py-2 text-xs font-semibold hover:bg-amber-50">
+                        <Pencil className="w-3.5 h-3.5" /> Edit again
+                    </button>
+                )}
+
+                {o.payment_status === "pending_verification" && (
+                    <button onClick={onVerifyPayment} data-testid={`order-verify-payment-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-green-600 text-white rounded-full px-4 py-2 text-xs font-semibold hover:bg-green-700 transition-colors">
+                        ✓ Verify Payment
+                    </button>
+                )}
+                {o.payment_reference && (
+                    <span className="text-[11px] text-neutral-600 bg-yellow-50 border border-yellow-200 rounded-full px-3 py-1">
+                        Ref: <span className="font-mono font-semibold">{o.payment_reference}</span>
+                    </span>
+                )}
+                {o.payment_screenshot_path && (
+                    <button onClick={() => onViewScreenshot(o.payment_screenshot_path)} data-testid={`order-view-screenshot-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-4 py-2 text-xs font-semibold hover:bg-blue-100 transition-colors">
+                        <ImageIcon className="w-3.5 h-3.5" /> View Receipt
+                    </button>
+                )}
+                <button onClick={onPrint} data-testid={`order-print-${o.id}`}
+                    className="inline-flex items-center gap-2 bg-brand-ink text-white rounded-full px-4 py-2 text-xs font-semibold hover:bg-brand-red transition-colors">
+                    <Printer className="w-3.5 h-3.5" /> Print Invoice
+                </button>
+                {o.printed && <span className="text-xs text-green-700 bg-green-50 rounded-full px-3 py-1 font-semibold">✓ Printed</span>}
+            </div>
+        </div>
+    );
+}
+
+function humanReason(r) {
+    return ({ out_of_stock: "Out of stock", closed: "Kitchen closed", other: "Other" })[r] || r;
+}
+
+function RejectModal({ order, busy, onClose, onConfirm }) {
+    const [reason, setReason] = useState("out_of_stock");
+    const [note, setNote] = useState("");
+    const submit = () => {
+        const final = reason === "other" && note.trim() ? note.trim() : reason;
+        onConfirm(final);
+    };
+    return (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose} data-testid="reject-modal">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+                <h2 className="font-display font-black text-2xl text-brand-ink mb-1">Reject Order #{order.receipt_no}</h2>
+                <p className="text-sm text-neutral-500 mb-4">The customer will be notified via WhatsApp with the reason below.</p>
+                <div className="space-y-2">
+                    {REJECT_REASONS.map((r) => (
+                        <label key={r.value} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${reason === r.value ? "border-brand-red bg-red-50" : "border-neutral-200"}`}>
+                            <input type="radio" name="reason" value={r.value} checked={reason === r.value} onChange={(e) => setReason(e.target.value)} data-testid={`reject-reason-${r.value}`} />
+                            <span className="font-semibold text-sm">{r.label}</span>
+                        </label>
+                    ))}
+                </div>
+                {reason === "other" && (
+                    <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add a short note (optional)…" data-testid="reject-other-note"
+                        className="mt-3 w-full border border-neutral-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-red" rows={2} />
+                )}
+                <div className="mt-5 flex justify-end gap-2">
+                    <button onClick={onClose} className="px-4 py-2 rounded-full text-sm font-semibold bg-neutral-100 hover:bg-neutral-200" data-testid="reject-cancel">Cancel</button>
+                    <button onClick={submit} disabled={busy} data-testid="reject-confirm" className="px-5 py-2 rounded-full text-sm font-bold uppercase tracking-wider bg-red-600 text-white hover:bg-red-700 disabled:opacity-60">
+                        {busy ? "Rejecting…" : "Reject & Notify"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ModifyModal({ order, onClose, onConfirmed }) {
+    const [items, setItems] = useState(order.items.map((it) => ({ ...it })));
+    const [savingDraft, setSavingDraft] = useState(false);
+    const [confirming, setConfirming] = useState(false);
+    const [hasSavedDraft, setHasSavedDraft] = useState(Boolean(order.modified && order.modification_pending));
+
+    const subtotal = items.reduce((s, it) => s + (Number(it.price) || 0) * (Number(it.quantity) || 0), 0);
+    const total = Math.max(0, subtotal - (order.discount_amount || 0)) + (order.delivery_fee || 0);
+
+    const setQty = (idx, q) => setItems((arr) => arr.map((x, i) => i === idx ? { ...x, quantity: Math.max(0, q) } : x));
+    const setPrice = (idx, p) => setItems((arr) => arr.map((x, i) => i === idx ? { ...x, price: Math.max(0, Number(p) || 0) } : x));
+    const removeItem = (idx) => setItems((arr) => arr.filter((_, i) => i !== idx));
+
+    const saveDraft = async () => {
+        if (!items.length || !items.some((it) => it.quantity > 0)) {
+            toast.error("At least one item must remain");
+            return;
+        }
+        setSavingDraft(true);
+        try {
+            const payload = {
+                items: items.filter((it) => it.quantity > 0).map((it) => ({
+                    item_id: it.item_id || "", name: it.name, price: Number(it.price), quantity: Number(it.quantity),
+                })),
+            };
+            await api.put(`/online-orders/${order.id}/modify`, payload);
+            toast.success("Changes saved. Now phone the customer to confirm.");
+            setHasSavedDraft(true);
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        } finally { setSavingDraft(false); }
+    };
+
+    const confirmModified = async () => {
+        setConfirming(true);
+        try {
+            await api.post(`/online-orders/${order.id}/confirm-modified`);
+            toast.success("Modified order confirmed — customer notified");
+            onConfirmed();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        } finally { setConfirming(false); }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose} data-testid="modify-modal">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                <h2 className="font-display font-black text-2xl text-brand-ink mb-1">Modify Order #{order.receipt_no}</h2>
+                <p className="text-sm text-neutral-500 mb-4">
+                    Adjust quantities or prices, or remove items. After saving, <strong>call the customer</strong> at <a className="text-brand-red font-bold" href={`tel:${order.phone}`}>{order.phone}</a> then click <strong>Confirm Modified Order</strong>.
+                </p>
+
+                <div className="space-y-2">
+                    {items.map((it, idx) => (
+                        <div key={idx} className="flex items-center gap-2 p-3 rounded-xl border border-neutral-200" data-testid={`modify-item-${idx}`}>
+                            <div className="flex-1 min-w-0">
+                                <div className="font-semibold text-sm truncate">{it.name}</div>
+                                <div className="text-[11px] text-neutral-500">Line: Rs. {(Number(it.price) * Number(it.quantity)).toFixed(0)}</div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <button onClick={() => setQty(idx, Number(it.quantity) - 1)} className="w-7 h-7 rounded-full bg-neutral-100 hover:bg-neutral-200 inline-flex items-center justify-center" data-testid={`modify-qty-dec-${idx}`}><Minus className="w-3.5 h-3.5" /></button>
+                                <input type="number" min="0" value={it.quantity} onChange={(e) => setQty(idx, Number(e.target.value))} className="w-12 text-center border border-neutral-200 rounded px-1 py-0.5 text-sm" data-testid={`modify-qty-input-${idx}`} />
+                                <button onClick={() => setQty(idx, Number(it.quantity) + 1)} className="w-7 h-7 rounded-full bg-neutral-100 hover:bg-neutral-200 inline-flex items-center justify-center" data-testid={`modify-qty-inc-${idx}`}><Plus className="w-3.5 h-3.5" /></button>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <span className="text-xs text-neutral-500">Rs.</span>
+                                <input type="number" min="0" step="1" value={it.price} onChange={(e) => setPrice(idx, e.target.value)} className="w-20 border border-neutral-200 rounded px-2 py-1 text-sm" data-testid={`modify-price-input-${idx}`} />
+                            </div>
+                            <button onClick={() => removeItem(idx)} className="w-8 h-8 rounded-full bg-red-50 text-red-600 hover:bg-red-100 inline-flex items-center justify-center" data-testid={`modify-remove-${idx}`}><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-4 pt-4 border-t border-neutral-100 text-sm space-y-1">
+                    <div className="flex justify-between text-neutral-600"><span>Subtotal</span><span data-testid="modify-subtotal">Rs. {subtotal.toFixed(0)}</span></div>
+                    {Number(order.discount_amount) > 0 && <div className="flex justify-between text-green-700"><span>Discount</span><span>− Rs. {Number(order.discount_amount).toFixed(0)}</span></div>}
+                    {Number(order.delivery_fee) > 0 && <div className="flex justify-between text-neutral-500"><span>Delivery</span><span>Rs. {Number(order.delivery_fee).toFixed(0)}</span></div>}
+                    <div className="flex justify-between text-lg pt-1"><span className="font-display font-bold">New Total</span><span className="font-display font-black text-brand-red" data-testid="modify-total">Rs. {total.toFixed(0)}</span></div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    <button onClick={onClose} className="px-4 py-2 rounded-full text-sm font-semibold bg-neutral-100 hover:bg-neutral-200" data-testid="modify-cancel">Cancel</button>
+                    <button onClick={saveDraft} disabled={savingDraft} data-testid="modify-save-draft" className="px-5 py-2 rounded-full text-sm font-bold uppercase tracking-wider bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-60 inline-flex items-center gap-2">
+                        <Pencil className="w-4 h-4" /> {savingDraft ? "Saving…" : "Save Changes"}
+                    </button>
+                    <button onClick={confirmModified} disabled={!hasSavedDraft || confirming} data-testid="modify-confirm" className="px-5 py-2 rounded-full text-sm font-bold uppercase tracking-wider bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 inline-flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4" /> {confirming ? "Confirming…" : "Confirm Modified Order"}
+                    </button>
+                </div>
+                {!hasSavedDraft && (
+                    <p className="mt-2 text-[11px] text-neutral-500 text-right">Save changes before confirming, then phone the customer at <a className="text-brand-red font-semibold" href={`tel:${order.phone}`}>{order.phone}</a>.</p>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function PaymentBadge({ status }) {
+    if (!status || status === "pending") return <div className="text-[10px] text-neutral-500 mt-1">Payment: Pending</div>;
+    const colors = {
+        paid: "bg-green-100 text-green-800",
+        pending_verification: "bg-yellow-100 text-yellow-800",
+        failed: "bg-red-100 text-red-800",
+        refunded: "bg-purple-100 text-purple-800",
+    };
+    return <span className={`mt-1 inline-block text-[10px] uppercase font-bold px-2 py-0.5 rounded ${colors[status] || "bg-neutral-100"}`}>{status.replace(/_/g, " ")}</span>;
+}

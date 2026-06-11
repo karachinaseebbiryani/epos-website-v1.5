@@ -1,0 +1,102 @@
+{
+  "theme": "light",
+  "archetype": "1 (Organic & Earthy)",
+  "design_philosophy": "A grounded, reliable, and clear interface for high-speed restaurant environments. Prioritizes legibility, warm inviting tones, and tactile feedback for cashiers.",
+  "colors": {
+    "background": "#F9F8F6",
+    "surface": "#FFFFFF",
+    "primary": "#1E3F20",
+    "primary_hover": "#173118",
+    "secondary": "#C05746",
+    "secondary_hover": "#A64A3C",
+    "accent": "#D97736",
+    "border": "#E5E2DC",
+    "text": {
+      "main": "#1A1D1A",
+      "muted": "#5C5F5C",
+      "inverse": "#FFFFFF"
+    },
+    "status": {
+      "success": "#2E5C31",
+      "success_bg": "#EAF4EB",
+      "warning": "#D97736",
+      "warning_bg": "#FDF2E9",
+      "danger": "#A63D31",
+      "danger_bg": "#FCECEB"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Manrope",
+      "body": "Work Sans",
+      "mono": "IBM Plex Mono"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl font-semibold",
+      "h4": "text-lg font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm",
+      "tiny": "text-xs tracking-wide uppercase"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Dense and compact for POS grid (Control Room grid), generous spacing for Admin Dashboard sections.",
+    "container_padding": "p-6 md:p-8",
+    "pos_grid": "grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "radius": "rounded-lg",
+    "borders": "border border-[#E5E2DC]"
+  },
+  "components": {
+    "pos_button": {
+      "base": "flex flex-col items-center justify-center p-3 h-24 rounded-lg border border-[#E5E2DC] bg-white transition-all shadow-sm",
+      "hover": "hover:-translate-y-0.5 hover:shadow-md hover:border-[#1E3F20]",
+      "active": "active:scale-95 active:bg-[#F9F8F6]"
+    },
+    "ticket_panel": {
+      "base": "bg-white border-l border-[#E5E2DC] h-full flex flex-col shadow-[0_0_40px_rgba(0,0,0,0.03)]"
+    },
+    "navigation": {
+      "base": "bg-[#1E3F20] text-white",
+      "item_active": "bg-[#2E5C31] text-white",
+      "item_inactive": "text-white/70 hover:text-white hover:bg-white/10"
+    },
+    "card": {
+      "base": "bg-white rounded-xl border border-[#E5E2DC] p-6 shadow-sm"
+    }
+  },
+  "motion": {
+    "hover": "transition-all duration-200 ease-in-out",
+    "click": "active:scale-[0.98] transition-transform duration-100",
+    "modal_enter": "animate-in fade-in zoom-in-95 duration-200"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "stroke-2"
+  },
+  "media": {
+    "images": [
+      {
+        "category": "login_background",
+        "url": "https://images.unsplash.com/photo-1618063881344-1a55711a3275?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwzfHxjYWZlJTIwcmVzdGF1cmFudCUyMGludGVyaW9yJTIwbG9naW4lMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NzEwNjE5Nnww&ixlib=rb-4.1.0&q=85",
+        "description": "Warm wooden cafe interior for the login screen background, set with a black/50 overlay for text contrast."
+      },
+      {
+        "category": "placeholder_food_item",
+        "url": "https://images.unsplash.com/photo-1769255119648-4c49674477b0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwxfHxkZWxpY2lvdXMlMjBmb29kJTIwaXNvbGF0ZWQlMjBwbGFpbiUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzc3MTA2MTk3fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Minimalist coffee cup image to be used as a placeholder for menu items if image URLs are missing."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "DATA STORAGE: The app MUST be fully offline. Use localStorage or IndexedDB (via localforage or standard APIs) to store: Users, Menu Categories, Menu Items, Inventory Stock, and Sales Tickets.",
+    "ROLES & AUTH: Implement simple mock login. 'Admin' sees full Dashboard (Inventory, Menu Management, Z-Report). 'Cashier' sees POS and X-Report only.",
+    "POS SCREEN (CASHIER): Create a fast, tap-friendly grid of menu items categorized by tabs. Right sidebar holds the active ticket with quantity controls, subtotal, tax, total, and 'Pay Cash' / 'Pay Credit' action buttons.",
+    "REPORTS: 'X Report' calculates daily sales up to the current moment without clearing data. 'Z Report' calculates end-of-day sales, and upon confirming, clears the active daily totals and archives the record.",
+    "INVENTORY: Menu items must have a 'stock' count and 'low_stock_threshold'. Alert (visual badge/toast) when an item falls below the threshold upon ordering.",
+    "TESTING: Add 'data-testid' to ALL interactive elements (buttons, inputs, tabs, list items) using kebab-case role-based names.",
+    "STYLING: Strictly adhere to the Organic & Earthy palette. Avoid generic Bootstrap/Vercel looks. Use generous padding for Admin screens, dense functional grids for POS."
+  ]
+}

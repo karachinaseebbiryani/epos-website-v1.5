@@ -1,0 +1,36 @@
+{
+  "summary": "Iter8 backend static-serve architecture verified. Backend now serves built React frontend at / with SPA fallback while preserving /api priority. All 9 new iter8 tests pass + 39/39 regression tests (iter5/6/7) pass. Emergent preview UI unaffected: login + /settings → Remote Access tab renders correctly with no TDZ regression and zero console errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter8_static_serve.py",
+    "/app/backend/tests/test_iter5_colors_email.py",
+    "/app/backend/tests/test_iter6_schedule_whatsapp.py",
+    "/app/backend/tests/test_iter7_tunnel.py",
+    "/app/test_reports/pytest/iter8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 1480 lines — exceeds 700-line guideline. Consider splitting into modules (auth, settings, tunnel, scheduler, static-serve) for maintainability. Not a blocker for iter8.",
+    "SPA fallback uses `if full_path.startswith('api/')` — defensive belt-and-braces since api_router takes priority anyway, and it correctly returns JSON 404 instead of index.html for unmatched /api/* paths. Good.",
+    "Static mount at `/static` is fine for CRA build output. Note: any future top-level `/static/*` API route would conflict — unlikely but worth a comment in code.",
+    "The static-serve block is wrapped in try/except which logs a warning instead of crashing if frontend/build is missing — correct behavior for dev environments without a build."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter8_static_serve.py (created)"
+  ],
+  "success_rate": {"backend": "100% (48/48)", "frontend": "100% (login + Remote Access tab verified)"},
+  "test_credentials": "admin@restaurant.com / admin123 (verified working on Emergent preview)",
+  "seed_data_creation": "None — used existing seeded admin",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter8 verified: GET / -> index.html (HTML); /static/js/main.327c38ec.js -> JS; /dashboard, /some/deep/route -> SPA fallback (HTML); /api/auth/login GET -> JSON 404 with detail='API route not found'; /api/nonexistent -> JSON 404; POST /api/auth/login (valid) -> 200 with token; (invalid) -> 401. Backend log confirms 'Serving built frontend from: /app/frontend/build'. Build artifacts at /app/frontend/build/static/js/main.327c38ec.js and /static/css/main.fbbc806d.css. Emergent preview routing (/ -> port 3000 dev frontend; /api -> port 8001 backend) is unaffected. Windows .vbs/.bat scripts not testable in linux container — verified by code inspection only as instructed.",
+  "rca_of_the_issue": "N/A — no bugs found. One initial test assertion (expected 405 on GET /api/auth/login) was incorrect: the SPA fallback explicitly raises HTTPException(404, 'API route not found') for any unmatched /api/* path, which is the correct behavior. The contract that matters (API NOT swallowed by SPA, returns JSON not HTML) is satisfied. Test was updated to assert 4xx + JSON content-type instead."
+}

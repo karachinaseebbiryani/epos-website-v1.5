@@ -1,0 +1,41 @@
+/* POS specific styles */
+.pos-item-btn {
+  transition: all 0.2s ease-in-out;
+}
+.pos-item-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(30, 63, 32, 0.12);
+}
+.pos-item-btn:active {
+  transform: scale(0.96);
+}
+
+/* Sidebar transition */
+.sidebar-item {
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+/* Ticket panel */
+.ticket-panel {
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.03);
+}
+
+/* Report card */
+.report-stat {
+  transition: transform 0.2s ease;
+}
+.report-stat:hover {
+  transform: translateY(-1px);
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: fadeIn 0.3s ease forwards;
+}
+.fade-in-delay-1 { animation-delay: 0.05s; }
+.fade-in-delay-2 { animation-delay: 0.1s; }
+.fade-in-delay-3 { animation-delay: 0.15s; }

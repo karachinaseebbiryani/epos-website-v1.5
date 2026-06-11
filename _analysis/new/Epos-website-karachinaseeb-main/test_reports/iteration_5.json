@@ -1,0 +1,51 @@
+{
+  "summary": "Iteration 5 (Public reviews + Restaurant info + Thermal receipt with QR codes) tested end-to-end. Backend: 17/17 pytest cases passed (public restaurant-info, GET /reviews/order/:id, POST /reviews/public/:id w/ rating validation + duplicate-prevention, regression for auth /reviews + Smart-Order-Alert + extended /track fields). Frontend: ReviewPage submission + already-reviewed-on-reload flow verified. OrderSuccessPage qr-find-us links to https://www.google.com/maps/search/?api=1&query=31.452,74.268 and qr-leave-review links to /review/:id with both QR SVGs rendered. AdminOrders Print Invoice mounts ThermalReceipt as a portal under document.body containing restaurant name, address, phone, Order #, Date, Customer, Phone, Subtotal, TOTAL, Thank-you footer, FIND US + RATE ORDER QR sections (2 SVGs). window.print invoked exactly once and receipt unmounts ~800ms later. @media print stylesheet correctly hides body siblings (3/4 non-receipt body children become display:none in print emulation). Smart-Order-Alert UI (audio, mute, filter chips, modify modal) still works.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Review submit with no rating", "issue": "Submit button is disabled when rating=0, so the 'Please select a rating' toast triggered inside submit() never actually fires because the click is a no-op. Functionally fine (user cannot submit invalid rating), but the toast guard is dead code.", "affected_selectors": ["[data-testid='review-submit']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_reviews.py",
+    "/app/test_reports/pytest/iter5_reviews.xml"
+  ],
+  "action_items": [
+    "(LOW) ReviewPage.jsx submit(): either remove the disabled={!rating} on the button OR remove the toast.error('Please select a rating') guard since they conflict (toast never shows because button is disabled).",
+    "(INFO) Consider adding the customer's order items + total inside the QR-leave-review block on OrderSuccessPage so the receipt context is visible there too — currently shown only on the success page (already present)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 3174 lines (up from 3079). Strongly recommend splitting routers (auth, menu, online_orders, online_orders_alerts, tracking, public, reviews, settings) — exceeds 700-line guideline.",
+    "GET /api/reviews/order/{id} uses ObjectId(...) inside try/except returning 404 for any invalid id — good pattern.",
+    "POST /api/reviews/public/{id} correctly limits comment to 500 chars and customer_name to 60 — good defensive truncation.",
+    "Public review duplicate check uses {order_id: order_id} only (no customer_id), correctly enforcing one-review-per-order regardless of who submits.",
+    "/api/public/restaurant-info has hardcoded fallback lat/lng (31.452, 74.268) — fine for now but should be moved into a seed/migration so it's discoverable.",
+    "ThermalReceipt is correctly mounted via createPortal(node, document.body) — print-stylesheet rule body>*:not(.receipt-print){display:none} works as intended.",
+    "AdminOrders.handlePrint hits PUT /online-orders/{id}/printed asynchronously without awaiting — fine; UI immediately updates on next poll.",
+    "ReviewPage.jsx: name initial value taken from order.customer_name — nice UX touch.",
+    "OrderSuccessPage falls back to maps.google.com if /api/public/restaurant-info fails — reasonable resilience."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_reviews.py (new file, 17 tests)",
+    "/app/test_reports/iteration_5.json (this report)",
+    "/app/test_reports/pytest/iter5_reviews.xml (junit xml)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "100% (all reviewed flows pass)"},
+  "test_credentials": "admin@restaurant.com / admin123",
+  "seed_data_creation": "Created TEST_ prefixed online orders during pytest setup (TEST_ReviewerOne, TEST_ReviewerTwo) and one frontend review-flow order id 69fc5fa1dd3ae0ceb9500a1d (TEST_FE_Customer) with a public review submitted by TEST_PW_Reviewer (rating 5).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All Iteration-5 features verified. Public review endpoint allows ONE review per order; second attempt returns 400 'already reviewed'. Restaurant info endpoint returns sane defaults if settings doc missing. ThermalReceipt is portaled under document.body — search by `[data-testid='thermal-receipt']` (NOT inside the AdminOrders root). Receipt is removed ~800ms after Print click (300ms + 500ms). Use /app/backend/tests/test_iteration5_reviews.py as the iter-5 regression suite. Login response uses key `token` (not `access_token`), and online-orders POST requires {item_id, name, price, quantity} per item plus a top-level total_price. Pending count endpoint returns {pending_count, latest_id, latest_at} — note key name.",
+  "verified_test_ids": [
+    "review-page", "review-stars", "review-star-1..5", "review-name", "review-comment", "review-submit", "review-thanks",
+    "order-success-page", "qr-find-us", "qr-leave-review", "success-track-order", "success-continue-shopping", "success-call-restaurant",
+    "thermal-receipt", "admin-orders-page", "order-alert-audio", "toggle-mute-btn", "orders-filter-pending",
+    "order-print-{id}", "order-modify-{id}", "modify-modal", "modify-cancel"
+  ],
+  "rca of the issue": "No bugs requiring RCA found in this iteration. The only finding is a minor logical redundancy in ReviewPage.jsx where toast.error('Please select a rating') is unreachable because the submit button is also disabled when rating=0. Either the disabled attribute or the toast guard should be removed for code clarity."
+}

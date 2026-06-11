@@ -1,0 +1,38 @@
+{
+  "summary": "iter9 backend testing completed: instance-bound JWT (force re-login on backend restart), expanded /api/data/export (now includes users + settings + _meta v2), and ObjectId-preserving /api/data/import (replace mode with referential integrity). All 9 iter9 tests pass. Full regression: 107/108 prior tests pass; the single failure (test_low_stock_endpoint expecting /api/inventory/low-stock 200) is pre-existing and unrelated to iter9 — that endpoint does not exist in server.py.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/inventory/low-stock", "issue": "Pre-existing: legacy test test_restaurant_pos.py::test_low_stock_endpoint expects this route to return 200, but no such route exists in server.py (low-stock data is exposed via /api/inventory and /api/dashboard/stats). Not introduced by iter9. Either remove the test or add an endpoint."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter9_instance_id_export_import.py",
+    "/app/test_reports/pytest/iter9_results.xml",
+    "/app/test_reports/pytest/iter9_full_results.xml"
+  ],
+  "action_items": [
+    "Optional cleanup: remove or fix the obsolete test_restaurant_pos.py::TestInventory::test_low_stock_endpoint that targets a non-existent /api/inventory/low-stock route (pre-existing, unrelated to iter9)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now ~1503 lines — well past the 700-line guideline. Suggest splitting into modules (auth.py, data_io.py, pos.py, scheduler.py, tunnel.py).",
+    "POST /api/data/import does NOT validate the shape of incoming docs (e.g., a malicious admin export could inject arbitrary fields). Acceptable since the route is admin-only and intended for restoring a prior export, but consider basic schema gating per collection.",
+    "GET /api/data/export returns password_hash for ALL users — by design for full backup/migration, and admin-only — but worth a doc note in the UI ('export contains hashed credentials, store securely').",
+    "INSTANCE_ID approach is simple and effective for force-relogin but means a planned backend restart logs out every active cashier mid-shift. Consider documenting this UX expectation, or adding a 'graceful upgrade' mode that persists INSTANCE_ID across hot restarts in production while still rotating on cold boot."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter9_instance_id_export_import.py (created)"
+  ],
+  "success_rate": {"backend": "100% on iter9 (9/9); 99% overall (107/108, the 1 failure pre-existing)", "frontend": "not tested (per request)"},
+  "test_credentials": "admin@restaurant.com / admin123 — verified working; /app/memory/test_credentials.md is intact",
+  "seed_data_creation": "No persistent seed created. Tests create one TEST_iter9_cat + TEST_iter9_item, then re-import the snapshot which wipes them. The bad-_id test inserts 2 vendors then restores the original vendors snapshot. DB left in pre-test state (verified by post-test admin login + categories/menu_items present).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter9 changes verified: (1) JWT 'iid' claim binds tokens to backend INSTANCE_ID; restart returns 401 'Session expired — please log in again' for stale tokens. (2) /api/data/export emits dict with _meta{exported_at, version:2}, users (with password_hash), settings, and 8 other domain collections. (3) /api/data/import is replace-mode (delete_many({}) per collection) and preserves _id by converting str→ObjectId; invalid _id strings (e.g., 'foo') drop _id silently and Mongo auto-assigns. Test file: /app/backend/tests/test_iter9_instance_id_export_import.py. Re-runnable; safe; cleans up after itself. The pre-existing test_low_stock_endpoint failure should be ignored or fixed by main agent — it is NOT an iter9 regression.",
+  "rca of the issue": "N/A — no iter9 bugs found. The unrelated test_low_stock_endpoint failure: legacy test references a route that was never implemented (or was removed); the live data is exposed via /api/inventory (with is_low_stock flag) and /api/dashboard/stats (low_stock_count). Mitigation: delete the obsolete test or add `@api_router.get('/inventory/low-stock')` returning items where stock<=low_stock_threshold."
+}

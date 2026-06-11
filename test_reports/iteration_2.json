@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 2 production-workflow improvements verified end-to-end. Backend: 45/45 pytest tests pass — 37/37 regression (test_merged_iteration.py: auth, categories, menu items, POS orders, inventory, vendors, expenses, refunds, X/Z reports, dashboard, settings, voice, public, customer auth, online orders, offers, reviews, event-bookings, auth guards) + 8/8 NEW iteration-2 tests (test_iteration2_outsourced.py: 19 admin permissions including the 6 new online_* perms; menu-items expose is_outsourced/outsourced_vendor_id/outsourced_unit_cost; outsourced order auto-creates vendor_transaction and surfaces in /api/vendors/{vid}/sales-summary as auto_billed_from_orders=210 with the product in products[]; refund auto-creates negative reversal with auto_reversed_from_refunds<=-70 and total_billed drops; non-outsourced items create no vendor transactions). Frontend: /admin/sign-in renders UnifiedLoginPage with default-filled admin@restaurant.com/admin123 + data-testid=unified-login-submit; /admin/login and /admin/staff-login both redirect to /admin/sign-in; after login BOTH staff_auth_token and knb_admin_token are set in localStorage; AdminLayout sidebar shows POS Operations FIRST (idx 31) then Online Store (idx 169) with 17 nav items rendered for admin; GlobalOrderAlert pill (data-testid=global-pending-pill) is visible on /admin/pos showing '1 pending' and is correctly HIDDEN on /admin/orders; POSPage sticky checkout — Cash button stays in viewport (y=964, h=36, vh=1080) after adding 8 cart items; ReceiptModal opens after POS order with print-receipt-btn + close-receipt-btn both visible at bottom of dialog; MenuManagement New Item dialog has data-testid=item-outsourced-checkbox; toggling reveals data-testid=item-outsourced-vendor-select and data-testid=item-outsourced-cost-input; AdminOrders auto-refresh — 6 calls to /api/online-orders/pending-count in ~9.5s confirms 4s polling; zero pageerrors across all flows.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "UnifiedLoginPage post-submit redirect", "issue": "After clicking unified-login-submit with valid admin creds, tokens are correctly stored in localStorage but the page URL did NOT auto-navigate to /admin/pos within 3s wait — it stayed on /admin/sign-in. Manual navigation to /admin/pos works fine because tokens are set. Likely pickLandingRoute() / navigate() race or missing trigger on success state. Low-impact since users can navigate manually and bookmarked redirects work.", "selector": "[data-testid='unified-login-submit']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2_outsourced.py",
+    "/app/backend/tests/test_merged_iteration.py",
+    "/app/test_reports/pytest/iter2_results.xml",
+    "/app/test_reports/pytest/iter2_regression.xml"
+  ],
+  "action_items": [
+    "Investigate UnifiedLoginPage post-submit redirect — tokens are set but page stays on /admin/sign-in instead of routing to /admin/pos. Verify pickLandingRoute() returns a valid path and navigate(path, {replace:true}) is called inside the success branch (not behind a guard that re-evaluates before tokens land in localStorage). Acceptance: after submit with admin creds, URL becomes /admin/pos within ~1s."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 3480 lines — still monolithic. Strongly recommend splitting into routers/ (auth, pos, orders_online, vendors_outsourced, reports, refunds, settings, public). Iteration 2 added more endpoints to an already heavy file.",
+    "Outsourced reversal in create_refund relies on ObjectId(mid) lookup; if the frontend sends item_id from a non-Mongo source (e.g., uuid) it silently swallows the exception (try/except: pass) and the vendor reversal is skipped without logging. Add structured logging on the failure path so missed reversals are visible.",
+    "vendor_sales_summary aggregates by_product but `quantity` is multiplied by sign(amount) which means a refund line subtracts qty correctly only if amount is non-zero. Edge case: a manual zero-total transaction would default to +1. Minor — production flow always has total>0.",
+    "Two parallel admin-auth tokens (staff_auth_token + knb_admin_token) are now BOTH set on login. Long-term this duplication should be consolidated to a single source of truth to avoid drift when one is cleared but not the other (e.g. logout).",
+    "GlobalOrderAlert polls /api/online-orders/pending-count every 4s on every admin page — combined with AdminOrders' own polling, the orders page makes ~2x requests/sec. Consider lifting the polling state up so AdminOrders subscribes to GlobalOrderAlert's data instead of duplicating fetches."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2_outsourced.py"
+  ],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "95% (one minor post-login redirect glitch; all 10 functional checks pass)"},
+  "test_credentials": "admin@restaurant.com / admin123 — works at /api/auth/login and /admin/sign-in (defaults are pre-filled in the unified login form).",
+  "seed_data_creation": "test_iteration2_outsourced.py creates and cleans up: 1 outsourced vendor + 1 outsourced menu item + 1 unused vendor (all TEST_-prefixed and deleted after class teardown). Creates 2 POS orders (one outsourced ×3, one regular ×1) and 1 refund — these persist in DB since /api/orders/refunds have no delete endpoint (already documented behavior from iter 1). Visible Rs ~1050 added to today totals.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two backend test suites now: /app/backend/tests/test_merged_iteration.py (37 regression tests) + /app/backend/tests/test_iteration2_outsourced.py (8 new tests for outsourced flow + 19 perms). Run both with: REACT_APP_BACKEND_URL=https://project-handoff-12.preview.emergentagent.com pytest backend/tests/test_merged_iteration.py backend/tests/test_iteration2_outsourced.py -v. data-testid attributes in place: unified-login-submit, global-pending-pill, print-receipt-btn, close-receipt-btn, item-outsourced-checkbox, item-outsourced-vendor-select, item-outsourced-cost-input. Iter-1 blank /admin/dashboard issue was NOT retested in this iteration since it's outside iter-2 scope; confirm with main agent if it was fixed.",
+  "rca of the issue": "Post-login redirect: After submitting unified-login form, both localStorage tokens (staff_auth_token + knb_admin_token) are set and the user object is stored, but the browser URL remains /admin/sign-in instead of routing to /admin/pos within 3s. Reproduction: 1) goto /admin/sign-in, 2) click [data-testid='unified-login-submit'] (defaults pre-filled), 3) wait 3s, 4) read window.location.pathname → '/admin/sign-in' (expected '/admin/pos'). However, manually navigating to /admin/pos afterwards works because tokens are present. Likely cause: in UnifiedLoginPage.jsx the success handler calls pickLandingRoute(user) and navigate(path), but either (a) navigate is called BEFORE setUser/state flush so the route guard in <StaffGate> doesn't see the new auth state and bounces back, or (b) pickLandingRoute returned undefined for the admin role so navigate('') is a no-op. Mitigation: add a small useEffect on user.permissions change that calls navigate(pickLandingRoute(user)) once both tokens are in localStorage; or use window.location.href = path as a hard redirect to bypass the guard race."
+}

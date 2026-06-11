@@ -1,0 +1,4531 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os, logging, bcrypt, jwt
+from pydantic import BaseModel, field_validator
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from bson import ObjectId
+import smtplib, ssl, asyncio
+from email.message import EmailMessage
+import httpx
+import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+app = FastAPI()
+api_router = APIRouter(prefix="/api")
+JWT_ALGORITHM = "HS256"
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Helpers ---
+import uuid as _uuid
+INSTANCE_ID = _uuid.uuid4().hex  # rotates on every backend restart → invalidates old JWTs
+
+def hash_password(p): return bcrypt.hashpw(p.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+def verify_password(p, h): return bcrypt.checkpw(p.encode("utf-8"), h.encode("utf-8"))
+def get_jwt_secret(): return os.environ["JWT_SECRET"]
+
+def create_access_token(uid, email, role):
+    return jwt.encode({"sub": uid, "email": email, "role": role, "exp": datetime.now(timezone.utc) + timedelta(hours=8), "type": "access", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+def create_refresh_token(uid):
+    return jwt.encode({"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+async def get_current_user(request: Request):
+    token = request.cookies.get("access_token")
+    if not token:
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "): token = ah[7:]
+    if not token: raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access": raise HTTPException(status_code=401, detail="Invalid token")
+        # Force re-login on backend restart: any token issued by a previous instance is invalid
+        if payload.get("iid") != INSTANCE_ID:
+            raise HTTPException(status_code=401, detail="Session expired — please log in again")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user: raise HTTPException(status_code=401, detail="User not found")
+        user["_id"] = str(user["_id"])
+        user.pop("password_hash", None)
+        return user
+    except jwt.ExpiredSignatureError: raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError: raise HTTPException(status_code=401, detail="Invalid token")
+
+ALL_PERMISSIONS = [
+    # POS Operations (legacy)
+    "dashboard", "pos", "menu", "menu_edit", "inventory", "reports_x", "reports_z",
+    "orders_history", "settings", "expenses", "vendors", "reprint_invoices", "refunds",
+    # Online Store modules (gated independently in AdminLayout sidebar)
+    "online_dashboard", "online_orders", "online_menu", "online_offers",
+    "online_events", "online_settings",
+]
+ADMIN_PERMISSIONS = ALL_PERMISSIONS.copy()
+
+# --- Models ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "cashier"
+
+class CategoryCreate(BaseModel):
+    name: str
+    color: Optional[str] = None
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+
+class MenuItemVariation(BaseModel):
+    name: str
+    price: float
+
+class MenuItemCreate(BaseModel):
+    name: str
+    price: float
+    price_fp1: Optional[float] = None  # FoodPanda 1 price (overrides price when payment_type=foodpanda1)
+    price_fp2: Optional[float] = None  # FoodPanda 2 price (overrides price when payment_type=foodpanda2)
+    category_id: str
+    stock: int = 100
+    low_stock_threshold: int = 10
+    color: Optional[str] = None
+    variations: Optional[List[MenuItemVariation]] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = 0
+    is_bestseller: Optional[bool] = False
+    is_popular: Optional[bool] = False
+    image_url: Optional[str] = ""
+    image_type: Optional[str] = None
+    description: Optional[str] = ""
+    related_item_ids: Optional[List[str]] = None  # F7: explicit upsell suggestions
+    # Vendor-linked outsourced products (e.g. Pepsi 500ml from "Khokha")
+    is_outsourced: Optional[bool] = False
+    outsourced_vendor_id: Optional[str] = None
+    outsourced_unit_cost: Optional[float] = None  # cost per unit owed to vendor; falls back to item price if None
+
+class MenuItemUpdate(BaseModel):
+    name: Optional[str] = None
+    price: Optional[float] = None
+    price_fp1: Optional[float] = None
+    price_fp2: Optional[float] = None
+    category_id: Optional[str] = None
+    stock: Optional[int] = None
+    low_stock_threshold: Optional[int] = None
+    color: Optional[str] = None
+    variations: Optional[List[MenuItemVariation]] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
+    is_bestseller: Optional[bool] = None
+    is_popular: Optional[bool] = None
+    image_url: Optional[str] = None
+    image_type: Optional[str] = None
+    description: Optional[str] = None
+    related_item_ids: Optional[List[str]] = None
+    is_outsourced: Optional[bool] = None
+    outsourced_vendor_id: Optional[str] = None
+    outsourced_unit_cost: Optional[float] = None
+
+class OrderItemInput(BaseModel):
+    item_id: str
+    name: str
+    price: float
+    original_price: Optional[float] = None
+    quantity: int
+
+class OrderCreate(BaseModel):
+    items: List[OrderItemInput]
+    payment_type: str
+    subtotal: float
+    tax: float
+    total: float
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = 0
+    discount_amount: Optional[float] = 0
+
+class StockUpdate(BaseModel):
+    stock: int
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    name: str
+    role: str = "cashier"
+    permissions: Optional[List[str]] = None
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    permissions: Optional[List[str]] = None
+
+class SettingsUpdate(BaseModel):
+    tax_rate: Optional[float] = None
+    online_tax_rate: Optional[float] = None
+    foodpanda1_tax_rate: Optional[float] = None
+    foodpanda2_tax_rate: Optional[float] = None
+    currency: Optional[str] = None
+    restaurant_name: Optional[str] = None
+    restaurant_address: Optional[str] = None
+    restaurant_phone: Optional[str] = None
+    restaurant_email: Optional[str] = None
+    smtp_host: Optional[str] = None
+    smtp_port: Optional[int] = None
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_from: Optional[str] = None
+    smtp_use_tls: Optional[bool] = None
+    email_recipients: Optional[List[Dict[str, Any]]] = None
+    auto_email_on_z_close: Optional[bool] = None
+    # Daily auto-send schedule
+    daily_report_time: Optional[str] = None  # "HH:MM" 24h
+    daily_report_timezone: Optional[str] = None  # IANA tz e.g., "Asia/Karachi"
+    auto_email_daily: Optional[bool] = None
+    auto_whatsapp_daily: Optional[bool] = None
+    daily_report_type: Optional[str] = None  # "yesterday" | "today"
+    # WhatsApp
+    whatsapp_service_url: Optional[str] = None
+    whatsapp_recipients: Optional[List[Dict[str, Any]]] = None
+    auto_whatsapp_on_z_close: Optional[bool] = None
+    # Cloudflare Tunnel
+    tunnel_log_path: Optional[str] = None
+    tunnel_notify_on_change: Optional[bool] = None
+    # Receipt formatting
+    receipt_font_family: Optional[str] = None
+    receipt_base_size: Optional[int] = None
+    receipt_header_size: Optional[int] = None
+    receipt_total_size: Optional[int] = None
+    receipt_bold_all: Optional[bool] = None
+    receipt_bold_total: Optional[bool] = None
+    receipt_show_logo: Optional[bool] = None
+    receipt_footer_text: Optional[str] = None
+    receipt_paper_width: Optional[int] = None  # in mm or pixels (CSS)
+    receipt_show_tax_line: Optional[bool] = None
+    # Branding – custom logo (base64 data URL, e.g. "data:image/png;base64,...")
+    restaurant_logo: Optional[str] = None
+
+class ExpenseCreate(BaseModel):
+    description: str
+    amount: float
+    category: Optional[str] = "general"
+
+class ExpenseUpdate(BaseModel):
+    description: Optional[str] = None
+    amount: Optional[float] = None
+    category: Optional[str] = None
+
+class VendorCreate(BaseModel):
+    name: str
+    contact: Optional[str] = ""
+    items_supplied: Optional[str] = ""
+
+class VendorUpdate(BaseModel):
+    name: Optional[str] = None
+    contact: Optional[str] = None
+    items_supplied: Optional[str] = None
+
+class VendorTransactionCreate(BaseModel):
+    vendor_id: str
+    items: List[dict]  # [{name, quantity, unit_price}]
+    total: float
+    notes: Optional[str] = ""
+
+class VendorPaymentCreate(BaseModel):
+    vendor_id: str
+    amount: float
+    notes: Optional[str] = ""
+
+class RefundCreate(BaseModel):
+    order_id: str
+    reason: str
+    amount: float
+    items: Optional[List[dict]] = None
+
+# --- Loyalty / Diamond Reward System Models ---
+class LoyaltySettingsUpdate(BaseModel):
+    enabled: Optional[bool] = True
+    earning_rate: Optional[float] = 10.0  # Diamonds per Rs spent
+    min_order_for_points: Optional[float] = 0.0
+    points_expiry_days: Optional[int] = None  # null = never expire
+
+class LoyaltyRewardCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    cost_diamonds: int
+    reward_type: str  # "free_item", "discount_percent", "discount_fixed"
+    reward_value: str  # menu_item_id for free_item, or number string for discounts
+    is_active: Optional[bool] = True
+    max_redemptions_per_customer: Optional[int] = None
+
+class LoyaltyRewardUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    cost_diamonds: Optional[int] = None
+    reward_type: Optional[str] = None
+    reward_value: Optional[str] = None
+    is_active: Optional[bool] = None
+    max_redemptions_per_customer: Optional[int] = None
+
+class LoyaltyRedeemRequest(BaseModel):
+    reward_id: str
+
+class LoyaltyAdjustRequest(BaseModel):
+    customer_id: str
+    diamonds: int  # Can be positive or negative
+    notes: str
+
+# --- Auth ---
+@api_router.post("/auth/login")
+async def login(req: LoginRequest, response: Response):
+    email = req.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if not user: raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(req.password, user["password_hash"]): raise HTTPException(status_code=401, detail="Invalid email or password")
+    uid = str(user["_id"])
+    at = create_access_token(uid, email, user.get("role", "cashier"))
+    rt = create_refresh_token(uid)
+    response.set_cookie(key="access_token", value=at, httponly=True, secure=False, samesite="lax", max_age=28800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    return {"id": uid, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms, "token": at}
+
+@api_router.post("/auth/register")
+async def register(req: RegisterRequest, response: Response):
+    email = req.email.lower().strip()
+    if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already registered")
+    hashed = hash_password(req.password)
+    perms = ["pos", "reports_x"]
+    doc = {"email": email, "password_hash": hashed, "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
+    result = await db.users.insert_one(doc)
+    uid = str(result.inserted_id)
+    at = create_access_token(uid, email, req.role)
+    rt = create_refresh_token(uid)
+    response.set_cookie(key="access_token", value=at, httponly=True, secure=False, samesite="lax", max_age=28800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return {"id": uid, "email": email, "name": req.name, "role": req.role, "permissions": perms, "token": at}
+
+@api_router.get("/auth/me")
+async def get_me(request: Request):
+    user = await get_current_user(request)
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    return {"id": user["_id"], "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms}
+
+@api_router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    return {"message": "Logged out"}
+
+# --- Users ---
+@api_router.get("/users")
+async def list_users(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    users = await db.users.find({}, {"password_hash": 0}).to_list(500)
+    return [{"id": str(u["_id"]), "email": u["email"], "name": u.get("name", ""), "role": u.get("role", "cashier"), "permissions": u.get("permissions", ADMIN_PERMISSIONS if u.get("role") == "admin" else ["pos", "reports_x"]), "created_at": u.get("created_at", "")} for u in users]
+
+@api_router.post("/users")
+async def create_user(req: UserCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    email = req.email.lower().strip()
+    if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already exists")
+    perms = req.permissions if req.permissions else (ADMIN_PERMISSIONS if req.role == "admin" else ["pos", "reports_x"])
+    doc = {"email": email, "password_hash": hash_password(req.password), "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
+    result = await db.users.insert_one(doc)
+    return {"id": str(result.inserted_id), "email": email, "name": req.name, "role": req.role, "permissions": perms}
+
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, req: UserUpdate, request: Request):
+    current = await get_current_user(request)
+    if current.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    update_data = {}
+    if req.name is not None: update_data["name"] = req.name
+    if req.role is not None: update_data["role"] = req.role
+    if req.permissions is not None: update_data["permissions"] = req.permissions
+    if req.password and req.password.strip(): update_data["password_hash"] = hash_password(req.password)
+    if update_data: await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
+    updated = await db.users.find_one({"_id": ObjectId(user_id)}, {"password_hash": 0})
+    if not updated: raise HTTPException(status_code=404, detail="User not found")
+    return {"id": str(updated["_id"]), "email": updated["email"], "name": updated.get("name", ""), "role": updated.get("role", "cashier"), "permissions": updated.get("permissions", [])}
+
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, request: Request):
+    current = await get_current_user(request)
+    if current.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    if current["_id"] == user_id: raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    result = await db.users.delete_one({"_id": ObjectId(user_id)})
+    if result.deleted_count == 0: raise HTTPException(status_code=404, detail="User not found")
+    return {"message": "User deleted"}
+
+# --- Settings ---
+DEFAULT_SETTINGS = {"tax_rate": 5.0, "online_tax_rate": 0.0, "foodpanda1_tax_rate": 0.0, "foodpanda2_tax_rate": 0.0, "currency": "Rs", "restaurant_name": "KARACHI NASEEB BIRYANI AND MURG PULAO", "restaurant_address": "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore", "restaurant_phone": "+923004928411", "restaurant_email": "karachinaseebbiryani599@gmail.com", "smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_user": "", "smtp_password": "", "smtp_from": "", "smtp_use_tls": True, "email_recipients": [], "auto_email_on_z_close": False, "daily_report_time": "02:15", "daily_report_timezone": "Asia/Karachi", "auto_email_daily": False, "auto_whatsapp_daily": False, "daily_report_type": "yesterday", "whatsapp_service_url": "http://127.0.0.1:3030", "whatsapp_recipients": [], "auto_whatsapp_on_z_close": False, "tunnel_log_path": "", "tunnel_notify_on_change": True, "receipt_font_family": "Courier New", "receipt_base_size": 12, "receipt_header_size": 16, "receipt_total_size": 16, "receipt_bold_all": False, "receipt_bold_total": True, "receipt_show_logo": False, "receipt_footer_text": "Thank you for your order!", "receipt_paper_width": 300, "receipt_show_tax_line": True, "restaurant_logo": ""}
+
+@api_router.get("/settings")
+async def get_settings(request: Request):
+    await get_current_user(request)
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0})
+    if not s: return DEFAULT_SETTINGS
+    return {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()}
+
+@api_router.put("/settings")
+async def update_settings(req: SettingsUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    ud = {k: v for k, v in req.model_dump().items() if v is not None}
+    if ud: await db.settings.update_one({"key": "global"}, {"$set": ud}, upsert=True)
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0})
+    schedule_keys = ("daily_report_time", "daily_report_timezone", "auto_email_daily", "auto_whatsapp_daily")
+    if any(k in ud for k in schedule_keys):
+        logger.info(f"Settings: schedule fields changed: {[k for k in schedule_keys if k in ud]}")
+        try: await _reschedule_daily_job()
+        except Exception as e: logger.exception(f"Reschedule failed: {e}")
+    return {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()} if s else DEFAULT_SETTINGS
+
+# --- Categories ---
+def _can_edit_menu(user):
+    return user.get("role") == "admin" or "menu_edit" in (user.get("permissions") or [])
+
+@api_router.get("/categories")
+async def get_categories():
+    cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(100)
+    return [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color"), "sort_order": c.get("sort_order", 0)} for c in cats]
+
+@api_router.post("/categories")
+async def create_category(cat: CategoryCreate, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    count = await db.categories.count_documents({})
+    result = await db.categories.insert_one({"name": cat.name, "color": cat.color, "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat()})
+    return {"id": str(result.inserted_id), "name": cat.name, "color": cat.color, "sort_order": count}
+
+@api_router.put("/categories/{cat_id}")
+async def update_category(cat_id: str, cat: CategoryUpdate, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    ud = {k: v for k, v in cat.model_dump().items() if v is not None}
+    if ud: await db.categories.update_one({"_id": ObjectId(cat_id)}, {"$set": ud})
+    updated = await db.categories.find_one({"_id": ObjectId(cat_id)}, {"_id": 0})
+    if not updated: raise HTTPException(status_code=404, detail="Not found")
+    return {"id": cat_id, "name": updated.get("name"), "color": updated.get("color"), "sort_order": updated.get("sort_order", 0)}
+
+@api_router.delete("/categories/{cat_id}")
+async def delete_category(cat_id: str, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    await db.categories.delete_one({"_id": ObjectId(cat_id)})
+    await db.menu_items.delete_many({"category_id": cat_id})
+    return {"message": "Deleted"}
+
+@api_router.post("/categories/reorder")
+async def reorder_categories(payload: dict, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    order = payload.get("order") or []
+    for idx, cid in enumerate(order):
+        try:
+            await db.categories.update_one({"_id": ObjectId(cid)}, {"$set": {"sort_order": idx}})
+        except Exception:
+            pass
+    return {"message": "Reordered", "count": len(order)}
+
+# --- Menu Items ---
+@api_router.get("/menu-items")
+async def get_menu_items():
+    items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    return [{
+        "id": str(i["_id"]), "name": i["name"], "price": i["price"],
+        "price_fp1": i.get("price_fp1"), "price_fp2": i.get("price_fp2"),
+        "category_id": i["category_id"], "stock": i.get("stock", 0),
+        "low_stock_threshold": i.get("low_stock_threshold", 10), "color": i.get("color"),
+        "sort_order": i.get("sort_order", 0), "variations": i.get("variations", []),
+        "discount_type": i.get("discount_type"), "discount_value": i.get("discount_value", 0),
+        "is_bestseller": i.get("is_bestseller", False), "is_popular": i.get("is_popular", False),
+        "image_url": i.get("image_url", ""), "image_type": i.get("image_type", "url"),
+        "description": i.get("description", ""),
+        "related_item_ids": i.get("related_item_ids", []),
+        "is_outsourced": bool(i.get("is_outsourced", False)),
+        "outsourced_vendor_id": i.get("outsourced_vendor_id"),
+        "outsourced_unit_cost": i.get("outsourced_unit_cost"),
+    } for i in items]
+
+@api_router.post("/menu-items")
+async def create_menu_item(item: MenuItemCreate, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    count = await db.menu_items.count_documents({})
+    variations = [v.model_dump() for v in (item.variations or [])]
+    doc = {
+        "name": item.name, "price": item.price, "price_fp1": item.price_fp1, "price_fp2": item.price_fp2,
+        "category_id": item.category_id, "stock": item.stock, "low_stock_threshold": item.low_stock_threshold,
+        "color": item.color, "variations": variations,
+        "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
+        "is_bestseller": bool(item.is_bestseller), "is_popular": bool(item.is_popular),
+        "image_url": item.image_url or "", "image_type": item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url"),
+        "description": item.description or "",
+        "related_item_ids": list(item.related_item_ids or []),
+        "is_outsourced": bool(item.is_outsourced),
+        "outsourced_vendor_id": item.outsourced_vendor_id or None,
+        "outsourced_unit_cost": item.outsourced_unit_cost,
+        "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.menu_items.insert_one(doc)
+    return {**{k: v for k, v in doc.items() if k not in ("created_at", "_id")}, "id": str(result.inserted_id)}
+
+@api_router.put("/menu-items/{item_id}")
+async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    ud = {k: v for k, v in item.model_dump().items() if v is not None}
+    # variations should be replaced wholesale, including with empty list — model_dump() drops only None
+    if ud: await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": ud})
+    updated = await db.menu_items.find_one({"_id": ObjectId(item_id)}, {"_id": 0})
+    if not updated: raise HTTPException(status_code=404, detail="Not found")
+    updated["id"] = item_id
+    updated.setdefault("variations", [])
+    return updated
+
+@api_router.delete("/menu-items/{item_id}")
+async def delete_menu_item(item_id: str, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    await db.menu_items.delete_one({"_id": ObjectId(item_id)})
+    return {"message": "Deleted"}
+
+@api_router.post("/menu-items/reorder")
+async def reorder_menu_items(payload: dict, request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
+    order = payload.get("order") or []
+    for idx, iid in enumerate(order):
+        try:
+            await db.menu_items.update_one({"_id": ObjectId(iid)}, {"$set": {"sort_order": idx}})
+        except Exception:
+            pass
+    return {"message": "Reordered", "count": len(order)}
+
+# --- Inventory ---
+@api_router.get("/inventory")
+async def get_inventory(request: Request):
+    await get_current_user(request)
+    items = await db.menu_items.find({}).to_list(500)
+    result = []
+    for i in items:
+        cat = None
+        cid = i.get("category_id")
+        if cid:
+            try: cat = await db.categories.find_one({"_id": ObjectId(cid)})
+            except: cat = None
+        result.append({"id": str(i["_id"]), "name": i["name"], "price": i["price"], "category_name": cat["name"] if cat else "Uncategorized", "stock": i.get("stock", 0), "low_stock_threshold": i.get("low_stock_threshold", 10), "is_low_stock": i.get("stock", 0) <= i.get("low_stock_threshold", 10)})
+    return result
+
+@api_router.put("/inventory/{item_id}")
+async def update_stock(item_id: str, su: StockUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": {"stock": su.stock}})
+    return {"message": "Stock updated", "stock": su.stock}
+
+# --- Orders ---
+@api_router.post("/orders")
+async def create_order(order: OrderCreate, request: Request):
+    user = await get_current_user(request)
+    # Track outsourced items so we can post one vendor_transaction per vendor.
+    outsourced_by_vendor = {}  # {vendor_id: {"items": [...], "total": float}}
+    for oi in order.items:
+        try:
+            item = await db.menu_items.find_one({"_id": ObjectId(oi.item_id)})
+            if item:
+                await db.menu_items.update_one({"_id": ObjectId(oi.item_id)}, {"$set": {"stock": max(0, item.get("stock", 0) - oi.quantity)}})
+                # Outsourced -> accumulate vendor payable
+                if item.get("is_outsourced") and item.get("outsourced_vendor_id"):
+                    vid = item["outsourced_vendor_id"]
+                    unit_cost = item.get("outsourced_unit_cost")
+                    if unit_cost is None:
+                        unit_cost = float(oi.original_price or oi.price or item.get("price", 0))
+                    line_total = round(float(unit_cost) * int(oi.quantity), 2)
+                    bucket = outsourced_by_vendor.setdefault(vid, {"items": [], "total": 0.0})
+                    bucket["items"].append({
+                        "name": oi.name,
+                        "quantity": int(oi.quantity),
+                        "unit_price": float(unit_cost),
+                        "menu_item_id": oi.item_id,
+                    })
+                    bucket["total"] = round(bucket["total"] + line_total, 2)
+        except Exception:
+            pass
+    now = datetime.now(timezone.utc)
+    doc = {"items": [{"item_id": oi.item_id, "name": oi.name, "price": oi.price, "original_price": oi.original_price or oi.price, "quantity": oi.quantity} for oi in order.items], "payment_type": order.payment_type, "subtotal": order.subtotal, "tax": order.tax, "total": order.total, "discount_type": order.discount_type, "discount_value": order.discount_value or 0, "discount_amount": order.discount_amount or 0, "cashier_id": user["_id"], "cashier_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
+    result = await db.orders.insert_one(doc)
+    order_id = str(result.inserted_id)
+    order_receipt_no = order_id[-6:].upper()
+    
+    # Auto-create vendor transactions for outsourced items AND prepare vendor tickets
+    vendor_tickets = []
+    for vid, bucket in outsourced_by_vendor.items():
+        try:
+            # Get vendor info for ticket
+            vendor = await db.vendors.find_one({"_id": ObjectId(vid)})
+            vendor_name = vendor.get("name", "Unknown Vendor") if vendor else "Unknown Vendor"
+            
+            # Generate vendor ticket number
+            vt_count = await db.vendor_transactions.count_documents({}) + 1
+            ticket_no = f"VT-{vt_count:05d}"
+            
+            # Create vendor transaction
+            await db.vendor_transactions.insert_one({
+                "vendor_id": vid,
+                "ticket_no": ticket_no,
+                "items": bucket["items"],
+                "total": bucket["total"],
+                "notes": f"Auto: order #{order_receipt_no} (outsourced sale)",
+                "auto_source": "order",
+                "source_order_id": order_id,
+                "created_by": user["_id"],
+                "created_by_name": user.get("name", ""),
+                "date": now.strftime("%Y-%m-%d"),
+                "created_at": now.isoformat(),
+            })
+            
+            # Prepare vendor ticket data for auto-printing
+            vendor_tickets.append({
+                "vendor_id": vid,
+                "vendor_name": vendor_name,
+                "ticket_no": ticket_no,
+                "order_receipt_no": order_receipt_no,
+                "items": bucket["items"],
+                "total": bucket["total"],
+                "date": now.strftime("%Y-%m-%d"),
+                "time": now.strftime("%H:%M:%S"),
+                "cashier_name": user.get("name", ""),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to create vendor transaction for vendor {vid}: {e}")
+            pass
+    
+    return {
+        "id": order_id, 
+        "items": doc["items"], 
+        "payment_type": order.payment_type, 
+        "subtotal": order.subtotal, 
+        "tax": order.tax, 
+        "total": order.total, 
+        "discount_amount": order.discount_amount or 0, 
+        "cashier_name": user.get("name", ""), 
+        "created_at": now.isoformat(),
+        "vendor_tickets": vendor_tickets  # NEW: vendor tickets for auto-printing
+    }
+
+@api_router.get("/orders/today")
+async def get_today_orders(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    orders = await db.orders.find({"date": today}).sort("created_at", -1).to_list(1000)
+    out = []
+    for o in orders:
+        oid = str(o.pop("_id"))
+        o["id"] = oid
+        o["receipt_no"] = oid[-6:].upper()
+        out.append(o)
+    return out
+
+@api_router.get("/orders/history")
+async def get_orders_history(request: Request, start_date: Optional[str] = None, end_date: Optional[str] = None, payment_type: Optional[str] = None, q: Optional[str] = None, limit: int = 500):
+    user = await get_current_user(request)
+    perms = user.get("permissions") or []
+    if user.get("role") != "admin" and "orders_history" not in perms:
+        raise HTTPException(status_code=403, detail="Orders history permission required")
+    query = {}
+    if start_date and end_date:
+        query["date"] = {"$gte": start_date, "$lte": end_date}
+    elif start_date:
+        query["date"] = {"$gte": start_date}
+    elif end_date:
+        query["date"] = {"$lte": end_date}
+    if payment_type and payment_type != "all":
+        query["payment_type"] = payment_type
+    orders = await db.orders.find(query).sort("created_at", -1).to_list(max(1, min(limit, 5000)))
+    out = []
+    for o in orders:
+        oid = str(o.pop("_id"))
+        o["id"] = oid
+        o["receipt_no"] = oid[-6:].upper()
+        if q:
+            ql = q.lower().strip()
+            hay = f"{o['receipt_no']} {o.get('cashier_name','')} {o.get('date','')}".lower()
+            items_hay = " ".join([str(i.get("name","")) for i in o.get("items", [])]).lower()
+            if ql not in hay and ql not in items_hay:
+                continue
+        out.append(o)
+    return out
+
+@api_router.get("/orders/search/{receipt_id}")
+async def search_order(receipt_id: str, request: Request):
+    await get_current_user(request)
+    # Search by last 6 chars of _id
+    orders = await db.orders.find({}).to_list(50000)
+    for o in orders:
+        oid = str(o["_id"])
+        if oid.endswith(receipt_id.lower()) or oid[-6:].upper() == receipt_id.upper():
+            o.pop("_id", None)
+            o["id"] = oid
+            return o
+    raise HTTPException(status_code=404, detail="Receipt not found")
+
+# --- Voice Assistant (Urdu / Punjabi) ---
+# Pipeline: audio → Whisper STT → GPT-4o parser → structured items + Urdu confirmation + TTS audio
+import io, base64, json as _json
+
+_EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+
+def _voice_ready():
+    return bool(_EMERGENT_KEY)
+
+async def _stt_transcribe(audio_bytes: bytes, filename: str, language: Optional[str] = None) -> str:
+    from emergentintegrations.llm.openai.speech_to_text import OpenAISpeechToText
+    stt = OpenAISpeechToText(api_key=_EMERGENT_KEY)
+    bio = io.BytesIO(audio_bytes); bio.name = filename or "audio.webm"
+    res = await stt.transcribe(bio, "whisper-1", "json", None, language)
+    if isinstance(res, dict):
+        return res.get("text", "")
+    if hasattr(res, "text"):
+        return res.text
+    return str(res)
+
+async def _llm_parse_order(transcript: str, menu_names: List[str]) -> dict:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    system = (
+        "You parse restaurant POS orders spoken in Urdu, Punjabi, Hindi, or English. "
+        "Return ONLY compact JSON – no prose. Schema: "
+        '{"intent":"order"|"expense"|"unknown","items":[{"name":str,"qty":int}],"expense":{"description":str,"amount":float}|null,"confidence":0..1}. '
+        f"Available menu item names (match case-insensitively; pick the closest one): {menu_names}. "
+        "Urdu/Punjabi numbers: ek=1, do=2, tin=3, char=4, paanch=5, chha=6, saat=7, aath=8, nau=9, dus=10. "
+        "If user says something like 'kharch', 'expense', 'spent', 'kharcha', treat as expense and extract amount + description. "
+        "If nothing matches confidently, set intent='unknown' and items=[]."
+    )
+    chat = LlmChat(api_key=_EMERGENT_KEY, session_id=f"voice-{datetime.now(timezone.utc).timestamp()}", system_message=system).with_model("openai", "gpt-4o-mini")
+    reply = await chat.send_message(UserMessage(text=f"Transcript: {transcript}\nReturn only JSON."))
+    text = reply if isinstance(reply, str) else getattr(reply, "content", str(reply))
+    # strip code fences
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"): t = t[4:]
+    try:
+        return _json.loads(t)
+    except Exception:
+        # try to find first {...}
+        start = t.find("{"); end = t.rfind("}")
+        if start >= 0 and end > start:
+            try: return _json.loads(t[start:end+1])
+            except Exception: pass
+        return {"intent": "unknown", "items": [], "expense": None, "confidence": 0.0}
+
+async def _tts_speak(text: str, voice: str = "alloy") -> bytes:
+    from emergentintegrations.llm.openai.text_to_speech import OpenAITextToSpeech
+    tts = OpenAITextToSpeech(api_key=_EMERGENT_KEY)
+    return await tts.generate_speech(text=text, model="tts-1", voice=voice, speed=1.0, response_format="mp3")
+
+def _build_urdu_confirmation(parsed: dict, currency: str, items_resolved: list, total: float) -> str:
+    """
+    Build a confirmation that keeps NUMBERS and ITEM NAMES in English (TTS pronounces them clearly)
+    while connector words stay in Urdu so it still feels native.
+    """
+    intent = parsed.get("intent", "unknown")
+    if intent == "expense" and parsed.get("expense"):
+        e = parsed["expense"]
+        return f"خرچہ — {e.get('description','')} — {currency} {int(e.get('amount',0))}۔ کیا آپ تصدیق کرتے ہیں؟"
+    if intent == "order" and items_resolved:
+        parts = []
+        for it in items_resolved:
+            q = int(it.get("quantity", 1))
+            # English digits + English item name = clear TTS, Urdu structure around it
+            parts.append(f"{q} {it['name']}")
+        items_text = " اور ".join(parts)  # Urdu "and"
+        return f"آپ کا آرڈر — {items_text}۔ کل {currency} {int(total)}۔ کیا آپ تصدیق کرتے ہیں؟"
+    return "معاف کیجیے، میں سمجھ نہیں سکا۔ براہ کرم دوبارہ کہیں۔"
+
+@api_router.get("/voice/status")
+async def voice_status(request: Request):
+    await get_current_user(request)
+    return {"enabled": _voice_ready()}
+
+@api_router.post("/voice/parse")
+async def voice_parse(request: Request, audio: UploadFile = File(...), language: Optional[str] = Form(None)):
+    """Accept an audio blob, transcribe, parse against current menu, and return parsed order + Urdu TTS."""
+    await get_current_user(request)
+    if not _voice_ready():
+        raise HTTPException(status_code=503, detail="Voice assistant not configured (EMERGENT_LLM_KEY missing)")
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty audio")
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio too large (max 25MB)")
+
+    try:
+        transcript = await _stt_transcribe(data, audio.filename or "audio.webm", language)
+    except Exception as e:
+        logger.exception("STT failed")
+        raise HTTPException(status_code=502, detail=f"Transcription failed: {str(e)[:200]}")
+    if not transcript or not transcript.strip():
+        raise HTTPException(status_code=422, detail="Could not transcribe any speech. Please try again.")
+
+    menu_docs = await db.menu_items.find({}).to_list(500)
+    menu_index = {m["name"].lower(): {"id": str(m["_id"]), "name": m["name"], "price": m.get("price", 0), "stock": m.get("stock", 0)} for m in menu_docs}
+    menu_names = list(menu_index.keys())
+
+    try:
+        parsed = await _llm_parse_order(transcript, menu_names)
+    except Exception as e:
+        logger.exception("LLM parse failed")
+        raise HTTPException(status_code=502, detail=f"Parser failed: {str(e)[:200]}")
+
+    # Resolve items against menu
+    items_resolved = []
+    subtotal = 0.0
+    for it in (parsed.get("items") or []):
+        nm = str(it.get("name", "")).lower().strip()
+        qty = int(it.get("qty") or 1)
+        if not nm: continue
+        m = menu_index.get(nm)
+        if not m:
+            # fuzzy: find a menu name containing the token or vice versa
+            for k, v in menu_index.items():
+                if nm in k or k in nm:
+                    m = v; break
+        if m:
+            items_resolved.append({"item_id": m["id"], "name": m["name"], "price": m["price"], "quantity": qty})
+            subtotal += m["price"] * qty
+
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+    currency = s.get("currency", "Rs")
+    urdu_text = _build_urdu_confirmation(parsed, currency, items_resolved, subtotal)
+
+    try:
+        audio_bytes = await _tts_speak(urdu_text)
+        audio_b64 = base64.b64encode(audio_bytes).decode()
+    except Exception as e:
+        logger.warning(f"TTS failed (non-fatal): {e}")
+        audio_b64 = ""
+
+    return {
+        "transcript": transcript,
+        "parsed": parsed,
+        "items": items_resolved,
+        "subtotal": round(subtotal, 2),
+        "expense": parsed.get("expense"),
+        "intent": parsed.get("intent", "unknown"),
+        "confirmation_text": urdu_text,
+        "audio_base64": audio_b64,
+        "currency": currency,
+    }
+
+# --- Refunds ---
+@api_router.post("/refunds")
+async def create_refund(refund: RefundCreate, request: Request):
+    user = await get_current_user(request)
+    perms = user.get("permissions", [])
+    if user.get("role") != "admin" and "refunds" not in perms:
+        raise HTTPException(status_code=403, detail="Refund permission required")
+    now = datetime.now(timezone.utc)
+    refund_no = f"RF-{await db.refunds.count_documents({}) + 1:05d}"
+    # Reverse vendor payables for any outsourced items being refunded
+    reversed_by_vendor = {}
+    for ri in (refund.items or []):
+        try:
+            mid = ri.get("item_id") or ri.get("menu_item_id")
+            qty = int(ri.get("quantity", 0))
+            if not mid or qty <= 0:
+                continue
+            item = await db.menu_items.find_one({"_id": ObjectId(mid)})
+            if item and item.get("is_outsourced") and item.get("outsourced_vendor_id"):
+                vid = item["outsourced_vendor_id"]
+                unit_cost = item.get("outsourced_unit_cost")
+                if unit_cost is None:
+                    unit_cost = float(ri.get("price") or item.get("price", 0))
+                line_total = round(float(unit_cost) * qty, 2)
+                bucket = reversed_by_vendor.setdefault(vid, {"items": [], "total": 0.0})
+                bucket["items"].append({
+                    "name": ri.get("name") or item.get("name"),
+                    "quantity": qty,
+                    "unit_price": float(unit_cost),
+                    "menu_item_id": mid,
+                })
+                bucket["total"] = round(bucket["total"] + line_total, 2)
+        except Exception:
+            pass
+    doc = {
+        "refund_no": refund_no,
+        "order_id": refund.order_id,
+        "reason": refund.reason,
+        "amount": refund.amount,
+        "items": refund.items or [],
+        "refunded_by": user["_id"],
+        "refunded_by_name": user.get("name", ""),
+        "date": now.strftime("%Y-%m-%d"),
+        "created_at": now.isoformat(),
+    }
+    result = await db.refunds.insert_one(doc)
+    refund_id = str(result.inserted_id)
+    # Insert NEGATIVE vendor transactions to reverse the payable
+    for vid, bucket in reversed_by_vendor.items():
+        try:
+            await db.vendor_transactions.insert_one({
+                "vendor_id": vid,
+                "items": bucket["items"],
+                "total": -bucket["total"],
+                "notes": f"Auto reversal: refund {refund_no} (outsourced)",
+                "auto_source": "refund",
+                "source_refund_id": refund_id,
+                "source_order_id": refund.order_id,
+                "created_by": user["_id"],
+                "created_by_name": user.get("name", ""),
+                "date": now.strftime("%Y-%m-%d"),
+                "created_at": now.isoformat(),
+            })
+        except Exception:
+            pass
+    return {"id": refund_id, "refund_no": refund_no, "amount": refund.amount, "reason": refund.reason, "date": now.strftime("%Y-%m-%d"), "created_at": now.isoformat(), "refunded_by_name": user.get("name", "")}
+
+@api_router.get("/refunds/today")
+async def get_today_refunds(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    refunds = await db.refunds.find({"date": today}).sort("created_at", -1).to_list(500)
+    return [{"id": str(r["_id"]), "refund_no": r.get("refund_no", ""), "order_id": r.get("order_id", ""), "reason": r.get("reason", ""), "amount": r.get("amount", 0), "items": r.get("items", []), "refunded_by_name": r.get("refunded_by_name", ""), "date": r.get("date", ""), "created_at": r.get("created_at", "")} for r in refunds]
+
+@api_router.get("/refunds/summary")
+async def get_refund_summary(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    refunds = await db.refunds.find({"date": today}).to_list(500)
+    total = sum(r.get("amount", 0) for r in refunds)
+    return {"date": today, "total_refunds": round(total, 2), "count": len(refunds)}
+
+# --- Expenses ---
+@api_router.get("/expenses")
+async def get_expenses(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    exps = await db.expenses.find({"date": today}).sort("created_at", -1).to_list(500)
+    return [{"id": str(e["_id"]), "description": e["description"], "amount": e["amount"], "category": e.get("category", "general"), "created_at": e.get("created_at", ""), "date": e.get("date", today)} for e in exps]
+
+@api_router.post("/expenses")
+async def create_expense(exp: ExpenseCreate, request: Request):
+    user = await get_current_user(request)
+    now = datetime.now(timezone.utc)
+    doc = {"description": exp.description, "amount": exp.amount, "category": exp.category or "general", "created_by": user["_id"], "created_by_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
+    result = await db.expenses.insert_one(doc)
+    return {"id": str(result.inserted_id), "description": exp.description, "amount": exp.amount, "category": exp.category, "created_at": now.isoformat()}
+
+@api_router.delete("/expenses/{exp_id}")
+async def delete_expense(exp_id: str, request: Request):
+    await get_current_user(request)
+    await db.expenses.delete_one({"_id": ObjectId(exp_id)})
+    return {"message": "Deleted"}
+
+@api_router.get("/expenses/summary")
+async def get_expenses_summary(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    exps = await db.expenses.find({"date": today}).to_list(500)
+    total = sum(e.get("amount", 0) for e in exps)
+    return {"date": today, "total_expenses": round(total, 2), "count": len(exps)}
+
+# --- Vendors ---
+@api_router.get("/vendors")
+async def list_vendors(request: Request):
+    await get_current_user(request)
+    vendors = await db.vendors.find({}).to_list(500)
+    result = []
+    for v in vendors:
+        vid = str(v["_id"])
+        txns = await db.vendor_transactions.find({"vendor_id": vid}).to_list(10000)
+        pmts = await db.vendor_payments.find({"vendor_id": vid}).to_list(10000)
+        total_billed = sum(t.get("total", 0) for t in txns)
+        total_paid = sum(p.get("amount", 0) for p in pmts)
+        balance = round(total_billed - total_paid, 2)
+        result.append({"id": vid, "name": v["name"], "contact": v.get("contact", ""), "items_supplied": v.get("items_supplied", ""), "products": v.get("products", []), "total_billed": round(total_billed, 2), "total_paid": round(total_paid, 2), "balance": balance})
+    return result
+
+@api_router.post("/vendors")
+async def create_vendor(v: VendorCreate, request: Request):
+    user = await get_current_user(request)
+    doc = {"name": v.name, "contact": v.contact, "items_supplied": v.items_supplied, "products": [], "created_at": datetime.now(timezone.utc).isoformat()}
+    result = await db.vendors.insert_one(doc)
+    return {"id": str(result.inserted_id), "name": v.name, "contact": v.contact, "items_supplied": v.items_supplied, "products": [], "total_billed": 0, "total_paid": 0, "balance": 0}
+
+@api_router.put("/vendors/{vendor_id}")
+async def update_vendor(vendor_id: str, v: VendorUpdate, request: Request):
+    await get_current_user(request)
+    ud = {k: val for k, val in v.model_dump().items() if val is not None}
+    if ud: await db.vendors.update_one({"_id": ObjectId(vendor_id)}, {"$set": ud})
+    return {"message": "Updated"}
+
+@api_router.delete("/vendors/{vendor_id}")
+async def delete_vendor(vendor_id: str, request: Request):
+    await get_current_user(request)
+    await db.vendors.delete_one({"_id": ObjectId(vendor_id)})
+    return {"message": "Deleted"}
+
+@api_router.get("/vendors/{vendor_id}/products")
+async def get_vendor_products(vendor_id: str, request: Request):
+    await get_current_user(request)
+    vendor = await db.vendors.find_one({"_id": ObjectId(vendor_id)})
+    if not vendor: raise HTTPException(status_code=404, detail="Vendor not found")
+    return vendor.get("products", [])
+
+@api_router.post("/vendors/{vendor_id}/products")
+async def add_vendor_product(vendor_id: str, request: Request):
+    await get_current_user(request)
+    body = await request.json()
+    name = body.get("name", "").strip()
+    default_price = body.get("default_price", 0)
+    if not name: raise HTTPException(status_code=400, detail="Product name required")
+    await db.vendors.update_one({"_id": ObjectId(vendor_id)}, {"$push": {"products": {"name": name, "default_price": default_price}}})
+    return {"message": "Product added", "name": name, "default_price": default_price}
+
+@api_router.delete("/vendors/{vendor_id}/products/{product_name}")
+async def remove_vendor_product(vendor_id: str, product_name: str, request: Request):
+    await get_current_user(request)
+    await db.vendors.update_one({"_id": ObjectId(vendor_id)}, {"$pull": {"products": {"name": product_name}}})
+    return {"message": "Product removed"}
+
+@api_router.get("/vendors/{vendor_id}/transactions")
+async def get_vendor_transactions(vendor_id: str, request: Request):
+    await get_current_user(request)
+    txns = await db.vendor_transactions.find({"vendor_id": vendor_id}).sort("created_at", -1).to_list(500)
+    return [{"id": str(t["_id"]), "ticket_no": t.get("ticket_no", ""), "vendor_id": t["vendor_id"], "items": t.get("items", []), "total": t.get("total", 0), "notes": t.get("notes", ""), "date": t.get("date", ""), "created_at": t.get("created_at", "")} for t in txns]
+
+@api_router.post("/vendors/{vendor_id}/transactions")
+async def create_vendor_transaction(vendor_id: str, txn: VendorTransactionCreate, request: Request):
+    user = await get_current_user(request)
+    now = datetime.now(timezone.utc)
+    # Generate ticket number
+    count = await db.vendor_transactions.count_documents({}) + 1
+    ticket_no = f"VT-{count:05d}"
+    doc = {"vendor_id": vendor_id, "ticket_no": ticket_no, "items": txn.items, "total": txn.total, "notes": txn.notes, "created_by": user["_id"], "date": now.strftime("%Y-%m-%d"), "created_at": now.isoformat()}
+    result = await db.vendor_transactions.insert_one(doc)
+    return {"id": str(result.inserted_id), "ticket_no": ticket_no, "vendor_id": vendor_id, "items": txn.items, "total": txn.total, "notes": txn.notes, "date": now.strftime("%Y-%m-%d"), "created_at": now.isoformat()}
+
+@api_router.get("/vendors/{vendor_id}/payments")
+async def get_vendor_payments(vendor_id: str, request: Request):
+    await get_current_user(request)
+    pmts = await db.vendor_payments.find({"vendor_id": vendor_id}).sort("created_at", -1).to_list(500)
+    return [{"id": str(p["_id"]), "vendor_id": p["vendor_id"], "amount": p.get("amount", 0), "notes": p.get("notes", ""), "date": p.get("date", ""), "created_at": p.get("created_at", "")} for p in pmts]
+
+@api_router.post("/vendors/{vendor_id}/payments")
+async def create_vendor_payment(vendor_id: str, pmt: VendorPaymentCreate, request: Request):
+    user = await get_current_user(request)
+    now = datetime.now(timezone.utc)
+    doc = {"vendor_id": vendor_id, "amount": pmt.amount, "notes": pmt.notes, "created_by": user["_id"], "date": now.strftime("%Y-%m-%d"), "created_at": now.isoformat()}
+    result = await db.vendor_payments.insert_one(doc)
+    return {"id": str(result.inserted_id), "amount": pmt.amount, "notes": pmt.notes, "date": now.strftime("%Y-%m-%d")}
+
+@api_router.get("/vendors/{vendor_id}/today")
+async def get_vendor_today(vendor_id: str, request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    txns = await db.vendor_transactions.find({"vendor_id": vendor_id, "date": today}).to_list(500)
+    pmts = await db.vendor_payments.find({"vendor_id": vendor_id, "date": today}).to_list(500)
+    billed = sum(t.get("total", 0) for t in txns)
+    paid = sum(p.get("amount", 0) for p in pmts)
+    items = []
+    for t in txns:
+        for i in t.get("items", []):
+            items.append(i)
+    return {"date": today, "items": items, "total_billed": round(billed, 2), "total_paid": round(paid, 2), "balance": round(billed - paid, 2), "transactions": len(txns)}
+
+@api_router.get("/vendors/{vendor_id}/sales-summary")
+async def vendor_sales_summary(vendor_id: str, request: Request, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """Aggregated outsourced-product sales for a vendor over a date range.
+    Surfaces what was auto-billed via outsourced order flow vs. payments made.
+    """
+    await get_current_user(request)
+    q = {"vendor_id": vendor_id}
+    if start_date and end_date:
+        q["date"] = {"$gte": start_date, "$lte": end_date}
+    elif start_date:
+        q["date"] = {"$gte": start_date}
+    elif end_date:
+        q["date"] = {"$lte": end_date}
+    txns = await db.vendor_transactions.find(q).to_list(5000)
+    pmts = await db.vendor_payments.find(q).to_list(5000)
+    auto_billed = 0.0  # from auto outsourced sales
+    auto_reversed = 0.0  # from refunds reversing outsourced sales
+    manual_billed = 0.0
+    by_product = {}
+    for t in txns:
+        amount = float(t.get("total", 0))
+        src = t.get("auto_source")
+        if src == "order":
+            auto_billed += amount
+        elif src == "refund":
+            auto_reversed += amount  # already negative
+        else:
+            manual_billed += amount
+        for it in t.get("items", []):
+            key = it.get("name", "Unknown")
+            entry = by_product.setdefault(key, {"name": key, "quantity": 0, "total": 0.0})
+            entry["quantity"] += int(it.get("quantity", 0)) * (1 if amount >= 0 else -1)
+            entry["total"] = round(entry["total"] + (float(it.get("unit_price", 0)) * int(it.get("quantity", 0))) * (1 if amount >= 0 else -1), 2)
+    total_paid = sum(float(p.get("amount", 0)) for p in pmts)
+    total_billed = round(auto_billed + auto_reversed + manual_billed, 2)
+    return {
+        "vendor_id": vendor_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "auto_billed_from_orders": round(auto_billed, 2),
+        "auto_reversed_from_refunds": round(auto_reversed, 2),
+        "manual_billed": round(manual_billed, 2),
+        "total_billed": total_billed,
+        "total_paid": round(total_paid, 2),
+        "balance": round(total_billed - total_paid, 2),
+        "products": sorted(by_product.values(), key=lambda x: x["total"], reverse=True),
+        "transactions_count": len(txns),
+        "payments_count": len(pmts),
+    }
+
+# --- Reports ---
+def calc_report(orders, expenses=None, refunds=None):
+    total_sales = sum(o.get("total", 0) for o in orders)
+    cash = sum(o.get("total", 0) for o in orders if o.get("payment_type") == "cash")
+    credit = sum(o.get("total", 0) for o in orders if o.get("payment_type") == "credit")
+    fp1 = sum(o.get("total", 0) for o in orders if o.get("payment_type") == "foodpanda1")
+    fp2 = sum(o.get("total", 0) for o in orders if o.get("payment_type") == "foodpanda2")
+    online = fp1 + fp2
+    total_orders = len(orders)
+    total_items = sum(sum(i.get("quantity", 0) for i in o.get("items", [])) for o in orders)
+    ic = {}
+    for o in orders:
+        for i in o.get("items", []):
+            k = i.get("name", "Unknown")
+            ic[k] = ic.get(k, 0) + i.get("quantity", 0)
+    top = sorted(ic.items(), key=lambda x: x[1], reverse=True)[:10]
+    total_exp = sum(e.get("amount", 0) for e in (expenses or []))
+    total_ref = sum(r.get("amount", 0) for r in (refunds or []))
+    return {"total_sales": round(total_sales, 2), "cash_sales": round(cash, 2), "credit_sales": round(credit, 2), "foodpanda1_sales": round(fp1, 2), "foodpanda2_sales": round(fp2, 2), "online_sales": round(online, 2), "total_orders": total_orders, "total_items_sold": total_items, "top_items": [{"name": n, "quantity": q} for n, q in top], "total_expenses": round(total_exp, 2), "total_refunds": round(total_ref, 2), "net_revenue": round(total_sales - total_exp - total_ref, 2)}
+
+@api_router.get("/reports/x")
+async def get_x_report(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    orders = await db.orders.find({"date": today}).to_list(10000)
+    expenses = await db.expenses.find({"date": today}).to_list(500)
+    refunds = await db.refunds.find({"date": today}).to_list(500)
+    r = calc_report(orders, expenses, refunds)
+    r.update({"date": today, "report_type": "X", "generated_at": datetime.now(timezone.utc).isoformat()})
+    return r
+
+@api_router.get("/reports/z")
+async def get_z_report(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin" and "reports_z" not in (user.get("permissions") or []):
+        raise HTTPException(status_code=403, detail="Z Report permission required")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    orders = await db.orders.find({"date": today}).to_list(10000)
+    expenses = await db.expenses.find({"date": today}).to_list(500)
+    refunds = await db.refunds.find({"date": today}).to_list(500)
+    r = calc_report(orders, expenses, refunds)
+    r.update({"date": today, "report_type": "Z", "generated_at": datetime.now(timezone.utc).isoformat()})
+    return r
+
+@api_router.post("/reports/z/close")
+async def close_z_report(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin" and "reports_z" not in (user.get("permissions") or []):
+        raise HTTPException(status_code=403, detail="Z Report permission required")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if await db.z_reports.find_one({"date": today}): raise HTTPException(status_code=400, detail="Z Report already closed for today")
+    orders = await db.orders.find({"date": today}).to_list(10000)
+    expenses = await db.expenses.find({"date": today}).to_list(500)
+    refunds = await db.refunds.find({"date": today}).to_list(500)
+    r = calc_report(orders, expenses, refunds)
+    r.update({"date": today, "report_type": "Z", "closed_at": datetime.now(timezone.utc).isoformat(), "closed_by": user["_id"]})
+    await db.z_reports.insert_one(r)
+    response = {"message": "Z Report closed and archived", "report": {k: v for k, v in r.items() if k != "_id"}}
+
+    # Auto-email if configured
+    try:
+        s = await _get_settings_doc()
+        if s.get("auto_email_on_z_close") and s.get("smtp_host") and s.get("smtp_user") and s.get("smtp_password"):
+            recipients = _filter_recipients(s.get("email_recipients", []), "Z")
+            if recipients:
+                rep = {**r}
+                rep.pop("_id", None)
+                rep["report_type"] = "Z"
+                subject, plain, html = _format_report_email(rep, s)
+                await asyncio.to_thread(_send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user",""), s.get("smtp_password",""), bool(s.get("smtp_use_tls", True)), s.get("smtp_from") or s.get("smtp_user"), recipients, subject, plain, html)
+                response["emailed_to"] = recipients
+    except Exception as e:
+        logger.error(f"Auto-email on Z close failed: {e}")
+        response["email_error"] = str(e)[:200]
+
+    return response
+
+@api_router.get("/reports/history")
+async def get_report_history(request: Request, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    user = await get_current_user(request)
+    if user.get("role") != "admin" and "reports_z" not in (user.get("permissions") or []):
+        raise HTTPException(status_code=403, detail="Z Report permission required")
+    query = {}
+    if start_date and end_date:
+        query["date"] = {"$gte": start_date, "$lte": end_date}
+    elif start_date:
+        query["date"] = {"$gte": start_date}
+    else:
+        two_months_ago = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d")
+        query["date"] = {"$gte": two_months_ago}
+    reports = await db.z_reports.find(query, {"_id": 0}).sort("date", -1).to_list(100)
+    return reports
+
+@api_router.get("/reports/export/csv")
+async def export_report_csv(request: Request):
+    await get_current_user(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    orders = await db.orders.find({"date": today}, {"_id": 0}).to_list(10000)
+    rows = []
+    for o in orders:
+        for item in o.get("items", []):
+            rows.append({"date": o.get("date"), "time": o.get("created_at", ""), "item_name": item.get("name"), "quantity": item.get("quantity", 0), "unit_price": item.get("price", 0), "line_total": round(item.get("price", 0) * item.get("quantity", 0), 2), "payment_type": o.get("payment_type"), "discount": o.get("discount_amount", 0), "order_total": o.get("total", 0), "cashier": o.get("cashier_name", "")})
+    return rows
+
+@api_router.get("/reports/history/export")
+async def export_history_csv(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin" and "reports_z" not in (user.get("permissions") or []):
+        raise HTTPException(status_code=403, detail="Z Report permission required")
+    two_months_ago = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d")
+    return await db.z_reports.find({"date": {"$gte": two_months_ago}}, {"_id": 0}).sort("date", -1).to_list(100)
+
+# --- Email Reports ---
+def _format_report_email(report: dict, settings: dict) -> tuple:
+    """Returns (subject, plain_body, html_body) for a report email."""
+    rname = settings.get("restaurant_name", "RestoPOS")
+    cur = settings.get("currency", "Rs")
+    rtype = report.get("report_type", "X")
+    date = report.get("date", "")
+
+    def fmt(v):
+        try: return f"{cur} {float(v):,.2f}"
+        except: return f"{cur} 0.00"
+
+    subject = f"[{rname}] {rtype}-Report — {date}"
+
+    lines = [
+        f"{rname}",
+        f"{rtype}-Report for {date}",
+        "=" * 50,
+        "",
+        f"Total Sales:        {fmt(report.get('total_sales', 0))}",
+        f"  Cash:             {fmt(report.get('cash_sales', 0))}",
+        f"  Card:             {fmt(report.get('credit_sales', 0))}",
+        f"  FoodPanda 1:      {fmt(report.get('foodpanda1_sales', 0))}",
+        f"  FoodPanda 2:      {fmt(report.get('foodpanda2_sales', 0))}",
+        "",
+        f"Total Orders:       {report.get('total_orders', 0)}",
+        f"Items Sold:         {report.get('total_items_sold', 0)}",
+        f"Expenses:           {fmt(report.get('total_expenses', 0))}",
+        f"Refunds:            {fmt(report.get('total_refunds', 0))}",
+        f"Net Revenue:        {fmt(report.get('net_revenue', 0))}",
+        "",
+        "Top Items:",
+    ]
+    for ti in (report.get("top_items") or [])[:10]:
+        lines.append(f"  - {ti.get('name')} × {ti.get('quantity')}")
+    lines += ["", "—", "Sent automatically by RestoPOS"]
+    plain = "\n".join(lines)
+
+    rows_html = "".join(
+        f"<tr><td style='padding:4px 12px'>{ti.get('name')}</td><td style='padding:4px 12px;text-align:right'>{ti.get('quantity')}</td></tr>"
+        for ti in (report.get("top_items") or [])[:10]
+    )
+    html = f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;color:#1A1D1A;background:#F9F8F6;padding:24px">
+<div style="max-width:600px;margin:auto;background:white;border:1px solid #E5E2DC;border-radius:12px;overflow:hidden">
+  <div style="background:#1E3F20;color:white;padding:20px"><h2 style="margin:0">{rname}</h2><p style="margin:4px 0 0;opacity:0.85">{rtype}-Report — {date}</p></div>
+  <div style="padding:24px">
+    <h3 style="margin:0 0 12px;color:#1E3F20">Sales Summary</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:14px">
+      <tr><td style="padding:6px 0">Total Sales</td><td style="text-align:right;font-weight:bold">{fmt(report.get('total_sales',0))}</td></tr>
+      <tr style="color:#5C5F5C"><td style="padding:4px 0 4px 16px">Cash</td><td style="text-align:right">{fmt(report.get('cash_sales',0))}</td></tr>
+      <tr style="color:#5C5F5C"><td style="padding:4px 0 4px 16px">Card</td><td style="text-align:right">{fmt(report.get('credit_sales',0))}</td></tr>
+      <tr style="color:#5C5F5C"><td style="padding:4px 0 4px 16px">FoodPanda 1</td><td style="text-align:right">{fmt(report.get('foodpanda1_sales',0))}</td></tr>
+      <tr style="color:#5C5F5C"><td style="padding:4px 0 4px 16px">FoodPanda 2</td><td style="text-align:right">{fmt(report.get('foodpanda2_sales',0))}</td></tr>
+      <tr><td colspan="2" style="border-top:1px solid #E5E2DC;padding:6px 0"></td></tr>
+      <tr><td style="padding:4px 0">Total Orders</td><td style="text-align:right">{report.get('total_orders',0)}</td></tr>
+      <tr><td style="padding:4px 0">Items Sold</td><td style="text-align:right">{report.get('total_items_sold',0)}</td></tr>
+      <tr><td style="padding:4px 0;color:#A63D31">Expenses</td><td style="text-align:right;color:#A63D31">{fmt(report.get('total_expenses',0))}</td></tr>
+      <tr><td style="padding:4px 0;color:#A63D31">Refunds</td><td style="text-align:right;color:#A63D31">{fmt(report.get('total_refunds',0))}</td></tr>
+      <tr><td style="padding:8px 0;font-weight:bold;color:#1E3F20">Net Revenue</td><td style="text-align:right;font-weight:bold;color:#1E3F20">{fmt(report.get('net_revenue',0))}</td></tr>
+    </table>
+    <h3 style="margin:24px 0 8px;color:#1E3F20">Top Items</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;border:1px solid #E5E2DC">
+      <thead style="background:#F9F8F6"><tr><th style="text-align:left;padding:6px 12px">Item</th><th style="text-align:right;padding:6px 12px">Qty</th></tr></thead>
+      <tbody>{rows_html or '<tr><td colspan=2 style="padding:12px;color:#5C5F5C">No items</td></tr>'}</tbody>
+    </table>
+  </div>
+  <div style="padding:12px 24px;background:#F9F8F6;border-top:1px solid #E5E2DC;font-size:12px;color:#5C5F5C">Sent automatically by RestoPOS</div>
+</div></body></html>"""
+    return subject, plain, html
+
+
+def _send_email_sync(host, port, user, password, use_tls, sender, to_list, subject, plain, html):
+    """Synchronous SMTP send. Raises on error."""
+    msg = EmailMessage()
+    msg["From"] = sender or user
+    msg["To"] = ", ".join(to_list)
+    msg["Subject"] = subject
+    msg.set_content(plain)
+    if html:
+        msg.add_alternative(html, subtype="html")
+
+    if int(port) == 465:
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL(host, int(port), context=ctx, timeout=20) as s:
+            if user and password:
+                s.login(user, password)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(host, int(port), timeout=20) as s:
+            s.ehlo()
+            if use_tls:
+                s.starttls(context=ssl.create_default_context())
+                s.ehlo()
+            if user and password:
+                s.login(user, password)
+            s.send_message(msg)
+
+
+async def _get_settings_doc() -> dict:
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+    return {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()}
+
+
+def _validate_smtp(s: dict):
+    if not s.get("smtp_host"): raise HTTPException(status_code=400, detail="SMTP host not configured. Go to Settings → Email.")
+    if not s.get("smtp_port"): raise HTTPException(status_code=400, detail="SMTP port not configured.")
+    if not (s.get("smtp_user") and s.get("smtp_password")):
+        raise HTTPException(status_code=400, detail="SMTP username/password not configured.")
+
+
+def _filter_recipients(recipients: list, report_type: str) -> list:
+    """Pick recipients who opted-in for the given report type. report_type is 'X' or 'Z'."""
+    out = []
+    key = "receive_x" if report_type.upper() == "X" else "receive_z"
+    for r in (recipients or []):
+        if not r.get("email"): continue
+        # Default to True if flag missing
+        if r.get(key, True):
+            out.append(r["email"])
+    return out
+
+
+@api_router.post("/email/test")
+async def email_test(request: Request, body: Dict[str, Any] = None):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    _validate_smtp(s)
+    body = body or {}
+    to = body.get("to") or s.get("smtp_user")
+    if not to: raise HTTPException(status_code=400, detail="No recipient address")
+    subject = f"[{s.get('restaurant_name','RestoPOS')}] Test Email"
+    plain = "If you received this, your SMTP configuration is working correctly."
+    html = f"<p>If you received this, your <b>SMTP configuration</b> is working correctly.</p><p style='color:#5C5F5C'>From: {s.get('restaurant_name','RestoPOS')}</p>"
+    try:
+        await asyncio.to_thread(_send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user",""), s.get("smtp_password",""), bool(s.get("smtp_use_tls", True)), s.get("smtp_from") or s.get("smtp_user"), [to], subject, plain, html)
+    except Exception as e:
+        logger.error(f"SMTP test failed: {e}")
+        raise HTTPException(status_code=500, detail=f"SMTP error: {str(e)[:200]}")
+    return {"message": f"Test email sent to {to}"}
+
+
+@api_router.post("/email/send-report")
+async def email_send_report(request: Request, body: Dict[str, Any]):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    _validate_smtp(s)
+
+    report_type = (body.get("report_type") or "X").upper()
+    report_id_date = body.get("date")  # optional: pick a specific archived Z-report
+    extra_to = body.get("extra_recipients") or []
+
+    # Get the report data
+    if report_id_date:
+        rep = await db.z_reports.find_one({"date": report_id_date}, {"_id": 0})
+        if not rep: raise HTTPException(status_code=404, detail="Report not found")
+        rep["report_type"] = "Z"
+    else:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        orders = await db.orders.find({"date": today}).to_list(10000)
+        expenses = await db.expenses.find({"date": today}).to_list(500)
+        refunds = await db.refunds.find({"date": today}).to_list(500)
+        rep = calc_report(orders, expenses, refunds)
+        rep.update({"date": today, "report_type": report_type})
+
+    # Build recipients list
+    cfg_recipients = _filter_recipients(s.get("email_recipients", []), rep.get("report_type", "X"))
+    recipients = list(dict.fromkeys([*cfg_recipients, *[e for e in extra_to if e]]))
+    if not recipients:
+        raise HTTPException(status_code=400, detail="No recipients configured. Add at least one in Settings → Email.")
+
+    subject, plain, html = _format_report_email(rep, s)
+    try:
+        await asyncio.to_thread(_send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user",""), s.get("smtp_password",""), bool(s.get("smtp_use_tls", True)), s.get("smtp_from") or s.get("smtp_user"), recipients, subject, plain, html)
+    except Exception as e:
+        logger.error(f"SMTP send failed: {e}")
+        raise HTTPException(status_code=500, detail=f"SMTP error: {str(e)[:200]}")
+    return {"message": f"Report sent to {len(recipients)} recipient(s)", "recipients": recipients}
+
+
+# --- WhatsApp (proxy to local Node service) ---
+def _format_report_whatsapp(report: dict, settings: dict) -> str:
+    rname = settings.get("restaurant_name", "RestoPOS")
+    cur = settings.get("currency", "Rs")
+    rtype = report.get("report_type", "X")
+    date = report.get("date", "")
+
+    def fmt(v):
+        try: return f"{cur} {float(v):,.2f}"
+        except: return f"{cur} 0.00"
+
+    lines = [
+        f"*{rname}*",
+        f"*{rtype}-Report — {date}*",
+        "",
+        f"💰 Total Sales: *{fmt(report.get('total_sales', 0))}*",
+        f"   • Cash: {fmt(report.get('cash_sales', 0))}",
+        f"   • Card: {fmt(report.get('credit_sales', 0))}",
+        f"   • FoodPanda 1: {fmt(report.get('foodpanda1_sales', 0))}",
+        f"   • FoodPanda 2: {fmt(report.get('foodpanda2_sales', 0))}",
+        "",
+        f"🛒 Orders: {report.get('total_orders', 0)}",
+        f"📦 Items Sold: {report.get('total_items_sold', 0)}",
+        f"💸 Expenses: {fmt(report.get('total_expenses', 0))}",
+        f"↩️ Refunds: {fmt(report.get('total_refunds', 0))}",
+        f"📈 *Net Revenue: {fmt(report.get('net_revenue', 0))}*",
+    ]
+    top = report.get("top_items") or []
+    if top:
+        lines += ["", "*Top Items:*"]
+        for ti in top[:5]:
+            lines.append(f"  • {ti.get('name')} × {ti.get('quantity')}")
+    lines += ["", "_Sent automatically by RestoPOS_"]
+    return "\n".join(lines)
+
+
+def _filter_whatsapp_recipients(recipients: list, report_type: str) -> list:
+    out = []
+    key = "receive_x" if report_type.upper() == "X" else "receive_z"
+    for r in (recipients or []):
+        if not r.get("phone"): continue
+        if r.get(key, True):
+            out.append({"name": r.get("name", ""), "phone": r["phone"]})
+    return out
+
+
+async def _wa_get(path: str, settings: dict, timeout: float = 10.0):
+    url = (settings.get("whatsapp_service_url") or "http://127.0.0.1:3030").rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        r = await c.get(f"{url}{path}")
+        return r
+
+
+async def _wa_post(path: str, payload: dict, settings: dict, timeout: float = 30.0):
+    url = (settings.get("whatsapp_service_url") or "http://127.0.0.1:3030").rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        r = await c.post(f"{url}{path}", json=payload)
+        return r
+
+
+@api_router.get("/whatsapp/status")
+async def whatsapp_status(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    try:
+        r = await _wa_get("/status", s, timeout=5.0)
+        return r.json()
+    except Exception as e:
+        return {"ready": False, "phone": None, "qr_available": False, "error": f"Service not reachable: {str(e)[:160]}"}
+
+
+@api_router.get("/whatsapp/qr")
+async def whatsapp_qr(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    try:
+        r = await _wa_get("/qr", s, timeout=5.0)
+        if r.status_code == 404: return {"qr": None, "ready": False, "message": "QR not yet generated"}
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"WhatsApp service not reachable: {str(e)[:160]}")
+
+
+@api_router.post("/whatsapp/reset")
+async def whatsapp_reset(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    try:
+        r = await _wa_post("/reset", {}, s, timeout=15.0)
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"WhatsApp service not reachable: {str(e)[:160]}")
+
+
+@api_router.post("/whatsapp/test")
+async def whatsapp_test(request: Request, body: Dict[str, Any]):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    to = (body or {}).get("to")
+    if not to: raise HTTPException(status_code=400, detail="Phone number required (e.g., +923004928411)")
+    msg = (body or {}).get("message") or f"Test message from {s.get('restaurant_name','RestoPOS')}. If you got this, WhatsApp integration is working ✅"
+    try:
+        r = await _wa_post("/send", {"to": to, "message": msg}, s, timeout=20.0)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"WhatsApp service not reachable: {str(e)[:160]}")
+    if r.status_code >= 400:
+        try: detail = r.json().get("error", "Failed")
+        except: detail = "Failed"
+        raise HTTPException(status_code=r.status_code, detail=detail)
+    return {"message": f"Test message sent to {to}"}
+
+
+@api_router.post("/whatsapp/send-report")
+async def whatsapp_send_report(request: Request, body: Dict[str, Any]):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+
+    report_type = (body.get("report_type") or "X").upper()
+    report_id_date = body.get("date")
+    extra_to = body.get("extra_recipients") or []  # list of phone strings
+
+    if report_id_date:
+        rep = await db.z_reports.find_one({"date": report_id_date}, {"_id": 0})
+        if not rep: raise HTTPException(status_code=404, detail="Report not found")
+        rep["report_type"] = "Z"
+    else:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        orders = await db.orders.find({"date": today}).to_list(10000)
+        expenses = await db.expenses.find({"date": today}).to_list(500)
+        refunds = await db.refunds.find({"date": today}).to_list(500)
+        rep = calc_report(orders, expenses, refunds)
+        rep.update({"date": today, "report_type": report_type})
+
+    cfg_recipients = _filter_whatsapp_recipients(s.get("whatsapp_recipients", []), rep.get("report_type", "X"))
+    phones = list(dict.fromkeys([*[r["phone"] for r in cfg_recipients], *[p for p in extra_to if p]]))
+    if not phones:
+        raise HTTPException(status_code=400, detail="No WhatsApp recipients configured. Add at least one in Settings → WhatsApp.")
+
+    message = _format_report_whatsapp(rep, s)
+    sent_to, failed = [], []
+    for phone in phones:
+        try:
+            r = await _wa_post("/send", {"to": phone, "message": message}, s, timeout=30.0)
+            if r.status_code < 400:
+                sent_to.append(phone)
+            else:
+                try: err = r.json().get("error", f"HTTP {r.status_code}")
+                except: err = f"HTTP {r.status_code}"
+                failed.append({"phone": phone, "error": err})
+        except Exception as e:
+            failed.append({"phone": phone, "error": f"Service unreachable: {str(e)[:120]}"})
+
+    if not sent_to and failed:
+        raise HTTPException(status_code=502, detail={"message": "All sends failed", "failed": failed})
+    return {"message": f"Sent to {len(sent_to)} recipient(s)", "sent_to": sent_to, "failed": failed}
+
+
+# --- Daily Auto-Send Scheduler ---
+scheduler: Optional[AsyncIOScheduler] = None
+
+
+async def _build_report_for_scheduler(s: dict) -> dict:
+    """Generate the report to send. Default is yesterday's data."""
+    use_yesterday = (s.get("daily_report_type") or "yesterday").lower() == "yesterday"
+    target = (datetime.now(timezone.utc) - timedelta(days=1)) if use_yesterday else datetime.now(timezone.utc)
+    target_date = target.strftime("%Y-%m-%d")
+
+    # Prefer archived Z report if it exists for that date
+    z_archived = await db.z_reports.find_one({"date": target_date}, {"_id": 0})
+    if z_archived:
+        z_archived["report_type"] = "Z"
+        return z_archived
+
+    orders = await db.orders.find({"date": target_date}).to_list(10000)
+    expenses = await db.expenses.find({"date": target_date}).to_list(500)
+    refunds = await db.refunds.find({"date": target_date}).to_list(500)
+    r = calc_report(orders, expenses, refunds)
+    r.update({"date": target_date, "report_type": "Z" if use_yesterday else "X"})
+    return r
+
+
+async def _send_whatsapp_to_recipients(rep: dict, s: dict):
+    cfg = _filter_whatsapp_recipients(s.get("whatsapp_recipients", []), rep.get("report_type", "Z"))
+    if not cfg: return {"sent": 0, "failed": 0}
+    msg = _format_report_whatsapp(rep, s)
+    sent, failed = 0, 0
+    for r in cfg:
+        try:
+            resp = await _wa_post("/send", {"to": r["phone"], "message": msg}, s, timeout=30.0)
+            if resp.status_code < 400: sent += 1
+            else: failed += 1
+        except Exception:
+            failed += 1
+    return {"sent": sent, "failed": failed}
+
+
+async def _send_email_to_recipients(rep: dict, s: dict):
+    cfg = _filter_recipients(s.get("email_recipients", []), rep.get("report_type", "Z"))
+    if not cfg: return {"sent": 0, "skipped": True}
+    if not (s.get("smtp_host") and s.get("smtp_user") and s.get("smtp_password")):
+        return {"sent": 0, "skipped": True, "reason": "SMTP not configured"}
+    subject, plain, html = _format_report_email(rep, s)
+    try:
+        await asyncio.to_thread(_send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user",""), s.get("smtp_password",""), bool(s.get("smtp_use_tls", True)), s.get("smtp_from") or s.get("smtp_user"), cfg, subject, plain, html)
+        return {"sent": len(cfg)}
+    except Exception as e:
+        logger.error(f"Scheduled email send failed: {e}")
+        return {"sent": 0, "error": str(e)[:200]}
+
+
+async def daily_report_job():
+    """Runs at the configured time. Sends yesterday's (or today's) report via email & WhatsApp if enabled."""
+    try:
+        s = await _get_settings_doc()
+        if not (s.get("auto_email_daily") or s.get("auto_whatsapp_daily")):
+            logger.info("Daily report job: both email & whatsapp auto-send are off; skipping")
+            return
+        rep = await _build_report_for_scheduler(s)
+        results = {"email": None, "whatsapp": None}
+        if s.get("auto_email_daily"):
+            results["email"] = await _send_email_to_recipients(rep, s)
+        if s.get("auto_whatsapp_daily"):
+            results["whatsapp"] = await _send_whatsapp_to_recipients(rep, s)
+        # Log a summary record
+        await db.scheduled_runs.insert_one({
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+            "report_date": rep.get("date"),
+            "report_type": rep.get("report_type"),
+            "results": results,
+        })
+        logger.info(f"Daily report job complete: {results}")
+    except Exception as e:
+        logger.exception(f"Daily report job error: {e}")
+
+
+async def _reschedule_daily_job():
+    global scheduler
+    if scheduler is None: return
+    s = await _get_settings_doc()
+    time_str = s.get("daily_report_time") or "02:15"
+    tz_name = s.get("daily_report_timezone") or "Asia/Karachi"
+    try:
+        hh, mm = [int(x) for x in time_str.split(":")[:2]]
+        tz = pytz.timezone(tz_name)
+    except Exception as e:
+        logger.error(f"Invalid schedule time/tz '{time_str}' / '{tz_name}': {e}")
+        return
+    # Replace existing job
+    try: scheduler.remove_job("daily_report")
+    except Exception: pass
+    scheduler.add_job(daily_report_job, CronTrigger(hour=hh, minute=mm, timezone=tz), id="daily_report", replace_existing=True, misfire_grace_time=3600)
+    logger.info(f"Daily report scheduled for {hh:02d}:{mm:02d} {tz_name}")
+
+
+@api_router.get("/schedule/status")
+async def schedule_status(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    info = {"daily_report_time": s.get("daily_report_time"), "daily_report_timezone": s.get("daily_report_timezone"), "auto_email_daily": bool(s.get("auto_email_daily")), "auto_whatsapp_daily": bool(s.get("auto_whatsapp_daily")), "daily_report_type": s.get("daily_report_type"), "next_run": None}
+    if scheduler is not None:
+        try:
+            j = scheduler.get_job("daily_report")
+            if j and j.next_run_time:
+                info["next_run"] = j.next_run_time.isoformat()
+        except Exception: pass
+    return info
+
+
+@api_router.post("/schedule/run-now")
+async def schedule_run_now(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    asyncio.create_task(daily_report_job())
+    return {"message": "Daily report job triggered. Check logs."}
+
+
+@api_router.get("/schedule/timezones")
+async def list_timezones(request: Request):
+    await get_current_user(request)
+    # A curated short list — full pytz list is too large for a dropdown
+    return [
+        "Asia/Karachi", "Asia/Dubai", "Asia/Riyadh", "Asia/Kolkata", "Asia/Dhaka",
+        "Asia/Singapore", "Asia/Hong_Kong", "Asia/Tokyo", "Asia/Seoul",
+        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Istanbul",
+        "Africa/Cairo", "Africa/Johannesburg",
+        "America/New_York", "America/Chicago", "America/Los_Angeles", "America/Toronto",
+        "America/Sao_Paulo",
+        "Australia/Sydney", "Pacific/Auckland",
+        "UTC",
+    ]
+
+
+# --- Cloudflare Tunnel ---
+import re as _re
+_TUNNEL_URL_RE = _re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def _resolve_tunnel_log_path(custom: str = "") -> str:
+    if custom and os.path.exists(custom):
+        return custom
+    # default candidates relative to project root
+    root = ROOT_DIR.parent
+    for name in ("cloudflared.log", "tunnel.log", "windows-setup/cloudflared.log"):
+        p = root / name
+        if p.exists():
+            return str(p)
+    return ""
+
+
+def _read_tunnel_url_from_log(path: str) -> Optional[str]:
+    """Find the most recent trycloudflare.com URL in the log file."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            # Read tail (last 64 KB is plenty)
+            try:
+                f.seek(0, 2); size = f.tell(); f.seek(max(0, size - 65536))
+            except Exception:
+                pass
+            content = f.read()
+        matches = _TUNNEL_URL_RE.findall(content)
+        return matches[-1] if matches else None
+    except Exception:
+        return None
+
+
+async def _maybe_notify_tunnel_url_change(new_url: str):
+    """Email and WhatsApp the new tunnel URL to recipients (if enabled)."""
+    try:
+        s = await _get_settings_doc()
+        if not s.get("tunnel_notify_on_change"): return
+        rname = s.get("restaurant_name", "RestoPOS")
+        msg_text = f"RestoPOS is online.\n\nRemote access URL:\n{new_url}\n\nLogin: {s.get('restaurant_email','admin@restaurant.com')} / your password\n\n— {rname}"
+        msg_html = f"""<div style="font-family:Arial,sans-serif"><h2 style="color:#1E3F20">{rname} is online</h2><p>You can now access your POS from anywhere using:</p><p style="margin:16px 0"><a href="{new_url}" style="background:#1E3F20;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold">{new_url}</a></p><p style="color:#5C5F5C;font-size:13px">Login with the same admin email/password you use locally. This URL changes every time the Pakistan PC restarts.</p></div>"""
+        # Email
+        if s.get("smtp_host") and s.get("smtp_user") and s.get("smtp_password"):
+            email_to = [r["email"] for r in (s.get("email_recipients") or []) if r.get("email")]
+            if email_to:
+                try:
+                    await asyncio.to_thread(_send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user",""), s.get("smtp_password",""), bool(s.get("smtp_use_tls", True)), s.get("smtp_from") or s.get("smtp_user"), email_to, f"[{rname}] Remote access URL", msg_text, msg_html)
+                    logger.info(f"Notified email recipients of new tunnel URL: {new_url}")
+                except Exception as e: logger.error(f"Tunnel notify email failed: {e}")
+        # WhatsApp
+        wa_to = [r["phone"] for r in (s.get("whatsapp_recipients") or []) if r.get("phone")]
+        if wa_to:
+            for phone in wa_to:
+                try:
+                    await _wa_post("/send", {"to": phone, "message": msg_text}, s, timeout=20.0)
+                except Exception: pass
+            logger.info(f"Notified WhatsApp recipients of new tunnel URL: {new_url}")
+    except Exception as e:
+        logger.exception(f"Tunnel notify failed: {e}")
+
+
+async def tunnel_watcher_loop():
+    """Background task: periodically reads cloudflared log and updates tunnel URL in DB."""
+    last_seen = None
+    while True:
+        try:
+            s = await _get_settings_doc()
+            log_path = _resolve_tunnel_log_path(s.get("tunnel_log_path") or "")
+            if log_path:
+                url = _read_tunnel_url_from_log(log_path)
+                if url and url != last_seen:
+                    await db.tunnel.update_one({"key": "current"}, {"$set": {"url": url, "updated_at": datetime.now(timezone.utc).isoformat(), "log_path": log_path}}, upsert=True)
+                    # always notify on change (including first detection after restart)
+                    await _maybe_notify_tunnel_url_change(url)
+                    logger.info(f"Tunnel URL updated: {url}")
+                    last_seen = url
+        except Exception as e:
+            logger.error(f"Tunnel watcher error: {e}")
+        await asyncio.sleep(15)
+
+
+@api_router.get("/tunnel/status")
+async def get_tunnel_status(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    log_path = _resolve_tunnel_log_path(s.get("tunnel_log_path") or "")
+    cur = await db.tunnel.find_one({"key": "current"}, {"_id": 0}) or {}
+    return {
+        "url": cur.get("url"),
+        "updated_at": cur.get("updated_at"),
+        "log_path": log_path or s.get("tunnel_log_path") or "",
+        "log_exists": bool(log_path),
+        "notify_on_change": bool(s.get("tunnel_notify_on_change", True)),
+    }
+
+
+@api_router.post("/tunnel/refresh")
+async def refresh_tunnel(request: Request):
+    """Force a re-read of the tunnel log."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
+    s = await _get_settings_doc()
+    log_path = _resolve_tunnel_log_path(s.get("tunnel_log_path") or "")
+    if not log_path: return {"url": None, "message": "No log file found yet"}
+    url = _read_tunnel_url_from_log(log_path)
+    if url:
+        await db.tunnel.update_one({"key": "current"}, {"$set": {"url": url, "updated_at": datetime.now(timezone.utc).isoformat(), "log_path": log_path}}, upsert=True)
+    return {"url": url, "log_path": log_path}
+
+
+# --- Dashboard ---
+@api_router.get("/dashboard/stats")
+async def get_dashboard_stats(request: Request, date: Optional[str] = None):
+    await get_current_user(request)
+    target_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Check if day was closed
+    z_closed = await db.z_reports.find_one({"date": target_date})
+    is_closed = z_closed is not None
+    orders = await db.orders.find({"date": target_date}).to_list(10000)
+    expenses = await db.expenses.find({"date": target_date}).to_list(500)
+    refunds = await db.refunds.find({"date": target_date}).to_list(500)
+    r = calc_report(orders, expenses, refunds)
+    low_stock = await db.menu_items.aggregate([{"$match": {"$expr": {"$lte": ["$stock", "$low_stock_threshold"]}}}]).to_list(500)
+    r.update({"today": target_date, "is_closed": is_closed, "low_stock_count": len(low_stock), "total_menu_items": await db.menu_items.count_documents({}), "total_categories": await db.categories.count_documents({})})
+    return r
+
+@api_router.get("/dashboard/hourly-sales")
+async def get_hourly_sales(request: Request, date: Optional[str] = None):
+    await get_current_user(request)
+    target_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    orders = await db.orders.find({"date": target_date}).to_list(10000)
+    hourly = {f"{h:02d}:00": {"hour": f"{h:02d}:00", "cash": 0.0, "credit": 0.0, "online": 0.0, "total": 0.0, "orders": 0} for h in range(24)}
+    for o in orders:
+        try:
+            ts = datetime.fromisoformat(o["created_at"])
+            label = f"{ts.hour:02d}:00"
+            amt = o.get("total", 0)
+            hourly[label]["total"] = round(hourly[label]["total"] + amt, 2)
+            hourly[label]["orders"] += 1
+            pt = o.get("payment_type", "cash")
+            if pt == "cash": hourly[label]["cash"] = round(hourly[label]["cash"] + amt, 2)
+            elif pt == "credit": hourly[label]["credit"] = round(hourly[label]["credit"] + amt, 2)
+            else: hourly[label]["online"] = round(hourly[label]["online"] + amt, 2)
+        except: pass
+    return list(hourly.values())
+
+# --- Data Management (Admin) ---
+@api_router.get("/data/export")
+async def export_all_data(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    data = {"_meta": {"exported_at": datetime.now(timezone.utc).isoformat(), "version": 2}}
+    # Include users (for password) and settings (for SMTP/WhatsApp/Schedule config)
+    for col_name in ["users", "settings", "categories", "menu_items", "vendors", "orders", "z_reports", "expenses", "vendor_transactions", "vendor_payments", "refunds"]:
+        col = db[col_name]
+        docs = await col.find({}).to_list(100000)
+        data[col_name] = [
+            {k: (str(v) if k == "_id" else v) for k, v in d.items()}
+            for d in docs
+        ]
+    return data
+
+@api_router.get("/data/stats")
+async def get_data_stats(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    stats = {}
+    for col_name in ["orders", "z_reports", "expenses", "vendor_transactions", "vendor_payments", "refunds"]:
+        stats[col_name] = await db[col_name].count_documents({})
+    return stats
+
+class DataDeleteRequest(BaseModel):
+    before_date: str
+    collections: List[str]
+
+@api_router.post("/data/delete")
+async def delete_old_data(req: DataDeleteRequest, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    deleted = {}
+    for col_name in req.collections:
+        if col_name in ["orders", "z_reports", "expenses", "vendor_transactions", "vendor_payments"]:
+            result = await db[col_name].delete_many({"date": {"$lt": req.before_date}})
+            deleted[col_name] = result.deleted_count
+    return {"message": "Data deleted", "deleted": deleted}
+
+@api_router.post("/data/import")
+async def import_data(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    body = await request.json()
+    imported = {}
+    # Replace mode: wipe target collections and reinsert with original IDs preserved
+    # so cross-collection refs (menu_item.category_id, vendor_transaction.vendor_id) stay valid.
+    allowed = ["users", "settings", "categories", "menu_items", "vendors", "orders", "z_reports", "expenses", "vendor_transactions", "vendor_payments", "refunds"]
+    for col_name in allowed:
+        if col_name in body and isinstance(body[col_name], list):
+            await db[col_name].delete_many({})  # clear existing
+            docs = []
+            for d in body[col_name]:
+                doc = {k: v for k, v in d.items() if k != "_meta"}
+                # Convert string _id back to ObjectId to preserve cross-collection refs
+                if "_id" in doc and isinstance(doc["_id"], str):
+                    try: doc["_id"] = ObjectId(doc["_id"])
+                    except Exception: doc.pop("_id", None)  # invalid → let mongo assign new
+                docs.append(doc)
+            if docs:
+                try:
+                    result = await db[col_name].insert_many(docs, ordered=False)
+                    imported[col_name] = len(result.inserted_ids)
+                except Exception as e:
+                    logger.error(f"Import {col_name} failed: {e}")
+                    imported[col_name] = f"failed: {str(e)[:100]}"
+            else:
+                imported[col_name] = 0
+    return {"message": "Data imported (existing data was replaced)", "imported": imported}
+
+# --- Cleanup & Seed ---
+async def cleanup_old_data():
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d")
+    await db.orders.delete_many({"date": {"$lt": cutoff}})
+    await db.z_reports.delete_many({"date": {"$lt": cutoff}})
+    await db.expenses.delete_many({"date": {"$lt": cutoff}})
+    logger.info(f"Cleaned up data older than {cutoff}")
+
+async def seed_admin():
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@restaurant.com").lower().strip()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        await db.users.insert_one({"email": admin_email, "password_hash": hash_password(admin_password), "name": "Admin", "role": "admin", "permissions": ADMIN_PERMISSIONS, "created_at": datetime.now(timezone.utc).isoformat()})
+        logger.info(f"Admin created: {admin_email}")
+    elif not verify_password(admin_password, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    # Ensure admin always has the FULL set of permissions (covers cases where
+    # ALL_PERMISSIONS gained new entries — e.g. online_dashboard, online_orders, etc.).
+    if existing:
+        current = set(existing.get("permissions") or [])
+        if current != set(ADMIN_PERMISSIONS):
+            await db.users.update_one({"email": admin_email}, {"$set": {"permissions": ADMIN_PERMISSIONS}})
+    # Seed default settings
+    if not await db.settings.find_one({"key": "global"}):
+        await db.settings.insert_one({"key": "global", **DEFAULT_SETTINGS})
+    # Write test credentials (safe for both cloud and local)
+    try:
+        memory_dir = ROOT_DIR.parent / "memory"
+        memory_dir.mkdir(exist_ok=True)
+        with open(memory_dir / "test_credentials.md", "w") as f:
+            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n")
+    except Exception:
+        pass
+
+@app.on_event("startup")
+async def startup():
+    global scheduler
+    await db.users.create_index("email", unique=True)
+    # Performance indexes – critical as data grows.
+    # Skip silently if they already exist or the collection is empty.
+    try:
+        await db.orders.create_index([("date", -1), ("created_at", -1)])
+        await db.orders.create_index("payment_type")
+        await db.orders.create_index([("created_at", -1)])
+        await db.menu_items.create_index([("sort_order", 1), ("created_at", 1)])
+        await db.categories.create_index([("sort_order", 1), ("created_at", 1)])
+        await db.expenses.create_index([("date", -1)])
+        await db.refunds.create_index([("date", -1)])
+        await db.z_reports.create_index([("date", -1)])
+    except Exception as e:
+        logger.warning(f"Index creation skipped: {e}")
+    await seed_admin()
+    await cleanup_old_data()
+    # Start the scheduler
+    try:
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+        await _reschedule_daily_job()
+    except Exception as e:
+        logger.error(f"Scheduler start failed: {e}")
+    # Start tunnel watcher in background
+    try:
+        asyncio.create_task(tunnel_watcher_loop())
+    except Exception as e:
+        logger.error(f"Tunnel watcher start failed: {e}")
+    logger.info("Restaurant POS started")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    global scheduler
+    try:
+        if scheduler:
+            scheduler.shutdown(wait=False)
+    except Exception: pass
+    client.close()
+
+# =============================================================================
+# CUSTOMER-FACING ONLINE ORDERING ENDPOINTS (Karachi Naseeb Online Website)
+# =============================================================================
+
+# --- Customer Models ---
+def _normalize_and_validate_phone(v: str, *, required: bool = False, field: str = "phone") -> str:
+    """Strip non-digits and require at least 11 digits."""
+    if v is None:
+        v = ""
+    digits = "".join(ch for ch in str(v) if ch.isdigit())
+    if not digits:
+        if required:
+            raise ValueError(f"{field} is required")
+        return ""
+    if len(digits) < 11:
+        raise ValueError(f"{field} must contain at least 11 digits")
+    return digits
+
+
+class CustomerRegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    phone: Optional[str] = ""
+
+    @field_validator("phone")
+    @classmethod
+    def _v_phone(cls, v):
+        return _normalize_and_validate_phone(v, required=False, field="phone")
+
+class CustomerLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class OnlineOrderItem(BaseModel):
+    item_id: str
+    name: str
+    price: float
+    quantity: int
+
+class OnlineOrderCreate(BaseModel):
+    items: List[OnlineOrderItem]
+    total_price: float
+    customer_name: str
+    phone: str
+    address: str
+    notes: Optional[str] = ""
+    payment_method: str = "cod"
+    coupon_code: Optional[str] = None
+    delivery_lat: Optional[float] = None
+    delivery_lng: Optional[float] = None
+    reward_id: Optional[str] = None  # NEW: Loyalty reward redemption
+
+    @field_validator("phone")
+    @classmethod
+    def _v_phone(cls, v):
+        return _normalize_and_validate_phone(v, required=True, field="phone")
+
+class OnlineOrderStatusUpdate(BaseModel):
+    status: str  # pending, accepted, preparing, ready, out_for_delivery, delivered, cancelled, rejected
+
+class OrderRejectRequest(BaseModel):
+    reason: str  # "out_of_stock" | "closed" | "other" | free text
+
+class ModifyOrderItem(BaseModel):
+    item_id: Optional[str] = None
+    name: str
+    price: float
+    quantity: int
+
+class OrderModifyRequest(BaseModel):
+    items: List[ModifyOrderItem]
+    notes: Optional[str] = None
+
+class ReviewCreate(BaseModel):
+    order_id: str
+    rating: int
+    comment: str
+
+class AdminReviewReply(BaseModel):
+    reply: str
+
+class OfferCreate(BaseModel):
+    title: str
+    description: str
+    discount_percent: Optional[float] = 0
+    discount_amount: Optional[float] = 0
+    coupon_code: Optional[str] = ""
+    image_url: Optional[str] = ""
+    active: bool = True
+    min_order_amount: Optional[float] = 0  # V2: minimum cart subtotal required to apply this offer
+
+class OfferUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    discount_percent: Optional[float] = None
+    discount_amount: Optional[float] = None
+    coupon_code: Optional[str] = None
+    image_url: Optional[str] = None
+    active: Optional[bool] = None
+    min_order_amount: Optional[float] = None
+
+class EventBookingCreate(BaseModel):
+    name: str
+    phone: str
+    event_type: str
+    guests: int
+    event_date: str
+    message: Optional[str] = ""
+    email: Optional[str] = ""
+
+# --- Customer JWT helper ---
+def create_customer_token(cid: str, email: str) -> str:
+    return jwt.encode({"sub": cid, "email": email, "role": "customer", "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "customer", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+async def get_current_customer(request: Request):
+    token = request.cookies.get("customer_token")
+    if not token:
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "):
+            token = ah[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "customer":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        if payload.get("iid") != INSTANCE_ID:
+            raise HTTPException(status_code=401, detail="Session expired - please log in again")
+        cust = await db.customers.find_one({"_id": ObjectId(payload["sub"])})
+        if not cust:
+            raise HTTPException(status_code=401, detail="Customer not found")
+        cust["_id"] = str(cust["_id"])
+        cust.pop("password_hash", None)
+        return cust
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+async def get_optional_customer(request: Request):
+    try:
+        return await get_current_customer(request)
+    except HTTPException:
+        return None
+
+# --- Customer Auth ---
+@api_router.post("/customer/register")
+async def customer_register(req: CustomerRegisterRequest, response: Response):
+    email = req.email.lower().strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if await db.customers.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    doc = {
+        "email": email,
+        "password_hash": hash_password(req.password),
+        "name": req.name.strip(),
+        "phone": (req.phone or "").strip(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.customers.insert_one(doc)
+    cid = str(result.inserted_id)
+    token = create_customer_token(cid, email)
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token}
+
+@api_router.post("/customer/login")
+async def customer_login(req: CustomerLoginRequest, response: Response):
+    email = req.email.lower().strip()
+    cust = await db.customers.find_one({"email": email})
+    if not cust or not verify_password(req.password, cust["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    cid = str(cust["_id"])
+    token = create_customer_token(cid, email)
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return {"id": cid, "email": email, "name": cust.get("name", ""), "phone": cust.get("phone", ""), "token": token}
+
+@api_router.get("/customer/me")
+async def customer_me(request: Request):
+    cust = await get_current_customer(request)
+    return {"id": cust["_id"], "email": cust["email"], "name": cust.get("name", ""), "phone": cust.get("phone", "")}
+
+@api_router.post("/customer/logout")
+async def customer_logout(response: Response):
+    response.delete_cookie("customer_token", path="/")
+    return {"message": "Logged out"}
+
+# --- V2: Social Login (Google + Facebook) ---
+# REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+# Frontend uses window.location.origin for any OAuth redirect. Backend just verifies the
+# credential/access token that the client SDK returns and issues our normal customer JWT.
+
+class GoogleLoginRequest(BaseModel):
+    credential: str  # Google ID token (JWT) from @react-oauth/google GoogleLogin onSuccess
+
+class FacebookLoginRequest(BaseModel):
+    access_token: str  # Short-lived access token from Facebook JS SDK FB.login()
+    user_id: Optional[str] = None  # FB user id (optional; we re-verify via Graph API)
+
+
+async def _social_find_or_create_customer(email: str, name: str, provider: str, provider_user_id: str):
+    """Find a customer by email (case-insensitive); create one if missing. Marks the
+    customer with the social provider so we can show a 'Linked with Google/Facebook' badge later."""
+    email = (email or "").lower().strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Social account did not return an email")
+    existing = await db.customers.find_one({"email": email})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if existing:
+        # Idempotently record the link (does not overwrite an existing password_hash)
+        update = {"$set": {f"{provider}_id": provider_user_id, "last_social_login_at": now_iso}}
+        await db.customers.update_one({"_id": existing["_id"]}, update)
+        return existing
+    doc = {
+        "email": email,
+        "name": (name or "").strip() or email.split("@")[0],
+        "phone": "",
+        # Social-only accounts have no password — set an unguessable hash so password login fails.
+        "password_hash": hash_password(_uuid.uuid4().hex + INSTANCE_ID),
+        f"{provider}_id": provider_user_id,
+        "signup_provider": provider,
+        "created_at": now_iso,
+    }
+    result = await db.customers.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return doc
+
+
+def _serialize_customer_login_response(cust: dict, token: str):
+    return {
+        "id": str(cust["_id"]),
+        "email": cust["email"],
+        "name": cust.get("name", ""),
+        "phone": cust.get("phone", ""),
+        "token": token,
+    }
+
+
+@api_router.post("/customer/google")
+async def customer_google_login(req: GoogleLoginRequest, response: Response):
+    """Verify Google ID token and issue a customer JWT. Find-or-creates the customer
+    by email so existing email/password users get linked automatically on first social login."""
+    try:
+        from google.oauth2 import id_token as g_id_token
+        from google.auth.transport import requests as g_requests
+    except Exception as e:
+        logger.error(f"Google auth libs missing: {e}")
+        raise HTTPException(status_code=500, detail="Google login is not available right now")
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not google_client_id:
+        raise HTTPException(status_code=503, detail="Google login is not configured")
+    try:
+        # Verify the token signature, expiry, audience.
+        info = g_id_token.verify_oauth2_token(req.credential, g_requests.Request(), google_client_id)
+    except Exception as e:
+        logger.warning(f"Google token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid Google login")
+    email = info.get("email")
+    if not email or not info.get("email_verified", True):
+        raise HTTPException(status_code=400, detail="Google account email is not verified")
+    sub = info.get("sub") or ""
+    name = info.get("name") or ""
+    cust = await _social_find_or_create_customer(email, name, "google", sub)
+    cid = str(cust["_id"])
+    token = create_customer_token(cid, email)
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return _serialize_customer_login_response(cust, token)
+
+
+@api_router.post("/customer/facebook")
+async def customer_facebook_login(req: FacebookLoginRequest, response: Response):
+    """Verify Facebook access token by calling Graph API and issue a customer JWT.
+    We never trust client-side user_id; the Graph API call IS the verification."""
+    app_id = os.environ.get("FACEBOOK_APP_ID")
+    app_secret = os.environ.get("FACEBOOK_APP_SECRET")
+    if not app_id or not app_secret:
+        raise HTTPException(status_code=503, detail="Facebook login is not configured")
+    async with httpx.AsyncClient(timeout=10) as client:
+        # 1) debug_token to confirm the access token was issued to OUR app and is valid
+        try:
+            app_token = f"{app_id}|{app_secret}"
+            dbg = await client.get(
+                "https://graph.facebook.com/debug_token",
+                params={"input_token": req.access_token, "access_token": app_token},
+            )
+            dbg.raise_for_status()
+            dbg_json = dbg.json().get("data") or {}
+        except Exception as e:
+            logger.warning(f"Facebook debug_token failed: {e}")
+            raise HTTPException(status_code=401, detail="Invalid Facebook login")
+        if not dbg_json.get("is_valid"):
+            raise HTTPException(status_code=401, detail="Facebook token is not valid")
+        if str(dbg_json.get("app_id")) != str(app_id):
+            raise HTTPException(status_code=401, detail="Facebook token was not issued to this app")
+        fb_user_id = str(dbg_json.get("user_id") or "")
+        # 2) Fetch the user's profile (name + email — email scope must be requested on the client)
+        try:
+            prof = await client.get(
+                "https://graph.facebook.com/me",
+                params={"fields": "id,name,email", "access_token": req.access_token},
+            )
+            prof.raise_for_status()
+            profile = prof.json()
+        except Exception as e:
+            logger.warning(f"Facebook profile fetch failed: {e}")
+            raise HTTPException(status_code=401, detail="Could not fetch Facebook profile")
+    email = profile.get("email")
+    if not email:
+        # Facebook may withhold email if the user blocked the permission. Fall back to a
+        # synthetic email so we can still create an account; the user can add a real email later.
+        email = f"fb_{fb_user_id}@facebook.local"
+    name = profile.get("name") or ""
+    cust = await _social_find_or_create_customer(email, name, "facebook", fb_user_id)
+    cid = str(cust["_id"])
+    token = create_customer_token(cid, email)
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    return _serialize_customer_login_response(cust, token)
+
+# --- END Social Login ---
+
+# --- Public Menu ---
+class UpsellRequest(BaseModel):
+    item_ids: List[str] = []
+    limit: int = 4
+
+
+@api_router.post("/menu/upsell")
+async def menu_upsell(req: UpsellRequest):
+    """Return up-to N suggestions based on what's in the customer's cart.
+    Priority: 1) explicit related_item_ids of cart items, 2) bestsellers, 3) popular, 4) fallback.
+    """
+    limit = max(1, min(int(req.limit or 4), 8))
+    excluded = set(filter(None, req.item_ids or []))
+    related_ids = []
+    if excluded:
+        try:
+            cart_oids = [ObjectId(x) for x in excluded if len(x) == 24]
+        except Exception:
+            cart_oids = []
+        if cart_oids:
+            cart_docs = await db.menu_items.find({"_id": {"$in": cart_oids}}, {"related_item_ids": 1}).to_list(50)
+            for d in cart_docs:
+                for rid in (d.get("related_item_ids") or []):
+                    if rid not in excluded and rid not in related_ids:
+                        related_ids.append(rid)
+
+    items = await db.menu_items.find(
+        {"stock": {"$gt": 0}},
+        {"name": 1, "price": 1, "image_url": 1, "is_bestseller": 1, "is_popular": 1,
+         "stock": 1, "discount_type": 1, "discount_value": 1, "variations": 1},
+    ).sort([("created_at", -1)]).to_list(200)
+    by_id = {str(i["_id"]): i for i in items}
+
+    ranked = []
+    seen = set(excluded)
+    for rid in related_ids:
+        if rid in seen or rid not in by_id:
+            continue
+        ranked.append(by_id[rid]); seen.add(rid)
+        if len(ranked) >= limit: break
+    if len(ranked) < limit:
+        for it in items:
+            sid = str(it["_id"])
+            if sid in seen: continue
+            if it.get("is_bestseller"):
+                ranked.append(it); seen.add(sid)
+                if len(ranked) >= limit: break
+    if len(ranked) < limit:
+        for it in items:
+            sid = str(it["_id"])
+            if sid in seen: continue
+            if it.get("is_popular"):
+                ranked.append(it); seen.add(sid)
+                if len(ranked) >= limit: break
+    if len(ranked) < limit:
+        for it in items:
+            sid = str(it["_id"])
+            if sid in seen: continue
+            ranked.append(it); seen.add(sid)
+            if len(ranked) >= limit: break
+
+    def _serialize(i):
+        base = float(i.get("price", 0) or 0)
+        d_type = i.get("discount_type")
+        d_val = float(i.get("discount_value", 0) or 0)
+        sale = base
+        if d_type == "percentage" and d_val > 0:
+            sale = round(max(0, base * (1 - d_val / 100.0)), 2)
+        elif d_type == "fixed" and d_val > 0:
+            sale = round(max(0, base - d_val), 2)
+        return {
+            "id": str(i["_id"]),
+            "name": i.get("name", ""),
+            "price": sale,
+            "original_price": base if sale < base else None,
+            "discount_percent": int(round((1 - sale / base) * 100)) if (base and sale < base) else 0,
+            "image_url": i.get("image_url", ""),
+            "is_bestseller": bool(i.get("is_bestseller")),
+            "is_popular": bool(i.get("is_popular")),
+            "variations": i.get("variations", []),
+        }
+
+    return {"items": [_serialize(i) for i in ranked]}
+
+
+@api_router.get("/menu")
+async def get_public_menu():
+    cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(200)
+    items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    cat_list = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color")} for c in cats]
+    item_list = []
+    for i in items:
+        base_price = float(i.get("price", 0) or 0)
+        d_type = i.get("discount_type")
+        d_val = float(i.get("discount_value", 0) or 0)
+        sale_price = base_price
+        if d_type == "percentage" and d_val > 0:
+            sale_price = round(max(0, base_price * (1 - d_val / 100.0)), 2)
+        elif d_type == "fixed" and d_val > 0:
+            sale_price = round(max(0, base_price - d_val), 2)
+        item_list.append({
+            "id": str(i["_id"]),
+            "name": i["name"],
+            "price": sale_price,
+            "original_price": base_price if sale_price < base_price else None,
+            "discount_type": d_type if sale_price < base_price else None,
+            "discount_value": d_val if sale_price < base_price else 0,
+            "discount_percent": int(round((1 - sale_price / base_price) * 100)) if (base_price and sale_price < base_price) else 0,
+            "category_id": i["category_id"],
+            "stock": i.get("stock", 0),
+            "image_url": i.get("image_url", ""),
+            "image_type": i.get("image_type", "url"),
+            "description": i.get("description", ""),
+            "is_popular": i.get("is_popular", False),
+            "is_bestseller": i.get("is_bestseller", False),
+            "variations": i.get("variations", []),
+        })
+    return {"categories": cat_list, "items": item_list}
+
+@api_router.get("/menu/{item_id}")
+async def get_menu_item(item_id: str):
+    try:
+        i = await db.menu_items.find_one({"_id": ObjectId(item_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if not i:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {
+        "id": str(i["_id"]),
+        "name": i["name"],
+        "price": i["price"],
+        "category_id": i["category_id"],
+        "stock": i.get("stock", 0),
+        "image_url": i.get("image_url", ""),
+        "description": i.get("description", ""),
+    }
+
+# --- Online Orders ---
+def _serialize_online_order(o: dict) -> dict:
+    o = dict(o)
+    o["id"] = str(o.pop("_id"))
+    o["receipt_no"] = o["id"][-6:].upper()
+    return o
+
+@api_router.post("/online-orders")
+async def create_online_order(order: OnlineOrderCreate, request: Request):
+    cust = await get_optional_customer(request)
+    # Business hours check — block orders when restaurant is closed.
+    s_for_hours = await get_online_settings_doc()
+    if s_for_hours.get("business_hours_enabled", True):
+        bh = compute_business_hours_status(s_for_hours)
+        if not bh.get("is_open"):
+            raise HTTPException(status_code=400, detail="Restaurant is currently closed. Please order during business hours.")
+    # Coupon validation
+    discount_amount = 0.0
+    coupon_used = None
+    if order.coupon_code:
+        offer = await db.offers.find_one({"coupon_code": order.coupon_code.upper().strip(), "active": True})
+        if offer:
+            # V2: enforce minimum order amount on offers
+            min_amount = float(offer.get("min_order_amount", 0) or 0)
+            if min_amount > 0 and float(order.total_price or 0) < min_amount:
+                raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
+            if offer.get("discount_percent"):
+                discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
+            elif offer.get("discount_amount"):
+                discount_amount = float(offer["discount_amount"])
+            coupon_used = offer["coupon_code"]
+    # Delivery fee calculation (server-side, ignores any frontend value)
+    delivery_fee = 0.0
+    distance_km = None
+    if order.delivery_lat is not None and order.delivery_lng is not None:
+        s = await get_online_settings_doc()
+        distance_km = haversine_km(s["restaurant_lat"], s["restaurant_lng"], order.delivery_lat, order.delivery_lng)
+        quote = calculate_delivery_fee(distance_km, s, subtotal=float(order.total_price or 0) - float(discount_amount or 0))
+        if not quote["in_range"]:
+            raise HTTPException(status_code=400, detail=f"Delivery address is outside our {quote['max_radius_km']} km service area.")
+        delivery_fee = float(quote["fee"])
+    final_total = max(0, order.total_price - discount_amount) + delivery_fee
+    
+    # --- LOYALTY SYSTEM: Reward Redemption & Diamond Earning ---
+    loyalty_settings = await db.loyalty_settings.find_one({"key": "loyalty"}) or {}
+    loyalty_enabled = loyalty_settings.get("enabled", True)
+    earning_rate = float(loyalty_settings.get("earning_rate", 10.0))  # Diamonds per Rs
+    min_order_for_points = float(loyalty_settings.get("min_order_for_points", 0.0))
+    
+    reward_applied = None
+    reward_discount = 0.0
+    diamonds_spent = 0
+    diamonds_earned = 0
+    
+    # Apply reward if customer selected one
+    if order.reward_id and cust and loyalty_enabled:
+        try:
+            reward = await db.loyalty_rewards.find_one({"_id": ObjectId(order.reward_id), "is_active": True})
+            if reward:
+                current_balance = cust.get("diamond_balance", 0)
+                required_diamonds = reward["cost_diamonds"]
+                
+                if current_balance >= required_diamonds:
+                    # Apply reward
+                    reward_type = reward["reward_type"]
+                    reward_value = reward["reward_value"]
+
+                    # V2 Reward Stacking Rule: customers cannot combine a Coupon Discount AND a
+                    # Diamond Discount reward on the same order. Free-item rewards CAN stack with
+                    # a coupon discount. (See requirement #9.)
+                    if reward_type in ("discount_percent", "discount_fixed") and coupon_used:
+                        raise HTTPException(status_code=400, detail="A coupon discount cannot be combined with a Diamond discount reward. Please remove one to continue.")
+
+                    if reward_type == "discount_percent":
+                        reward_discount = round(final_total * float(reward_value) / 100, 2)
+                    elif reward_type == "discount_fixed":
+                        reward_discount = min(float(reward_value), final_total)
+                    elif reward_type == "free_item":
+                        # Free item handled by adding to order items with 0 price
+                        # For now, just track the reward
+                        pass
+                    
+                    # Update final total
+                    final_total = max(0, final_total - reward_discount)
+                    diamonds_spent = required_diamonds
+                    
+                    # Deduct diamonds from customer (atomically). cust['_id'] may be str — coerce to ObjectId.
+                    try:
+                        cust_oid_for_redeem = cust["_id"] if isinstance(cust["_id"], ObjectId) else ObjectId(str(cust["_id"]))
+                    except Exception:
+                        cust_oid_for_redeem = None
+                    if cust_oid_for_redeem is not None:
+                        await db.customers.update_one(
+                            {"_id": cust_oid_for_redeem},
+                            {
+                                "$inc": {
+                                    "diamond_balance": -diamonds_spent,
+                                    "lifetime_diamonds_spent": diamonds_spent
+                                }
+                            }
+                        )
+                    
+                    reward_applied = {
+                        "reward_id": str(reward["_id"]),
+                        "title": reward["title"],
+                        "diamonds_spent": diamonds_spent,
+                        "discount_amount": reward_discount,
+                    }
+                    
+                    # Increment reward redemption count
+                    await db.loyalty_rewards.update_one(
+                        {"_id": ObjectId(order.reward_id)},
+                        {"$inc": {"total_redemptions": 1}}
+                    )
+                else:
+                    logger.warning(f"Customer {cust['_id']} tried to redeem reward but insufficient balance")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Reward redemption failed: {e}")
+    
+    # Calculate diamonds that WILL BE earned on delivery (don't award yet)
+    if cust and loyalty_enabled and final_total >= min_order_for_points:
+        diamonds_earned = int(final_total * earning_rate / 100)  # e.g., 10 Diamonds per Rs 100
+    
+    # --- END LOYALTY LOGIC ---
+    
+    # Determine initial payment_status
+    pmethod = (order.payment_method or "cod").lower()
+    if pmethod in ("cod", "pay_at_restaurant"):
+        payment_status = "pending"  # collected later
+    else:
+        payment_status = "pending"  # awaiting card/bank flow
+    now = datetime.now(timezone.utc)
+    doc = {
+        "items": [it.model_dump() for it in order.items],
+        "subtotal": order.total_price,
+        "discount_amount": discount_amount,
+        "delivery_fee": delivery_fee,
+        "distance_km": round(distance_km, 2) if distance_km is not None else None,
+        "delivery_lat": order.delivery_lat,
+        "delivery_lng": order.delivery_lng,
+        "total_price": final_total,
+        "customer_id": cust["_id"] if cust else None,
+        "customer_name": order.customer_name,
+        "phone": order.phone,
+        "address": order.address,
+        "notes": order.notes,
+        "payment_method": pmethod,
+        "payment_status": payment_status,
+        "coupon_code": coupon_used,
+        "reward_applied": reward_applied,  # NEW: Loyalty reward info
+        "diamonds_earned": diamonds_earned,  # NEW: Diamonds earned from this order
+        "status": "pending",
+        "printed": False,
+        "created_at": now.isoformat(),
+        "date": now.strftime("%Y-%m-%d"),
+    }
+    result = await db.online_orders.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    order_id = str(result.inserted_id)
+    
+    # Log loyalty transaction for spending only (earning happens at delivery)
+    if cust and diamonds_spent > 0 and reward_applied:
+        await db.loyalty_transactions.insert_one({
+            "customer_id": str(cust["_id"]),
+            "transaction_type": "spent",
+            "diamonds": -diamonds_spent,
+            "balance_after": cust.get("diamond_balance", 0) - diamonds_spent,
+            "order_id": order_id,
+            "reward_id": reward_applied["reward_id"],
+            "notes": f"Redeemed: {reward_applied['title']}",
+            "created_at": now.isoformat(),
+        })
+    
+    serialized = _serialize_online_order(doc)
+    # WhatsApp confirmation (fire-and-forget)
+    try:
+        # Use Frontend URL deduced from request origin
+        origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
+        if origin and origin.endswith("/"):
+            origin = origin[:-1]
+        if not origin:
+            origin = ""
+        tracking_url = f"{origin}/track/{serialized['id']}" if origin else f"/track/{serialized['id']}"
+        msg = _format_order_confirmation(doc, tracking_url)
+        asyncio.create_task(send_whatsapp(order.phone, msg))
+    except Exception as e:
+        logger.warning(f"WhatsApp confirmation failed: {e}")
+    return serialized
+
+@api_router.get("/online-orders/me")
+async def get_my_orders(request: Request):
+    cust = await get_current_customer(request)
+    orders = await db.online_orders.find({"customer_id": cust["_id"]}).sort("created_at", -1).to_list(200)
+    return [_serialize_online_order(o) for o in orders]
+
+@api_router.get("/online-orders")
+async def list_online_orders(request: Request, status: Optional[str] = None):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    query = {}
+    if status and status != "all":
+        query["status"] = status
+    orders = await db.online_orders.find(query).sort("created_at", -1).to_list(1000)
+    return [_serialize_online_order(o) for o in orders]
+
+@api_router.get("/online-orders/pending-print")
+async def list_pending_print_orders(request: Request):
+    """Endpoint for POS thermal printer agent to poll new unprinted orders."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    orders = await db.online_orders.find({"printed": False, "status": {"$ne": "cancelled"}}).sort("created_at", 1).to_list(100)
+    return [_serialize_online_order(o) for o in orders]
+
+@api_router.put("/online-orders/{order_id}/printed")
+async def mark_order_printed(order_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": {"printed": True, "printed_at": datetime.now(timezone.utc).isoformat()}})
+    return {"message": "Marked as printed"}
+
+@api_router.put("/online-orders/{order_id}/status")
+async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    valid = {"pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "cancelled", "rejected"}
+    if body.status not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid}")
+    
+    # Get order before update
+    order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    old_status = order.get("status")
+    
+    update_fields = {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}
+    if body.status == "accepted":
+        update_fields["accepted_at"] = datetime.now(timezone.utc).isoformat()
+    
+    res = await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+    
+    # Award Diamonds when order is delivered (only once)
+    if body.status == "delivered" and old_status != "delivered":
+        diamonds_to_award = order.get("diamonds_earned", 0)
+        customer_id = order.get("customer_id")
+        
+        if diamonds_to_award > 0 and customer_id:
+            try:
+                # customer_id may be stored as str (legacy) or ObjectId. db.customers._id is always ObjectId
+                # — coerce defensively so the credit always lands.
+                if isinstance(customer_id, ObjectId):
+                    cust_oid = customer_id
+                else:
+                    try:
+                        cust_oid = ObjectId(str(customer_id))
+                    except Exception:
+                        cust_oid = None
+                if cust_oid is None:
+                    logger.warning(f"Skipping diamond credit: invalid customer_id on order {order_id}: {customer_id!r}")
+                else:
+                    # Update customer balance atomically
+                    result = await db.customers.update_one(
+                        {"_id": cust_oid},
+                        {
+                            "$inc": {
+                                "diamond_balance": diamonds_to_award,
+                                "lifetime_diamonds_earned": diamonds_to_award
+                            }
+                        }
+                    )
+
+                    if result.modified_count > 0:
+                        # Get updated balance
+                        customer = await db.customers.find_one({"_id": cust_oid})
+                        new_balance = customer.get("diamond_balance", 0) if customer else 0
+
+                        # Log transaction
+                        await db.loyalty_transactions.insert_one({
+                            "customer_id": str(cust_oid),
+                            "transaction_type": "earned",
+                            "diamonds": diamonds_to_award,
+                            "balance_after": new_balance,
+                            "order_id": order_id,
+                            "notes": f"Earned from delivered order #{order_id[-6:].upper()}",
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        })
+
+                        logger.info(f"Awarded {diamonds_to_award} Diamonds to customer {cust_oid} for order {order_id}")
+                    else:
+                        logger.warning(f"Diamond credit found 0 matching customer for order {order_id} (customer_id={customer_id!r})")
+            except Exception as e:
+                logger.error(f"Failed to award Diamonds for order {order_id}: {e}")
+    
+    # WhatsApp status update
+    try:
+        if body.status in {"accepted", "preparing", "out_for_delivery", "delivered", "cancelled", "rejected"}:
+            origin = request.headers.get("origin") or ""
+            if origin.endswith("/"):
+                origin = origin[:-1]
+            tracking_url = f"{origin}/track/{order_id}" if origin else f"/track/{order_id}"
+            msg = _format_status_update(order, body.status, tracking_url)
+            asyncio.create_task(send_whatsapp(order.get("phone", ""), msg))
+    except Exception as e:
+        logger.warning(f"WhatsApp status update failed: {e}")
+    
+    return {"message": "Status updated", "status": body.status}
+
+# --- Smart Order Alert: Accept / Reject / Modify endpoints (extension) ---
+@api_router.get("/online-orders/pending-count")
+async def online_orders_pending_count(request: Request):
+    """Lightweight polling endpoint: returns count of orders awaiting staff action.
+    Used by POS UI to start/stop the ringing alert sound."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    count = await db.online_orders.count_documents({"status": "pending"})
+    # Latest pending order id (so frontend can detect new arrivals between polls)
+    latest = await db.online_orders.find({"status": "pending"}, {"_id": 1, "created_at": 1}).sort("created_at", -1).limit(1).to_list(1)
+    latest_id = str(latest[0]["_id"]) if latest else None
+    latest_at = latest[0]["created_at"] if latest else None
+    return {"pending_count": count, "latest_id": latest_id, "latest_at": latest_at}
+
+
+def _origin_tracking_url(request: Request, order_id: str) -> str:
+    origin = request.headers.get("origin") or ""
+    if origin.endswith("/"):
+        origin = origin[:-1]
+    return f"{origin}/track/{order_id}" if origin else f"/track/{order_id}"
+
+
+@api_router.post("/online-orders/{order_id}/accept")
+async def accept_online_order(order_id: str, request: Request):
+    """Staff accepts a pending order. Stops ringing on the POS, notifies customer via WhatsApp."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"rejected", "cancelled"}:
+        raise HTTPException(status_code=400, detail=f"Cannot accept a {order.get('status')} order")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "accepted", "accepted_at": now_iso, "accepted_by": user.get("name", ""), "updated_at": now_iso}},
+    )
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    try:
+        msg = _format_status_update(refreshed, "accepted", _origin_tracking_url(request, order_id))
+        asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
+    except Exception as e:
+        logger.warning(f"WhatsApp accept notify failed: {e}")
+    return _serialize_online_order(refreshed)
+
+
+@api_router.post("/online-orders/{order_id}/reject")
+async def reject_online_order(order_id: str, body: OrderRejectRequest, request: Request):
+    """Staff rejects a pending order with a reason. Stops ringing on the POS, notifies customer."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    reason = (body.reason or "").strip() or "other"
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") == "rejected":
+        return _serialize_online_order(order)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "rejected", "rejection_reason": reason, "rejected_by": user.get("name", ""), "rejected_at": now_iso, "updated_at": now_iso}},
+    )
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    try:
+        msg = _format_status_update(refreshed, "rejected", _origin_tracking_url(request, order_id))
+        asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
+    except Exception as e:
+        logger.warning(f"WhatsApp reject notify failed: {e}")
+    return _serialize_online_order(refreshed)
+
+
+def _recalculate_totals(items: list, original: dict) -> tuple:
+    """Recompute subtotal & total when items are modified.
+    Preserves existing discount_amount and delivery_fee (which were already calculated)."""
+    subtotal = sum(float(i.get("price", 0)) * int(i.get("quantity", 0)) for i in items)
+    discount = float(original.get("discount_amount", 0) or 0)
+    delivery_fee = float(original.get("delivery_fee", 0) or 0)
+    total = max(0.0, subtotal - discount) + delivery_fee
+    return round(subtotal, 2), round(total, 2)
+
+
+@api_router.put("/online-orders/{order_id}/modify")
+async def modify_online_order(order_id: str, body: OrderModifyRequest, request: Request):
+    """Staff edits items (remove items, change qty, change price). Marks the order as modified
+    but DOES NOT change status — staff must call /confirm-modified after contacting the customer."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"rejected", "cancelled", "delivered"}:
+        raise HTTPException(status_code=400, detail=f"Cannot modify a {order.get('status')} order")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+    new_items = []
+    for it in body.items:
+        if int(it.quantity) <= 0:
+            continue  # qty 0 means removed
+        new_items.append({
+            "item_id": it.item_id or "",
+            "name": it.name,
+            "price": round(float(it.price), 2),
+            "quantity": int(it.quantity),
+        })
+    if not new_items:
+        raise HTTPException(status_code=400, detail="At least one item must remain in the order")
+    subtotal, total = _recalculate_totals(new_items, order)
+    update_fields = {
+        "items": new_items,
+        "subtotal": subtotal,
+        "total_price": total,
+        "modified": True,
+        "modification_pending": True,  # awaiting staff confirmation after calling customer
+        "modified_at": datetime.now(timezone.utc).isoformat(),
+        "modified_by": user.get("name", ""),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if body.notes is not None:
+        update_fields["modification_notes"] = body.notes
+    await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    return _serialize_online_order(refreshed)
+
+
+# V2: Live order operations — staff can change prep time & override delivery fee
+# after the order has been accepted. Customers see these updates via /api/track/{id}
+# polling within ~5s.
+class OrderOperationsUpdate(BaseModel):
+    prep_time_min: Optional[int] = None  # 1..240. Defaults to 30 if never set.
+    delivery_fee_override: Optional[float] = None  # 0 = free delivery. None = clear override.
+    free_delivery: Optional[bool] = None  # True = force delivery fee to 0.
+
+
+@api_router.put("/online-orders/{order_id}/operations")
+async def update_order_operations(order_id: str, body: OrderOperationsUpdate, request: Request):
+    """Staff-only: update preparation time and/or override the delivery fee on a live order.
+    Customers see the new values within a few seconds on the tracking page."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"Cannot modify a {order.get('status')} order")
+
+    update_fields = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    recalc_total = False
+    new_delivery_fee = order.get("delivery_fee", 0)
+
+    if body.prep_time_min is not None:
+        pt = int(body.prep_time_min)
+        if pt < 1 or pt > 240:
+            raise HTTPException(status_code=400, detail="Preparation time must be between 1 and 240 minutes")
+        update_fields["prep_time_min"] = pt
+        update_fields["prep_time_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    if body.free_delivery is True:
+        new_delivery_fee = 0.0
+        update_fields["delivery_fee_override"] = 0.0
+        update_fields["delivery_fee_overridden"] = True
+        update_fields["delivery_fee"] = 0.0
+        recalc_total = True
+    elif body.delivery_fee_override is not None:
+        fee = float(body.delivery_fee_override)
+        if fee < 0:
+            raise HTTPException(status_code=400, detail="Delivery fee cannot be negative")
+        new_delivery_fee = fee
+        update_fields["delivery_fee_override"] = fee
+        update_fields["delivery_fee_overridden"] = True
+        update_fields["delivery_fee"] = fee
+        recalc_total = True
+
+    if recalc_total:
+        # Preserve the discount we already applied; just rebuild total with the new delivery fee.
+        subtotal = float(order.get("subtotal", 0) or 0)
+        discount = float(order.get("discount_amount", 0) or 0)
+        reward_discount = float((order.get("reward_applied") or {}).get("discount_amount", 0) or 0)
+        new_total = max(0.0, subtotal - discount - reward_discount) + float(new_delivery_fee or 0)
+        update_fields["total_price"] = round(new_total, 2)
+
+    await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    return _serialize_online_order(refreshed)
+
+
+@api_router.post("/online-orders/{order_id}/confirm-modified")
+async def confirm_modified_online_order(order_id: str, request: Request):
+    """Called after staff has phoned the customer to confirm the modified order.
+    Moves the order to 'accepted' and notifies the customer."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.get("modified"):
+        raise HTTPException(status_code=400, detail="Order has not been modified yet")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {
+            "status": "accepted",
+            "accepted_at": now_iso,
+            "accepted_by": user.get("name", ""),
+            "modification_pending": False,
+            "modification_confirmed_at": now_iso,
+            "updated_at": now_iso,
+        }},
+    )
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    try:
+        # Special "modified+confirmed" message
+        msg = _format_status_update(refreshed, "modified", _origin_tracking_url(request, order_id))
+        asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
+    except Exception as e:
+        logger.warning(f"WhatsApp modified-confirm notify failed: {e}")
+    return _serialize_online_order(refreshed)
+
+@api_router.get("/online-orders/{order_id}")
+async def get_online_order_detail(order_id: str, request: Request):
+    """Return order detail. Customers can only view their own; admins can view any."""
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    # Try admin first
+    try:
+        user = await get_current_user(request)
+        if user.get("role") == "admin":
+            return _serialize_online_order(o)
+    except HTTPException:
+        pass
+    cust = await get_optional_customer(request)
+    if cust and o.get("customer_id") == cust["_id"]:
+        return _serialize_online_order(o)
+    raise HTTPException(status_code=403, detail="Not allowed")
+
+# --- Reviews ---
+@api_router.post("/reviews")
+async def create_review(req: ReviewCreate, request: Request):
+    cust = await get_current_customer(request)
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(req.order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("customer_id") != cust["_id"]:
+        raise HTTPException(status_code=403, detail="You can only review your own orders")
+    if order.get("status") != "delivered":
+        raise HTTPException(status_code=400, detail="Reviews are allowed only for delivered orders")
+    if await db.reviews.find_one({"order_id": req.order_id, "customer_id": cust["_id"]}):
+        raise HTTPException(status_code=400, detail="You have already reviewed this order")
+    if not (1 <= req.rating <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    now = datetime.now(timezone.utc)
+    doc = {
+        "order_id": req.order_id,
+        "customer_id": cust["_id"],
+        "customer_name": cust.get("name", "Customer"),
+        "rating": int(req.rating),
+        "comment": req.comment.strip(),
+        "created_at": now.isoformat(),
+    }
+    result = await db.reviews.insert_one(doc)
+    return {"id": str(result.inserted_id), "rating": doc["rating"], "comment": doc["comment"], "customer_name": doc["customer_name"], "created_at": doc["created_at"]}
+
+
+# --- Public review (no auth) — used by the QR code on the printed receipt ---
+class PublicReviewCreate(BaseModel):
+    rating: int
+    comment: Optional[str] = ""
+    customer_name: Optional[str] = ""
+
+
+@api_router.get("/reviews/order/{order_id}")
+async def get_review_by_order(order_id: str):
+    """Public: lets the review page check if a review already exists for this order
+    and pre-fill restaurant info. No auth required."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    review = await db.reviews.find_one({"order_id": order_id})
+    return {
+        "order": {
+            "id": str(order["_id"]),
+            "receipt_no": str(order["_id"])[-6:].upper(),
+            "customer_name": order.get("customer_name", ""),
+            "items": order.get("items", []),
+            "total_price": order.get("total_price", 0),
+            "status": order.get("status", "pending"),
+            "created_at": order.get("created_at", ""),
+        },
+        "review": (
+            {
+                "id": str(review["_id"]),
+                "rating": review.get("rating", 0),
+                "comment": review.get("comment", ""),
+                "customer_name": review.get("customer_name", "Customer"),
+                "created_at": review.get("created_at", ""),
+            }
+            if review else None
+        ),
+    }
+
+
+@api_router.post("/reviews/public/{order_id}")
+async def create_public_review(order_id: str, body: PublicReviewCreate):
+    """Public review submission — used by the QR code on the printed receipt
+    where the customer is unlikely to be logged in."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not (1 <= int(body.rating) <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    if await db.reviews.find_one({"order_id": order_id}):
+        raise HTTPException(status_code=400, detail="A review has already been submitted for this order")
+    now = datetime.now(timezone.utc)
+    name = (body.customer_name or order.get("customer_name") or "Customer").strip()[:60]
+    doc = {
+        "order_id": order_id,
+        "customer_id": order.get("customer_id"),
+        "customer_name": name,
+        "rating": int(body.rating),
+        "comment": (body.comment or "").strip()[:500],
+        "source": "public_qr",
+        "created_at": now.isoformat(),
+    }
+    result = await db.reviews.insert_one(doc)
+    return {
+        "id": str(result.inserted_id),
+        "rating": doc["rating"],
+        "comment": doc["comment"],
+        "customer_name": doc["customer_name"],
+        "created_at": doc["created_at"],
+    }
+
+@api_router.get("/reviews")
+async def list_reviews(limit: int = 50):
+    revs = await db.reviews.find({}).sort("created_at", -1).to_list(max(1, min(limit, 200)))
+    return [{
+        "id": str(r["_id"]),
+        "rating": r["rating"],
+        "comment": r["comment"],
+        "customer_name": r.get("customer_name", "Customer"),
+        "created_at": r.get("created_at", ""),
+        "admin_reply": r.get("admin_reply", ""),
+        "replied_at": r.get("replied_at", ""),
+        "replied_by": r.get("replied_by", ""),
+        "is_feedback": bool(r.get("is_feedback", False)),
+    } for r in revs]
+
+
+# --- Public feedback (no order required) ---
+class PublicFeedbackCreate(BaseModel):
+    rating: int
+    comment: str
+    customer_name: Optional[str] = ""
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+
+    @field_validator("phone")
+    @classmethod
+    def _v_phone(cls, v):
+        return _normalize_and_validate_phone(v, required=False, field="phone")
+
+
+@api_router.post("/feedback")
+async def submit_feedback(req: PublicFeedbackCreate, request: Request):
+    """Public: customer submits general feedback (not tied to an order). Stored in `reviews`
+    with is_feedback=true so admins see it in the existing review module."""
+    if not (1 <= int(req.rating) <= 5):
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    cust = await get_optional_customer(request)
+    now = datetime.now(timezone.utc)
+    doc = {
+        "order_id": None,
+        "customer_id": cust["_id"] if cust else None,
+        "customer_name": (cust.get("name") if cust else None) or (req.customer_name or "Anonymous"),
+        "customer_email": (cust.get("email") if cust else None) or (req.email or ""),
+        "customer_phone": req.phone or "",
+        "rating": int(req.rating),
+        "comment": req.comment.strip(),
+        "is_feedback": True,
+        "created_at": now.isoformat(),
+    }
+    if cust:
+        doc["customer_id"] = cust["_id"]
+    result = await db.reviews.insert_one(doc)
+    return {"id": str(result.inserted_id), "message": "Thank you for your feedback!"}
+
+# --- Offers ---
+@api_router.get("/offers")
+async def list_offers(active_only: bool = True):
+    q = {"active": True} if active_only else {}
+    offers = await db.offers.find(q).sort("created_at", -1).to_list(100)
+    return [{
+        "id": str(o["_id"]),
+        "title": o["title"],
+        "description": o.get("description", ""),
+        "discount_percent": o.get("discount_percent", 0),
+        "discount_amount": o.get("discount_amount", 0),
+        "coupon_code": o.get("coupon_code", ""),
+        "image_url": o.get("image_url", ""),
+        "active": o.get("active", True),
+        "min_order_amount": float(o.get("min_order_amount", 0) or 0),
+        "created_at": o.get("created_at", ""),
+    } for o in offers]
+
+@api_router.post("/offers")
+async def create_offer(offer: OfferCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    doc = {
+        "title": offer.title,
+        "description": offer.description,
+        "discount_percent": offer.discount_percent or 0,
+        "discount_amount": offer.discount_amount or 0,
+        "coupon_code": (offer.coupon_code or "").upper().strip(),
+        "image_url": offer.image_url or "",
+        "active": offer.active,
+        "min_order_amount": float(offer.min_order_amount or 0),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.offers.insert_one(doc)
+    return {"id": str(result.inserted_id), **{k: v for k, v in doc.items() if k != "_id"}}
+
+@api_router.put("/offers/{offer_id}")
+async def update_offer(offer_id: str, offer: OfferUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    ud = {k: v for k, v in offer.model_dump().items() if v is not None}
+    if "coupon_code" in ud:
+        ud["coupon_code"] = ud["coupon_code"].upper().strip()
+    if ud:
+        await db.offers.update_one({"_id": ObjectId(offer_id)}, {"$set": ud})
+    return {"message": "Updated"}
+
+@api_router.delete("/offers/{offer_id}")
+async def delete_offer(offer_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    await db.offers.delete_one({"_id": ObjectId(offer_id)})
+    return {"message": "Deleted"}
+
+# --- Event Bookings ---
+@api_router.post("/event-bookings")
+async def create_event_booking(req: EventBookingCreate, request: Request):
+    cust = await get_optional_customer(request)
+    now = datetime.now(timezone.utc)
+    doc = {
+        "name": req.name,
+        "phone": req.phone,
+        "email": req.email or "",
+        "event_type": req.event_type,
+        "guests": int(req.guests),
+        "event_date": req.event_date,
+        "message": req.message or "",
+        "customer_id": cust["_id"] if cust else None,
+        "status": "pending",
+        "created_at": now.isoformat(),
+    }
+    result = await db.event_bookings.insert_one(doc)
+    return {"id": str(result.inserted_id), "status": "pending", "message": "Booking received! We'll contact you shortly."}
+
+@api_router.get("/event-bookings")
+async def list_event_bookings(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    bookings = await db.event_bookings.find({}).sort("created_at", -1).to_list(500)
+    return [{
+        "id": str(b["_id"]),
+        "name": b["name"],
+        "phone": b["phone"],
+        "email": b.get("email", ""),
+        "event_type": b["event_type"],
+        "guests": b["guests"],
+        "event_date": b["event_date"],
+        "message": b.get("message", ""),
+        "status": b.get("status", "pending"),
+        "created_at": b.get("created_at", ""),
+    } for b in bookings]
+
+@api_router.put("/event-bookings/{booking_id}/status")
+async def update_event_booking_status(booking_id: str, body: dict, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    status = body.get("status", "pending")
+    if status not in {"pending", "confirmed", "cancelled", "completed"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    await db.event_bookings.update_one({"_id": ObjectId(booking_id)}, {"$set": {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    return {"message": "Status updated", "status": status}
+
+# --- Seed sample data for online site ---
+SAMPLE_MENU_DATA = {
+    "Biryani": [
+        {"name": "Chicken Biryani (Half)", "price": 350, "stock": 100, "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "description": "Aromatic basmati rice with tender chicken, signature spices.", "is_popular": True},
+        {"name": "Chicken Biryani (Full)", "price": 600, "stock": 100, "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Family-size chicken biryani, serves 2-3.", "is_popular": True},
+        {"name": "Beef Biryani", "price": 450, "stock": 80, "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "description": "Slow-cooked beef biryani with caramelized onions.", "is_popular": False},
+    ],
+    "Murg Pulao": [
+        {"name": "Murg Pulao (Half)", "price": 320, "stock": 100, "image_url": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Karachi-style murg pulao, fragrant and rich.", "is_popular": True},
+        {"name": "Murg Pulao (Full)", "price": 580, "stock": 100, "image_url": "https://images.unsplash.com/photo-1589302168068-964664d93dc0?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Family-size pulao, serves 2-3.", "is_popular": True},
+    ],
+    "BBQ & Grill": [
+        {"name": "Mixed BBQ Platter", "price": 850, "stock": 60, "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Seekh kebab, chicken tikka, malai boti combo.", "is_popular": True},
+        {"name": "Chicken Tikka", "price": 380, "stock": 80, "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Tandoori spiced chicken tikka.", "is_popular": False},
+        {"name": "Seekh Kebab (4 pcs)", "price": 320, "stock": 100, "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Char-grilled minced beef kebabs.", "is_popular": False},
+    ],
+    "Sides & Drinks": [
+        {"name": "Raita", "price": 60, "stock": 200, "image_url": "https://images.unsplash.com/photo-1694579740719-0e601c5d2437?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Cooling yogurt with cucumber and mint.", "is_popular": False},
+        {"name": "Salad", "price": 80, "stock": 150, "image_url": "https://images.unsplash.com/photo-1694579740719-0e601c5d2437?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Fresh garden salad.", "is_popular": False},
+        {"name": "Soft Drink (500ml)", "price": 90, "stock": 200, "image_url": "https://images.unsplash.com/photo-1694579740719-0e601c5d2437?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Coke, Sprite, or Fanta.", "is_popular": False},
+        {"name": "Zarda (Sweet Rice)", "price": 200, "stock": 80, "image_url": "https://images.unsplash.com/photo-1694579740719-0e601c5d2437?crop=entropy&cs=srgb&fm=jpg&q=85", "description": "Traditional sweet saffron rice.", "is_popular": True},
+    ],
+}
+
+SAMPLE_OFFERS = [
+    {"title": "Family Feast — 15% OFF", "description": "Get 15% off on orders above Rs. 1500. Use code FAMILY15.", "discount_percent": 15, "discount_amount": 0, "coupon_code": "FAMILY15", "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
+    {"title": "First Order — Rs. 100 OFF", "description": "Welcome offer! Flat Rs. 100 off on your first order. Code: WELCOME100.", "discount_percent": 0, "discount_amount": 100, "coupon_code": "WELCOME100", "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "active": True},
+    {"title": "Weekend BBQ Bonanza", "description": "Free Raita + Salad with any BBQ Platter on weekends.", "discount_percent": 0, "discount_amount": 0, "coupon_code": "", "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
+]
+
+async def seed_online_data():
+    # Seed menu only if empty
+    if await db.menu_items.count_documents({}) == 0:
+        sort_idx_cat = 0
+        sort_idx_item = 0
+        for cat_name, items in SAMPLE_MENU_DATA.items():
+            cat_doc = {"name": cat_name, "color": "#D92D20", "sort_order": sort_idx_cat, "created_at": datetime.now(timezone.utc).isoformat()}
+            cat_res = await db.categories.insert_one(cat_doc)
+            cid = str(cat_res.inserted_id)
+            sort_idx_cat += 1
+            for it in items:
+                await db.menu_items.insert_one({
+                    "name": it["name"],
+                    "price": it["price"],
+                    "category_id": cid,
+                    "stock": it["stock"],
+                    "low_stock_threshold": 10,
+                    "image_url": it["image_url"],
+                    "description": it["description"],
+                    "is_popular": it.get("is_popular", False),
+                    "sort_order": sort_idx_item,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                sort_idx_item += 1
+        logger.info(f"Seeded {sort_idx_item} menu items in {sort_idx_cat} categories")
+    # Seed offers only if empty
+    if await db.offers.count_documents({}) == 0:
+        for o in SAMPLE_OFFERS:
+            await db.offers.insert_one({**o, "created_at": datetime.now(timezone.utc).isoformat()})
+        logger.info(f"Seeded {len(SAMPLE_OFFERS)} offers")
+    # Indexes
+    try:
+        await db.customers.create_index("email", unique=True)
+        await db.online_orders.create_index([("created_at", -1)])
+        await db.online_orders.create_index("customer_id")
+        await db.online_orders.create_index("status")
+        await db.reviews.create_index([("created_at", -1)])
+        await db.offers.create_index("coupon_code")
+    except Exception as e:
+        logger.warning(f"Online data index creation skipped: {e}")
+
+@app.on_event("startup")
+async def startup_online_seed():
+    await seed_online_data()
+
+# =============================================================================
+# END CUSTOMER ENDPOINTS
+# =============================================================================
+
+# =============================================================================
+# ONLINE SETTINGS, DELIVERY ZONES, AND PAYMENT INTEGRATION
+# =============================================================================
+
+import math
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionRequest
+)
+
+DEFAULT_ONLINE_SETTINGS = {
+    "restaurant_lat": 31.4520,
+    "restaurant_lng": 74.2680,
+    "delivery_free_radius_km": 2.0,
+    "delivery_base_fee": 100.0,
+    "delivery_per_km_fee": 15.0,
+    "delivery_max_radius_km": 15.0,
+    "free_delivery_min_subtotal": 0.0,  # 0 = disabled. Set e.g. 1500 for "free delivery on orders Rs.1500+"
+    "payment_methods": {
+        "cod": True,
+        "pay_at_restaurant": True,
+        "bank_transfer": True,
+        "card": True,
+    },
+    "bank_account_title": "Karachi Naseeb Biryani",
+    "bank_account_number": "0123456789012",
+    "bank_name": "Meezan Bank",
+    "iban": "PK00MEZN0000000000000000",
+    "easypaisa_number": "03004928411",
+    "easypaisa_account_title": "Karachi Naseeb",
+    "jazzcash_number": "03004928411",
+    "jazzcash_account_title": "Karachi Naseeb",
+    # Business hours — Mon..Sun. closed=true blocks ordering for that day.
+    # "open"/"close" are HH:MM strings in the configured timezone.
+    "business_hours_enabled": True,
+    "business_hours_timezone": "Asia/Karachi",
+    "weekly_schedule": {
+        "mon": {"open": "10:00", "close": "23:00", "closed": False},
+        "tue": {"open": "10:00", "close": "23:00", "closed": False},
+        "wed": {"open": "10:00", "close": "23:00", "closed": False},
+        "thu": {"open": "10:00", "close": "23:00", "closed": False},
+        "fri": {"open": "10:00", "close": "23:00", "closed": False},
+        "sat": {"open": "10:00", "close": "23:00", "closed": False},
+        "sun": {"open": "10:00", "close": "23:00", "closed": False},
+    },
+}
+
+async def get_online_settings_doc():
+    s = await db.online_settings.find_one({"key": "online"}, {"_id": 0})
+    if not s:
+        return DEFAULT_ONLINE_SETTINGS.copy()
+    merged = DEFAULT_ONLINE_SETTINGS.copy()
+    for k, v in s.items():
+        if k != "key":
+            merged[k] = v
+    return merged
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+def _parse_hhmm(value: str, default_minutes: int) -> int:
+    """Parse 'HH:MM' string into minutes since midnight. Returns default_minutes on parse failure."""
+    try:
+        parts = (value or "").split(":")
+        h = int(parts[0]); m = int(parts[1]) if len(parts) > 1 else 0
+        return max(0, min(24 * 60, h * 60 + m))
+    except Exception:
+        return default_minutes
+
+def compute_business_hours_status(settings: dict) -> dict:
+    """Return current open/closed status using the configured weekly_schedule + timezone.
+    Falls back to "always open" when business_hours_enabled is False."""
+    enabled = settings.get("business_hours_enabled", True)
+    tz_name = settings.get("business_hours_timezone", "Asia/Karachi") or "Asia/Karachi"
+    schedule = settings.get("weekly_schedule") or DEFAULT_ONLINE_SETTINGS["weekly_schedule"]
+    try:
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = pytz.timezone("Asia/Karachi")
+    now_local = datetime.now(tz)
+    today_key = DAY_KEYS[now_local.weekday()]
+    current_minutes = now_local.hour * 60 + now_local.minute
+    today = schedule.get(today_key) or {}
+    if not enabled:
+        return {
+            "is_open": True,
+            "enabled": False,
+            "timezone": tz_name,
+            "today": {"day": today_key, **today},
+            "now": now_local.strftime("%H:%M"),
+            "next_open_at": None,
+            "next_close_at": None,
+            "weekly_schedule": schedule,
+        }
+    is_open = False
+    next_close_at = None
+    next_open_at = None
+    if not today.get("closed", False):
+        open_min = _parse_hhmm(today.get("open", "10:00"), 10 * 60)
+        close_min = _parse_hhmm(today.get("close", "23:00"), 23 * 60)
+        # Same-day open/close window (no overnight wrap supported in this MVP)
+        if open_min <= current_minutes < close_min:
+            is_open = True
+            next_close_at = today.get("close", "23:00")
+        elif current_minutes < open_min:
+            next_open_at = today.get("open", "10:00")
+    if not is_open and next_open_at is None:
+        # Look ahead up to 7 days for the next open day
+        for offset in range(1, 8):
+            day_idx = (now_local.weekday() + offset) % 7
+            d = schedule.get(DAY_KEYS[day_idx]) or {}
+            if d.get("closed", False):
+                continue
+            next_dt = (now_local + timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+            open_min = _parse_hhmm(d.get("open", "10:00"), 10 * 60)
+            next_dt = next_dt + timedelta(minutes=open_min)
+            next_open_at = next_dt.isoformat()
+            break
+    return {
+        "is_open": is_open,
+        "enabled": True,
+        "timezone": tz_name,
+        "today": {"day": today_key, **today},
+        "now": now_local.strftime("%H:%M"),
+        "next_open_at": next_open_at,
+        "next_close_at": next_close_at,
+        "weekly_schedule": schedule,
+    }
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0  # Earth radius in km
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+def calculate_delivery_fee(distance_km: float, settings: dict, subtotal: float = 0.0) -> dict:
+    free_radius = float(settings.get("delivery_free_radius_km", 2.0))
+    base_fee = float(settings.get("delivery_base_fee", 100.0))
+    per_km = float(settings.get("delivery_per_km_fee", 15.0))
+    max_radius = float(settings.get("delivery_max_radius_km", 15.0))
+    free_min_subtotal = float(settings.get("free_delivery_min_subtotal", 0) or 0)
+    in_range = distance_km <= max_radius
+    if not in_range:
+        return {"distance_km": round(distance_km, 2), "fee": 0, "in_range": False, "free_delivery": False, "max_radius_km": max_radius, "free_delivery_min_subtotal": free_min_subtotal}
+    if distance_km <= free_radius:
+        return {"distance_km": round(distance_km, 2), "fee": 0, "in_range": True, "free_delivery": True, "max_radius_km": max_radius, "free_delivery_min_subtotal": free_min_subtotal, "free_delivery_reason": "in-free-radius"}
+    if free_min_subtotal > 0 and subtotal >= free_min_subtotal:
+        return {"distance_km": round(distance_km, 2), "fee": 0, "in_range": True, "free_delivery": True, "max_radius_km": max_radius, "free_delivery_min_subtotal": free_min_subtotal, "free_delivery_reason": "subtotal-threshold"}
+    extra_km = distance_km - free_radius
+    fee = base_fee + (extra_km * per_km)
+    return {"distance_km": round(distance_km, 2), "fee": round(fee, 0), "in_range": True, "free_delivery": False, "max_radius_km": max_radius, "free_delivery_min_subtotal": free_min_subtotal}
+
+@api_router.get("/public/business-hours")
+async def get_business_hours():
+    """Public: current open/closed state + weekly schedule for the customer site."""
+    s = await get_online_settings_doc()
+    return compute_business_hours_status(s)
+
+
+@api_router.get("/public/settings")
+async def get_public_settings():
+    s = await get_online_settings_doc()
+    return {
+        "restaurant_lat": s["restaurant_lat"],
+        "restaurant_lng": s["restaurant_lng"],
+        "delivery_free_radius_km": s["delivery_free_radius_km"],
+        "delivery_base_fee": s["delivery_base_fee"],
+        "delivery_per_km_fee": s["delivery_per_km_fee"],
+        "delivery_max_radius_km": s["delivery_max_radius_km"],
+        "free_delivery_min_subtotal": float(s.get("free_delivery_min_subtotal", 0) or 0),
+        "payment_methods": s["payment_methods"],
+        "bank_account_title": s["bank_account_title"],
+        "bank_account_number": s["bank_account_number"],
+        "bank_name": s["bank_name"],
+        "iban": s.get("iban", ""),
+        "easypaisa_number": s["easypaisa_number"],
+        "easypaisa_account_title": s.get("easypaisa_account_title", ""),
+        "jazzcash_number": s["jazzcash_number"],
+        "jazzcash_account_title": s.get("jazzcash_account_title", ""),
+    }
+
+class OnlineSettingsUpdate(BaseModel):
+    # Restaurant Info
+    restaurant_name: Optional[str] = None
+    restaurant_phone: Optional[str] = None
+    restaurant_whatsapp: Optional[str] = None
+    restaurant_email: Optional[str] = None
+    restaurant_address: Optional[str] = None
+    restaurant_logo_url: Optional[str] = None
+    # Social Links
+    facebook_url: Optional[str] = None
+    instagram_url: Optional[str] = None
+    twitter_url: Optional[str] = None
+    # Opening Hours
+    opening_hours: Optional[str] = None  # e.g., "Mon-Sun: 10AM - 11PM"
+    # Invoice/Receipt
+    invoice_footer_text: Optional[str] = None
+    # Location
+    restaurant_lat: Optional[float] = None
+    restaurant_lng: Optional[float] = None
+    google_maps_url: Optional[str] = None
+    # Delivery Settings
+    delivery_free_radius_km: Optional[float] = None
+    delivery_base_fee: Optional[float] = None
+    delivery_per_km_fee: Optional[float] = None
+    delivery_max_radius_km: Optional[float] = None
+    free_delivery_min_subtotal: Optional[float] = None  # 0 = disabled. e.g. 500 means: free delivery if cart >= Rs.500
+    # Payment Methods
+    payment_methods: Optional[Dict[str, bool]] = None
+    bank_account_title: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    iban: Optional[str] = None
+    easypaisa_number: Optional[str] = None
+    easypaisa_account_title: Optional[str] = None
+    jazzcash_number: Optional[str] = None
+    jazzcash_account_title: Optional[str] = None
+    twilio_whatsapp_from: Optional[str] = None
+    # Business hours
+    business_hours_enabled: Optional[bool] = None
+    business_hours_timezone: Optional[str] = None
+    weekly_schedule: Optional[Dict[str, Dict[str, Any]]] = None
+
+@api_router.get("/admin/online-settings")
+async def admin_get_online_settings(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return await get_online_settings_doc()
+
+@api_router.put("/admin/online-settings")
+async def admin_update_online_settings(req: OnlineSettingsUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    ud = {k: v for k, v in req.model_dump().items() if v is not None}
+    if ud:
+        await db.online_settings.update_one({"key": "online"}, {"$set": ud}, upsert=True)
+    return await get_online_settings_doc()
+
+class DeliveryQuoteRequest(BaseModel):
+    lat: float
+    lng: float
+    subtotal: Optional[float] = 0.0
+
+@api_router.post("/delivery/quote")
+async def delivery_quote(req: DeliveryQuoteRequest):
+    s = await get_online_settings_doc()
+    distance = haversine_km(s["restaurant_lat"], s["restaurant_lng"], req.lat, req.lng)
+    return calculate_delivery_fee(distance, s, subtotal=float(req.subtotal or 0))
+
+# --- Stripe Payment Integration ---
+class StripeSessionRequest(BaseModel):
+    order_id: str
+    origin_url: str
+
+@api_router.post("/payments/stripe/create-session")
+async def create_stripe_session(req: StripeSessionRequest, http_request: Request):
+    """Create Stripe checkout session for an existing order. Amount comes from server-side order data."""
+    api_key = os.environ.get("STRIPE_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(req.order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("payment_status") == "paid":
+        raise HTTPException(status_code=400, detail="Order already paid")
+    # Server-side amount (no frontend manipulation)
+    amount = float(order.get("total_price", 0))
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+    origin = req.origin_url.rstrip("/")
+    success_url = f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}&order_id={req.order_id}"
+    cancel_url = f"{origin}/payment/cancel?order_id={req.order_id}"
+    host_url = str(http_request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=api_key, webhook_url=webhook_url)
+    metadata = {"order_id": req.order_id, "receipt_no": str(order["_id"])[-6:].upper()}
+    # Convert PKR amount to USD (approx 280 PKR = 1 USD) for Stripe test mode
+    # In production, Stripe supports PKR directly with proper account
+    usd_amount = round(amount / 280.0, 2)
+    if usd_amount < 0.50:
+        usd_amount = 0.50  # Stripe minimum
+    sess_req = CheckoutSessionRequest(
+        amount=usd_amount,
+        currency="usd",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
+    )
+    session = await stripe.create_checkout_session(sess_req)
+    # Create payment_transactions record
+    await db.payment_transactions.insert_one({
+        "session_id": session.session_id,
+        "order_id": req.order_id,
+        "amount_pkr": amount,
+        "amount_usd": usd_amount,
+        "currency": "usd",
+        "metadata": metadata,
+        "payment_status": "initiated",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+@api_router.get("/payments/stripe/status/{session_id}")
+async def stripe_status(session_id: str, http_request: Request):
+    api_key = os.environ.get("STRIPE_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Stripe not configured")
+    txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    host_url = str(http_request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=api_key, webhook_url=webhook_url)
+    try:
+        status = await stripe.get_checkout_status(session_id)
+    except Exception as e:
+        logger.warning(f"Stripe status retrieval failed: {e}")
+        # Fall back to DB record
+        if txn:
+            return {
+                "session_id": session_id,
+                "status": "unknown",
+                "payment_status": txn.get("payment_status", "unpaid"),
+                "amount_total": int(round(float(txn.get("amount_usd", 0)) * 100)),
+                "currency": txn.get("currency", "usd"),
+                "order_id": txn.get("order_id"),
+            }
+        return {"session_id": session_id, "status": "unknown", "payment_status": "unpaid", "amount_total": 0, "currency": "usd", "order_id": None}
+    if txn and txn.get("payment_status") != "paid" and status.payment_status == "paid":
+        # Idempotent update
+        await db.payment_transactions.update_one(
+            {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat(), "stripe_status": status.status}}
+        )
+        order_id = (txn or {}).get("order_id")
+        if order_id:
+            await db.online_orders.update_one(
+                {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
+                {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
+            )
+    return {
+        "session_id": session_id,
+        "status": status.status,
+        "payment_status": status.payment_status,
+        "amount_total": status.amount_total,
+        "currency": status.currency,
+        "order_id": (txn or {}).get("order_id"),
+    }
+
+@app.post("/api/webhook/stripe")
+async def stripe_webhook(request: Request):
+    api_key = os.environ.get("STRIPE_API_KEY")
+    if not api_key:
+        return {"received": False}
+    host_url = str(request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    stripe = StripeCheckout(api_key=api_key, webhook_url=webhook_url)
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    try:
+        event = await stripe.handle_webhook(body, sig)
+    except Exception as e:
+        logger.warning(f"Stripe webhook verify failed: {e}")
+        return {"received": False}
+    if event.payment_status == "paid":
+        await db.payment_transactions.update_one(
+            {"session_id": event.session_id, "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        order_id = (event.metadata or {}).get("order_id")
+        if order_id:
+            await db.online_orders.update_one(
+                {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
+                {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
+            )
+    return {"received": True}
+
+# --- Bank Transfer manual verification ---
+class BankPaymentReference(BaseModel):
+    transaction_id: str
+    payer_name: Optional[str] = ""
+    payment_via: Optional[str] = "bank"  # bank | easypaisa | jazzcash
+
+@api_router.post("/online-orders/{order_id}/bank-payment")
+async def submit_bank_payment(order_id: str, req: BankPaymentReference):
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {
+            "payment_method": req.payment_via,
+            "payment_reference": req.transaction_id,
+            "payer_name": req.payer_name or "",
+            "payment_status": "pending_verification",
+            "payment_submitted_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    return {"message": "Payment reference submitted. Awaiting verification.", "payment_status": "pending_verification"}
+
+@api_router.put("/online-orders/{order_id}/payment-status")
+async def admin_update_payment_status(order_id: str, body: dict, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    new_status = body.get("payment_status")
+    if new_status not in {"pending", "pending_verification", "paid", "failed", "refunded"}:
+        raise HTTPException(status_code=400, detail="Invalid payment_status")
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"payment_status": new_status, "payment_updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"message": "Updated", "payment_status": new_status}
+
+# =============================================================================
+# END ONLINE SETTINGS / DELIVERY / PAYMENT
+# =============================================================================
+
+# =============================================================================
+# OBJECT STORAGE, WHATSAPP NOTIFICATIONS, LIVE TRACKING
+# =============================================================================
+import requests as _requests
+from fastapi import Header, Query
+from fastapi.responses import Response
+
+OBJ_STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+APP_NAME = os.environ.get("APP_NAME", "karachi-naseeb")
+_obj_storage_key = None
+LOCAL_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+
+def _init_obj_storage():
+    global _obj_storage_key
+    if _obj_storage_key:
+        return _obj_storage_key
+    try:
+        emkey = os.environ.get("EMERGENT_LLM_KEY", "")
+        if not emkey:
+            return None
+        resp = _requests.post(f"{OBJ_STORAGE_URL}/init", json={"emergent_key": emkey}, timeout=30)
+        resp.raise_for_status()
+        _obj_storage_key = resp.json().get("storage_key")
+        logger.info("Object storage initialized (cloud)")
+        return _obj_storage_key
+    except Exception as e:
+        logger.warning(f"Object storage init failed: {e}")
+        return None
+
+def _put_object(path: str, data: bytes, content_type: str):
+    """Upload file to cloud storage or fallback to local filesystem."""
+    key = _init_obj_storage()
+    
+    # Try cloud storage first
+    if key:
+        try:
+            resp = _requests.put(
+                f"{OBJ_STORAGE_URL}/objects/{path}",
+                headers={"X-Storage-Key": key, "Content-Type": content_type},
+                data=data, timeout=120,
+            )
+            if resp.status_code == 403:
+                # Re-init and retry once
+                global _obj_storage_key
+                _obj_storage_key = None
+                key = _init_obj_storage()
+                if key:
+                    resp = _requests.put(
+                        f"{OBJ_STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key, "Content-Type": content_type},
+                        data=data, timeout=120,
+                    )
+            resp.raise_for_status()
+            logger.info(f"File uploaded to cloud storage: {path}")
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"Cloud storage upload failed, falling back to local: {e}")
+    
+    # Fallback to local filesystem
+    try:
+        local_path = os.path.join(LOCAL_UPLOAD_DIR, path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        logger.info(f"File uploaded to local storage: {path}")
+        return {"path": path, "size": len(data), "storage": "local"}
+    except Exception as e:
+        logger.error(f"Local storage upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Storage failed: {str(e)[:100]}")
+
+def _get_object(path: str):
+    """Retrieve file from cloud storage or local filesystem."""
+    key = _init_obj_storage()
+    
+    # Try cloud storage first
+    if key:
+        try:
+            resp = _requests.get(
+                f"{OBJ_STORAGE_URL}/objects/{path}",
+                headers={"X-Storage-Key": key}, timeout=60,
+            )
+            if resp.status_code == 403:
+                global _obj_storage_key
+                _obj_storage_key = None
+                key = _init_obj_storage()
+                if key:
+                    resp = _requests.get(
+                        f"{OBJ_STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key}, timeout=60,
+                    )
+            resp.raise_for_status()
+            return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+        except Exception as e:
+            logger.warning(f"Cloud storage retrieval failed, trying local: {e}")
+    
+    # Fallback to local filesystem
+    try:
+        local_path = os.path.join(LOCAL_UPLOAD_DIR, path)
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        with open(local_path, "rb") as f:
+            data = f.read()
+        # Guess content type from extension
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        content_type = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "webp": "image/webp", "pdf": "application/pdf"
+        }.get(ext, "application/octet-stream")
+        return data, content_type
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Local storage retrieval failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Storage read failed: {str(e)[:100]}")
+
+@app.on_event("startup")
+async def _startup_storage():
+    _init_obj_storage()
+
+ALLOWED_UPLOAD_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+@api_router.post("/online-orders/{order_id}/payment-screenshot")
+async def upload_payment_screenshot(order_id: str, file: UploadFile = File(...)):
+    """Customer uploads payment proof screenshot/PDF for bank/easypaisa/jazzcash."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception as e:
+        logger.warning(f"Payment upload - invalid order ID {order_id}: {e}")
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    ctype = (file.content_type or "").lower()
+    if ctype not in ALLOWED_UPLOAD_MIMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: JPG, PNG, WebP, PDF")
+    
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max 5MB)")
+    
+    ext = (file.filename or "file").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    storage_path = f"{APP_NAME}/payments/{order_id}/{_uuid.uuid4().hex}.{ext}"
+    
+    try:
+        result = _put_object(storage_path, data, ctype)
+        logger.info(f"Payment screenshot uploaded for order {order_id}: {result.get('storage', 'cloud')} storage")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Payment screenshot upload failed for order {order_id}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:100]}")
+    
+    file_record = {
+        "id": _uuid.uuid4().hex,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": ctype,
+        "size": result.get("size", len(data)),
+        "order_id": order_id,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_deleted": False,
+    }
+    await db.uploaded_files.insert_one(file_record)
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {
+            "payment_screenshot_path": result["path"],
+            "payment_screenshot_uploaded_at": file_record["uploaded_at"],
+        }},
+    )
+    return {"ok": True, "path": result["path"], "id": file_record["id"]}
+
+@api_router.get("/files/{path:path}")
+async def serve_file(path: str, request: Request):
+    """Serves uploaded file. Admin only (Bearer token)."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    record = await db.uploaded_files.find_one({"storage_path": path, "is_deleted": False})
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        data, ctype = _get_object(path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Read failed: {str(e)[:100]}")
+    return Response(content=data, media_type=record.get("content_type", ctype))
+
+# --- WhatsApp via Twilio ---
+def _normalize_pk_phone(p: str) -> str:
+    p = (p or "").strip().replace(" ", "").replace("-", "")
+    if p.startswith("+"):
+        return p
+    if p.startswith("0"):
+        return "+92" + p[1:]
+    if p.startswith("92"):
+        return "+" + p
+    if len(p) == 10:
+        return "+92" + p
+    return p
+
+async def send_whatsapp(to_phone: str, body: str):
+    """Send WhatsApp message via Twilio. Silently no-ops if creds missing."""
+    sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    tok = os.environ.get("TWILIO_AUTH_TOKEN")
+    if not sid or not tok or not to_phone:
+        return False
+    try:
+        s = await get_online_settings_doc()
+        from_num = s.get("twilio_whatsapp_from") or os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+        if not from_num.startswith("whatsapp:"):
+            from_num = f"whatsapp:{from_num}"
+        to_num = _normalize_pk_phone(to_phone)
+        if not to_num.startswith("whatsapp:"):
+            to_num = f"whatsapp:{to_num}"
+        from twilio.rest import Client
+        client = Client(sid, tok)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(from_=from_num, to=to_num, body=body)
+        )
+        logger.info(f"WhatsApp sent: {msg.sid}")
+        return True
+    except Exception as e:
+        logger.warning(f"WhatsApp send failed: {e}")
+        return False
+
+def _format_order_confirmation(order: dict, tracking_url: str) -> str:
+    receipt = str(order.get("_id", ""))[-6:].upper() if "_id" in order else order.get("receipt_no", "")
+    items_lines = "\n".join([f"  • {i['quantity']}x {i['name']} — Rs.{i['price']*i['quantity']}" for i in order.get("items", [])])
+    total = order.get("total_price", 0)
+    pay = (order.get("payment_method") or "cod").upper()
+    return (
+        f"🍛 *Karachi Naseeb Biryani*\n"
+        f"Order #{receipt} confirmed!\n\n"
+        f"{items_lines}\n\n"
+        f"*Total: Rs. {int(total)}*\n"
+        f"Payment: {pay}\n"
+        f"ETA: 30–45 min\n\n"
+        f"Track your order:\n{tracking_url}\n\n"
+        f"Questions? Call +92 300 4928411"
+    )
+
+def _format_status_update(order: dict, status: str, tracking_url: str) -> str:
+    receipt = str(order.get("_id", ""))[-6:].upper() if "_id" in order else order.get("receipt_no", "")
+    rejection_reason = order.get("rejection_reason") or ""
+    reason_pretty = {
+        "out_of_stock": "We've run out of stock for one or more items.",
+        "closed": "Sorry, the kitchen is currently closed.",
+        "other": "Please contact us for details.",
+    }.get(rejection_reason.lower().strip(), rejection_reason or "Please contact us for details.")
+    labels = {
+        "accepted": "✅ Your order has been accepted and is being prepared!",
+        "preparing": "👨‍🍳 We've started preparing your order!",
+        "ready": "✅ Your order is ready!",
+        "out_for_delivery": "🛵 Your order is on the way!",
+        "delivered": "🎉 Your order has been delivered. Enjoy!",
+        "cancelled": "❌ Your order has been cancelled.",
+        "rejected": f"❌ Your order was rejected: {reason_pretty}",
+        "modified": "✏️ Your order has been updated and confirmed. It is now being prepared!",
+    }
+    msg = labels.get(status, f"Status updated to: {status}")
+    return f"🍛 *Karachi Naseeb Biryani*\nOrder #{receipt}\n\n{msg}\n\nTrack: {tracking_url}"
+
+# --- Live Order Tracking (public, no auth) ---
+@api_router.get("/public/restaurant-info")
+async def public_restaurant_info():
+    """Public: restaurant info needed for receipts, reviews, and customer pages."""
+    o = await db.online_settings.find_one({"key": "online"}, {"_id": 0}) or {}
+    g = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+    
+    # Prefer online_settings, fallback to global settings
+    lat = o.get("restaurant_lat", 31.4520)
+    lng = o.get("restaurant_lng", 74.2680)
+    
+    return {
+        "name": o.get("restaurant_name") or g.get("restaurant_name", "Karachi Naseeb Biryani & Murg Pulao"),
+        "phone": o.get("restaurant_phone") or g.get("restaurant_phone", "+923004928411"),
+        "whatsapp": o.get("restaurant_whatsapp") or o.get("restaurant_phone") or g.get("restaurant_phone", "+923004928411"),
+        "email": o.get("restaurant_email", "info@karachinaseeb.com"),
+        "address": o.get("restaurant_address") or g.get("restaurant_address", "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore"),
+        "logo_url": o.get("restaurant_logo_url", ""),
+        "facebook_url": o.get("facebook_url", ""),
+        "instagram_url": o.get("instagram_url", ""),
+        "twitter_url": o.get("twitter_url", ""),
+        "opening_hours": o.get("opening_hours", "Mon-Sun: 10AM - 11PM"),
+        "currency": g.get("currency", "Rs"),
+        "lat": lat,
+        "lng": lng,
+        "google_maps_url": o.get("google_maps_url") or f"https://www.google.com/maps/search/?api=1&query={lat},{lng}",
+    }
+
+
+@api_router.get("/track/{order_id}")
+async def public_track_order(order_id: str):
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {
+        "id": str(o["_id"]),
+        "receipt_no": str(o["_id"])[-6:].upper(),
+        "status": o.get("status", "pending"),
+        "payment_status": o.get("payment_status", "pending"),
+        "payment_method": o.get("payment_method", "cod"),
+        "items": o.get("items", []),
+        "total_price": o.get("total_price", 0),
+        "delivery_fee": o.get("delivery_fee", 0),
+        "delivery_fee_overridden": bool(o.get("delivery_fee_overridden", False)),
+        "discount_amount": o.get("discount_amount", 0),
+        "customer_name": o.get("customer_name", ""),
+        "phone": o.get("phone", ""),
+        "address": o.get("address", ""),
+        "created_at": o.get("created_at", ""),
+        "updated_at": o.get("updated_at", ""),
+        "modified": bool(o.get("modified", False)),
+        "modification_pending": bool(o.get("modification_pending", False)),
+        "rejection_reason": o.get("rejection_reason", ""),
+        "accepted_at": o.get("accepted_at", ""),
+        # V2: live prep time + countdown helpers
+        "prep_time_min": int(o.get("prep_time_min") or 30),  # default 30 min
+        "prep_time_updated_at": o.get("prep_time_updated_at", ""),
+        "response_deadline_seconds": _response_deadline_seconds(o),
+    }
+
+
+def _response_deadline_seconds(order: dict) -> int:
+    """How many seconds remain in the 2-minute restaurant response window for pending orders.
+    Returns 0 (or negative) once the deadline has passed. Used by the countdown timer
+    shown to both customers and staff."""
+    if order.get("status") != "pending":
+        return 0
+    try:
+        created = datetime.fromisoformat(str(order.get("created_at", "")).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except Exception:
+        return 0
+    window = int(os.environ.get("ORDER_RESPONSE_WINDOW_SEC", "120"))
+    elapsed = (datetime.now(timezone.utc) - created).total_seconds()
+    return max(0, int(window - elapsed))
+
+# Hook tracking + WhatsApp into existing endpoints. We do this via Mongo-side "after-write"
+# triggers by wrapping the existing endpoints — but to keep changes minimal, we'll add a
+# "post" endpoint that the frontend calls right after order creation. The cleaner path is
+# to update the create_online_order and update_online_order_status implementations directly.
+# That is done above; we just need them to call these helpers. We use a small middleware-like
+# function that gets invoked from those endpoints (added by patching them with monkey-patch
+# is risky). Instead we add explicit notify calls in the existing handlers above by editing.
+# (See create_online_order patches below.)
+
+# Add online_settings field for twilio_whatsapp_from (one-time migration)
+async def _ensure_twilio_setting():
+    s = await db.online_settings.find_one({"key": "online"})
+    if not s or "twilio_whatsapp_from" not in s:
+        await db.online_settings.update_one(
+            {"key": "online"},
+            {"$set": {"twilio_whatsapp_from": os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")}},
+            upsert=True,
+        )
+
+@app.on_event("startup")
+async def _startup_twilio_setting():
+    await _ensure_twilio_setting()
+
+# =============================================================================
+# END OBJECT STORAGE / WHATSAPP / TRACKING
+# =============================================================================
+
+# =============================================================================
+# ADMIN: REVIEW MANAGEMENT
+# =============================================================================
+
+@api_router.get("/admin/reviews")
+async def get_all_reviews(request: Request, status: str = "all", limit: int = 100):
+    """Admin: Get all reviews with optional status filter (all/pending/replied)"""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    query = {}
+    if status == "pending":
+        query["admin_reply"] = {"$exists": False}
+    elif status == "replied":
+        query["admin_reply"] = {"$exists": True}
+    
+    reviews = await db.reviews.find(query).sort("created_at", -1).limit(limit).to_list(limit)
+    
+    result = []
+    for r in reviews:
+        # V2 Fix: Some entries (general feedback via POST /api/feedback) have order_id=None.
+        # Calling ObjectId(None) crashes the endpoint → "Failed to load reviews".
+        # Skip the order lookup gracefully when there's no order_id.
+        order = None
+        oid = r.get("order_id")
+        if oid:
+            try:
+                order = await db.online_orders.find_one({"_id": ObjectId(oid)})
+            except Exception:
+                order = None
+
+        result.append({
+            "id": str(r["_id"]),
+            "order_id": oid or "",
+            "order_receipt_no": (order.get("receipt_no") if order else None) or (oid[-6:].upper() if oid else "FEEDBACK"),
+            "customer_id": str(r.get("customer_id", "") or ""),
+            "customer_name": r.get("customer_name", "Anonymous"),
+            "customer_email": r.get("customer_email", ""),
+            "customer_phone": r.get("customer_phone", ""),
+            "rating": r.get("rating", 0),
+            "comment": r.get("comment", ""),
+            "admin_reply": r.get("admin_reply", ""),
+            "replied_by": r.get("replied_by", ""),
+            "replied_at": r.get("replied_at", ""),
+            "is_feedback": bool(r.get("is_feedback", False)),
+            "created_at": r.get("created_at", ""),
+        })
+    
+    return result
+
+@api_router.post("/admin/reviews/{review_id}/reply")
+async def reply_to_review(review_id: str, body: AdminReviewReply, request: Request):
+    """Admin: Reply to a customer review (and email the customer if SMTP is configured)."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        review = await db.reviews.find_one({"_id": ObjectId(review_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    await db.reviews.update_one(
+        {"_id": ObjectId(review_id)},
+        {"$set": {
+            "admin_reply": body.reply,
+            "replied_by": user.get("name", user.get("email", "")),
+            "replied_at": datetime.now(timezone.utc).isoformat(),
+        }}
+    )
+
+    # Best-effort: email the customer to let them know the restaurant has replied.
+    email_sent = False
+    try:
+        cust_id = review.get("customer_id")
+        cust_email = None
+        cust_name = review.get("customer_name") or "Valued Customer"
+        if cust_id:
+            cust = await db.customers.find_one({"_id": cust_id if isinstance(cust_id, ObjectId) else ObjectId(cust_id)})
+            if cust:
+                cust_email = cust.get("email")
+                cust_name = cust.get("name") or cust_name
+        if cust_email:
+            s = await _get_settings_doc()
+            if s.get("smtp_host") and s.get("smtp_port") and s.get("smtp_user") and s.get("smtp_password"):
+                rname = s.get("restaurant_name", "Karachi Naseeb")
+                stars = "★" * int(review.get("rating", 0)) + "☆" * (5 - int(review.get("rating", 0)))
+                subject = f"[{rname}] We replied to your review"
+                plain = (
+                    f"Hi {cust_name},\n\n"
+                    f"Thank you for your review! The {rname} team has just replied:\n\n"
+                    f"Your rating: {stars}\n"
+                    f"Your comment: {review.get('comment','')}\n\n"
+                    f"Our reply:\n{body.reply}\n\n"
+                    f"— {rname}\n"
+                )
+                html = f"""<div style='font-family:Manrope,Arial,sans-serif;max-width:560px;margin:0 auto;border:1px solid #E5E2DC;border-radius:12px;overflow:hidden'>
+                  <div style='padding:16px 24px;background:#1E3F20;color:#fff'><h2 style='margin:0'>{rname}</h2></div>
+                  <div style='padding:20px 24px;color:#1A1A1A'>
+                    <p style='margin:0 0 12px'>Hi <strong>{cust_name}</strong>,</p>
+                    <p style='margin:0 0 12px'>Thank you for your review — the {rname} team has just posted a reply.</p>
+                    <div style='background:#F9F8F6;border:1px solid #E5E2DC;border-radius:8px;padding:12px 16px;margin:12px 0'>
+                      <div style='font-size:13px;color:#5C5F5C'>Your rating</div>
+                      <div style='font-size:18px;color:#D29C2C;letter-spacing:2px'>{stars}</div>
+                      <div style='font-size:13px;color:#5C5F5C;margin-top:8px'>Your comment</div>
+                      <div style='color:#1A1A1A'>{review.get('comment','')}</div>
+                    </div>
+                    <div style='background:#FFF4E5;border-left:4px solid #D29C2C;padding:12px 16px;border-radius:4px'>
+                      <div style='font-size:13px;color:#5C5F5C;margin-bottom:6px'>Our reply</div>
+                      <div style='color:#1A1A1A;white-space:pre-wrap'>{body.reply}</div>
+                    </div>
+                    <p style='margin:16px 0 0;color:#5C5F5C;font-size:13px'>Thank you for being part of {rname}.</p>
+                  </div>
+                </div>"""
+                try:
+                    await asyncio.to_thread(
+                        _send_email_sync,
+                        s["smtp_host"], s["smtp_port"], s.get("smtp_user", ""), s.get("smtp_password", ""),
+                        bool(s.get("smtp_use_tls", True)),
+                        s.get("smtp_from") or s.get("smtp_user"),
+                        [cust_email], subject, plain, html,
+                    )
+                    email_sent = True
+                except Exception as e:
+                    logger.warning(f"Review reply email failed: {e}")
+    except Exception as e:
+        logger.warning(f"Review reply email lookup failed: {e}")
+    
+    return {"ok": True, "message": "Reply posted", "email_sent": email_sent}
+
+@api_router.delete("/admin/reviews/{review_id}")
+async def delete_review(review_id: str, request: Request):
+    """Admin: Delete a review (moderation)"""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        result = await db.reviews.delete_one({"_id": ObjectId(review_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    return {"ok": True, "message": "Review deleted"}
+
+# =============================================================================
+# LOYALTY / DIAMOND REWARD SYSTEM
+# =============================================================================
+
+# --- Admin: Loyalty Settings ---
+@api_router.get("/admin/loyalty/settings")
+async def get_loyalty_settings(request: Request):
+    await get_current_user(request)
+    settings = await db.loyalty_settings.find_one({"key": "loyalty"}, {"_id": 0}) or {}
+    return {
+        "enabled": settings.get("enabled", True),
+        "earning_rate": settings.get("earning_rate", 10.0),
+        "min_order_for_points": settings.get("min_order_for_points", 0.0),
+        "points_expiry_days": settings.get("points_expiry_days", None),
+    }
+
+@api_router.post("/admin/loyalty/settings")
+async def update_loyalty_settings(settings: LoyaltySettingsUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    update_data = settings.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    update_data["updated_by"] = str(user["_id"])
+    
+    await db.loyalty_settings.update_one(
+        {"key": "loyalty"},
+        {"$set": update_data},
+        upsert=True
+    )
+    return {"ok": True, "message": "Loyalty settings updated"}
+
+# --- Admin: Rewards Management ---
+@api_router.get("/admin/loyalty/rewards")
+async def get_all_rewards(request: Request):
+    await get_current_user(request)
+    rewards = await db.loyalty_rewards.find().to_list(500)
+    return [{
+        "id": str(r.pop("_id")),
+        **r
+    } for r in rewards]
+
+@api_router.post("/admin/loyalty/rewards")
+async def create_reward(reward: LoyaltyRewardCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    doc = {
+        **reward.dict(),
+        "total_redemptions": 0,
+        "created_by": str(user["_id"]),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.loyalty_rewards.insert_one(doc)
+    return {"id": str(result.inserted_id), **reward.dict()}
+
+@api_router.put("/admin/loyalty/rewards/{reward_id}")
+async def update_reward(reward_id: str, reward: LoyaltyRewardUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        existing = await db.loyalty_rewards.find_one({"_id": ObjectId(reward_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    
+    if not existing:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    
+    update_data = reward.dict(exclude_unset=True)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    update_data["updated_by"] = str(user["_id"])
+    
+    await db.loyalty_rewards.update_one(
+        {"_id": ObjectId(reward_id)},
+        {"$set": update_data}
+    )
+    return {"ok": True, "message": "Reward updated"}
+
+@api_router.delete("/admin/loyalty/rewards/{reward_id}")
+async def delete_reward(reward_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        result = await db.loyalty_rewards.delete_one({"_id": ObjectId(reward_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Reward not found")
+    
+    return {"ok": True, "message": "Reward deleted"}
+
+# --- Admin: Customer Loyalty View ---
+@api_router.get("/admin/loyalty/customers")
+async def get_customers_with_loyalty(request: Request, limit: int = 100):
+    await get_current_user(request)
+    customers = await db.customers.find({}).sort("diamond_balance", -1).limit(limit).to_list(limit)
+    return [{
+        "id": str(c.pop("_id")),
+        "email": c.get("email"),
+        "name": c.get("name"),
+        "diamond_balance": c.get("diamond_balance", 0),
+        "lifetime_diamonds_earned": c.get("lifetime_diamonds_earned", 0),
+        "lifetime_diamonds_spent": c.get("lifetime_diamonds_spent", 0),
+    } for c in customers]
+
+# --- Admin: Manual Balance Adjustment ---
+@api_router.post("/admin/loyalty/adjust")
+async def adjust_customer_balance(adjustment: LoyaltyAdjustRequest, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        customer = await db.customers.find_one({"_id": ObjectId(adjustment.customer_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    current_balance = customer.get("diamond_balance", 0)
+    new_balance = max(0, current_balance + adjustment.diamonds)  # Can't go negative
+    
+    # Update customer balance
+    await db.customers.update_one(
+        {"_id": ObjectId(adjustment.customer_id)},
+        {"$set": {"diamond_balance": new_balance}}
+    )
+    
+    # Log transaction
+    await db.loyalty_transactions.insert_one({
+        "customer_id": adjustment.customer_id,
+        "transaction_type": "adjusted",
+        "diamonds": adjustment.diamonds,
+        "balance_after": new_balance,
+        "notes": adjustment.notes,
+        "adjusted_by": str(user["_id"]),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    
+    return {"ok": True, "new_balance": new_balance}
+
+# --- Customer: View Balance & Rewards ---
+@api_router.get("/loyalty/balance")
+async def get_my_loyalty_balance(request: Request):
+    customer = await get_current_customer(request)
+    return {
+        "diamond_balance": customer.get("diamond_balance", 0),
+        "lifetime_diamonds_earned": customer.get("lifetime_diamonds_earned", 0),
+        "lifetime_diamonds_spent": customer.get("lifetime_diamonds_spent", 0),
+    }
+
+@api_router.get("/loyalty/transactions")
+async def get_my_loyalty_transactions(request: Request, limit: int = 50):
+    customer = await get_current_customer(request)
+    transactions = await db.loyalty_transactions.find(
+        {"customer_id": str(customer["_id"])}
+    ).sort("created_at", -1).limit(limit).to_list(limit)
+    return [{
+        "id": str(t.pop("_id")),
+        **t
+    } for t in transactions]
+
+@api_router.get("/loyalty/rewards")
+async def get_available_rewards(request: Request):
+    # Public or authenticated - shows active rewards
+    rewards = await db.loyalty_rewards.find({"is_active": True}).to_list(500)
+    return [{
+        "id": str(r.pop("_id")),
+        **{k: v for k, v in r.items() if k not in ["created_by", "updated_by"]}
+    } for r in rewards]
+
+# =============================================================================
+# END LOYALTY SYSTEM
+# =============================================================================
+
+app.include_router(api_router)
+app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("CORS_ORIGINS", "*").split(','), allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+# --- Serve built frontend (production / local Windows install) ---
+# When `frontend/build` exists, serve it from the backend at "/".
+# This gives single-origin (no CORS, no proxy needed), fast load (no dev
+# compilation), and makes Cloudflare tunneling trivial (one port).
+# Skipped automatically in dev environments where build doesn't exist.
+try:
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+    _frontend_build = ROOT_DIR.parent / "frontend" / "build"
+    if _frontend_build.exists() and (_frontend_build / "index.html").exists():
+        # Static assets (JS/CSS/images)
+        app.mount("/static", StaticFiles(directory=str(_frontend_build / "static")), name="static")
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # API routes are handled by api_router (mounted earlier).
+            # Anything else returns index.html so React Router can take over.
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="API route not found")
+            asset = _frontend_build / full_path
+            if asset.is_file():
+                return FileResponse(str(asset))
+            return FileResponse(str(_frontend_build / "index.html"))
+        logger.info(f"Serving built frontend from: {_frontend_build}")
+except Exception as e:
+    logger.warning(f"Frontend static serve disabled: {e}")
+

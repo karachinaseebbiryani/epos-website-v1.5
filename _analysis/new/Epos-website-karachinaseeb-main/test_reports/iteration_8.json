@@ -1,0 +1,43 @@
+{
+  "summary": "Iter-8 (F7 People-also-buy upsell) tested end-to-end. BACKEND: 14/14 pytest passed — POST /api/menu/upsell behaves per spec (default limit=4, cap=8, excludes input ids, prioritizes related_item_ids first, then bestsellers, then popular, fallback by recency, excludes stock=0, returns proper price/original_price/discount_percent/variations shape). related_item_ids round-trips on POST/PUT /menu-items and is returned by GET /menu-items defaulting to []. Iter-7 regressions (categories, /menu shape, online-settings) green. FRONTEND: /cart strip renders with title 'People also buy' + Sparkles icon, 4 upsell cards with proper testids (upsell-item-{id}, upsell-add-{id}), BEST + 25% OFF badges + Rs.600 strikethrough on Chicken Biryani (Full), Beef Biryani (in cart) is excluded from suggestions. Direct-add (no-variations) on /cart raised cart count 1->2->3 across two upsell-add clicks. /checkout shows compact PAB with title 'Add a side?' above Payment Method (after Continue-as-Guest), and adding from /checkout updated Order Summary live (Rs.450 -> Rs.900). Admin /admin/menu edit modal shows 17 menu-form-related-{id} chips (18-1 self), self exclusion verified, Save → Item updated toast. Variation-picker (data-testid=upsell-variation-picker) was not directly exercised because none of the 4 currently-bestseller/popular fallback items have variations — code path is verified by static review of PeopleAlsoBuy.jsx (lines 37-44, 119-155).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8.py",
+    "/app/test_reports/pytest/iter8_results.xml"
+  ],
+  "action_items": [
+    "(LOW / iter-9) server.py is now 3326 lines — the deferred refactor into routers should be the first task. Add upsell to its own /app/backend/routers/upsell.py.",
+    "(LOW) The current bestseller/popular fixtures don't include any item with variations, so the upsell variation-picker path was verified only by static code review. Consider adding a variation-bearing item (e.g., a drink with size variations) to seed data so this flow can be e2e-tested in future iterations.",
+    "(LOW / NICE-TO-HAVE) PeopleAlsoBuy.jsx queries on every cart-id change — debounce or memoize when cartItemIds string identity changes only (currently triggers on add-then-remove same item). Not blocking.",
+    "(LOW) UpsellCard shows 'From Rs. {min}' for items with variations but the badge area still shows {discount_percent}% OFF / BEST based on the parent item — visually correct in our test (Chicken Biryani Full single-price), but if a variation-priced item is bestseller, the strikethrough won't render because original_price is computed against base price, not min(variation). Verify this once seed data is updated."
+  ],
+  "critical_code_review_comments": [
+    "POST /api/menu/upsell ranking is correctly implemented and stable: explicit related_item_ids -> is_bestseller -> is_popular -> recency. Excludes input ids and stock=0. The `cart_oids` filter `len(x)==24` silently drops malformed ids — fine for safety.",
+    "Upsell serializer reuses the same price/discount math as /api/menu (server.py L2019-2031 vs L1989-2007). Good DRY-adjacent symmetry but consider extracting a helper to avoid drift.",
+    "PeopleAlsoBuy.jsx returns null when loading or when suggestions=[] (good — no empty box). Cart-id dependency uses Set+join so two variations of the same item dedupe to a single excluded id — matches the spec note in the review request.",
+    "AdminMenu.jsx openEdit() filters self id out of related_item_ids when loading existing data (L72) AND the chip render loop also skips self (L296 area). Defensive double-guard — good.",
+    "server.py is now 3326 lines (was 3239 in iter-7, 3174 in iter-6). The refactor deferral is the right call but is becoming urgent.",
+    "Note: The check `len(ranked) < limit` repeats 4 times in the upsell endpoint — could be one loop over priority-tiers, but readability is acceptable.",
+    "Toast/UX: PeopleAlsoBuy shows toast.success on direct-add but NOT after the variation-picker confirms — the picker calls onPick which calls toast.success itself (L65). Consistent."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration8.py (NEW — 14 tests, all passing)",
+    "/app/test_reports/iteration_8.json (this report)",
+    "/app/test_reports/pytest/iter8_results.xml (junit)"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% on tested flows (cart PAB render, /cart no-variation upsell add, /checkout PAB compact + live total update, admin related-items chip toggle + save, self-exclusion). Variation-picker path verified by code review only."},
+  "test_credentials": "admin@restaurant.com / admin123 (read from /app/memory/test_credentials.md)",
+  "seed_data_creation": "All TEST_Iter8_* menu items created+deleted by pytest fixtures (cleaned up automatically). One AdminMenu chip toggle was saved persistently — main agent may want to revert if undesired.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-8 is fully green. Upsell endpoint is POST /api/menu/upsell with body {item_ids:[...], limit:4} returning {items:[{id,name,price,original_price,discount_percent,image_url,is_bestseller,is_popular,variations}]}. PeopleAlsoBuy strip uses testids people-also-buy / upsell-item-{id} / upsell-add-{id} / upsell-variation-picker. AdminMenu form chip testid is menu-form-related-{id}. To test variation-picker upsell: seed an item with variations as a bestseller/popular OR set it as related_item of a cart item.",
+  "rca of the issue": "No bugs found this iteration."
+}

@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 2: Tested NEW discount + price-change features and re-verified core flows. Backend: 33/33 pytest tests pass (added 6 new tests in test_discount_price_change.py covering percent/flat discount, original_price tracking, default fallback, combined flow). Frontend Playwright: percent discount 10% on $19.98 → discount -$2.00, tax recalculated on after-disc subtotal ($17.98 × 5% = $0.90), total $18.88 ✓. Remove discount restores totals to $20.98 ✓. Flat $5 discount → -$5.00, tax on $14.98 = $0.75, total $15.73 ✓. Price change pencil opens dialog, change $9.99→$3.50 shows 'was $9.99' badge, totals recalc to $3.67 ✓. Reset to Original removes badge ✓. Cash and credit orders place successfully. Inventory page shows items with stock counts and stock decrements after orders. CRITICAL backend bug found and fixed: /api/inventory threw 500 due to a leftover menu_item with category_id='invalid_id' - applied defensive ObjectId parsing and cleaned the orphan record.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/inventory (GET)", "issue": "FIXED — was crashing with 500 on any menu_item whose category_id was not a valid ObjectId. Wrapped ObjectId() in try/except in server.py:get_inventory; deleted the orphan record."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "POS ticket panel", "issues": ["Toast notifications stack in top-right and briefly overlap the cart area; price-edit pencil clicks may be intercepted while toasts are visible. Cosmetic — does not block functionality after toasts auto-dismiss (~3s)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_restaurant_pos.py",
+    "/app/backend/tests/test_discount_price_change.py",
+    "/app/test_reports/pytest/pytest_iter2.xml"
+  ],
+  "action_items": [
+    "(Already fixed by tester) Defensive ObjectId parsing in /api/inventory. Recommend applying the same pattern to any other endpoint that resolves user-supplied or stored ids to ObjectId (e.g., update_menu_item, delete_category, create_order item_id loops) to prevent future 500s from corrupted data.",
+    "Consider validating MenuItemCreate.category_id is a 24-char hex string at write-time so bad records can never be persisted again.",
+    "Optional: Sidebar nav data-testid uses label.toLowerCase().replace(/[\\s\\/]/g,'-') which produces nav-pos---sales (triple dash). Works but not intuitive; consider a stable nav-pos / nav-menu / nav-inventory mapping."
+  ],
+  "critical_code_review_comments": [
+    "server.py:get_inventory — fixed today; pattern of raw ObjectId(value_from_db) without try/except is fragile when DB has any inconsistent records.",
+    "Order endpoint deducts stock with max(0, stock-qty) without rejecting oversells — same comment as iter 1, still applies after this round.",
+    "OrderItemInput.original_price is Optional with default None; server stores oi.original_price or oi.price which is correct — verified by tests.",
+    "POSPage price/discount math is computed client-side and trusted by backend (subtotal/tax/total are accepted as sent). Backend should ideally recompute totals from items+discount to prevent tampering.",
+    "No password length validation on /auth/register (carry-over from iter 1)."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (defensive ObjectId in get_inventory)",
+    "/app/backend/tests/test_discount_price_change.py (new)"
+  ],
+  "success_rate": {"backend": "100% (33/33 pytest)", "frontend": "100% on tested flows (discount, price-change, cash/credit orders, inventory)"},
+  "test_credentials": "admin@restaurant.com / admin123 (admin)",
+  "seed_data_creation": "Existing TestCat_1777106818 + Wings_1777106818 + Grilled Chicken from iter 1 used. Added/cleaned TEST_DiscCat / TEST_DiscItem inside test fixtures.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend tests: pytest /app/backend/tests/ -v (33 tests, ~4s). Discount/price-change tests live in test_discount_price_change.py. Frontend POS flow: login(login-email-input/login-password-input/login-submit-btn) → click 'POS / Sales' text (sidebar testid is awkwardly nav-pos---sales) → pos-item-{id} adds to cart → add-discount-btn opens dialog with discount-type-percent|flat + discount-value-input + apply-discount-btn → remove-discount-btn clears it → cart-price-edit-{itemId} opens price dialog with new-price-input + apply-price-btn + reset-price-btn. Tax is 5% applied on (subtotal - discount). 'was $X.XX' badge shows when price differs from original. Wait ~3s after applying a discount before clicking the price-edit pencil to avoid toast overlay.",
+  "rca of the issue": "/api/inventory 500 RCA: leftover menu_item document had category_id='invalid_id' from a previous test run. server.py:get_inventory blindly called ObjectId(category_id) inside a list iteration; bson.errors.InvalidId propagated as 500. Reproduction: insert menu_items doc with non-ObjectId category_id then GET /api/inventory. Mitigation applied: try/except around ObjectId() call in get_inventory; orphan doc deleted; recommend write-time validation of category_id in MenuItemCreate."
+}

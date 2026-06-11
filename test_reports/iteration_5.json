@@ -1,0 +1,46 @@
+{
+  "summary": "Backend regression after CRITICAL loyalty diamond credit fix. ALL 18/18 tests PASS (16 pre-existing + 2 regression tests for the bug). The ObjectId coercion fix in PUT /api/online-orders/{id}/status (server.py ~line 2562) is verified working: customer_id (str on order doc) is now wrapped with ObjectId() before db.customers.update_one — diamond_balance increments by diamonds_earned exactly once and a loyalty_transactions row is written. Idempotency on a second status=delivered call also confirmed (no double-credit). The same ObjectId coercion on the reward redemption path at order creation (server.py ~line 2396) is verified by the new TestRewardRedemptionDeduction test: cost_diamonds is properly deducted from customer balance when reward_id is supplied. Defensive logger.warning when modified_count==0 is in place but did NOT fire (correct — credit succeeded). 16 previously-passing tests still pass, no regression.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tests_executed": [
+    {"name": "POS regression: /auth/login, /settings, /categories, /menu-items, /orders/today (5 tests)", "result": "PASS"},
+    {"name": "GET /api/public/business-hours shape", "result": "PASS"},
+    {"name": "GET /api/admin/online-settings includes business_hours_* + weekly_schedule (7 days)", "result": "PASS"},
+    {"name": "PUT /api/admin/online-settings persists weekly_schedule", "result": "PASS"},
+    {"name": "POST /api/customer/register rejects short phone with 422", "result": "PASS"},
+    {"name": "POST /api/online-orders rejects short phone with 422", "result": "PASS"},
+    {"name": "POST /api/online-orders BLOCKED with HTTP 400 when closed", "result": "PASS"},
+    {"name": "POST /api/online-orders accepts valid 11-digit phone when open", "result": "PASS"},
+    {"name": "POST /api/feedback (no auth) creates is_feedback=true review", "result": "PASS"},
+    {"name": "GET /api/reviews exposes admin_reply, replied_by, replied_at, is_feedback", "result": "PASS"},
+    {"name": "POST /api/admin/reviews/{id}/reply persists admin_reply + email_sent flag", "result": "PASS"},
+    {"name": "GET /api/loyalty/balance with customer JWT", "result": "PASS"},
+    {"name": "REGRESSION: Diamond credit on delivery + idempotency (PUT status=delivered called 2x — credit applied exactly once)", "result": "PASS", "details": "balance went 0 -> diamonds_earned (50) on first call, unchanged on second. ObjectId fix verified."},
+    {"name": "REGRESSION: Reward redemption deduction on order creation with reward_id (cost_diamonds=20, balance 100 -> 80)", "result": "PASS", "details": "Reward_applied present in order response, diamond_balance decreased by exactly cost_diamonds. ObjectId coercion in reward path verified."}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_p0p4.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix verified: server.py PUT /online-orders/{id}/status now coerces customer_id with ObjectId() before find_one/update_one (lines ~2562-2570). Defensive logger.warning at line 2601 will surface future silent-failure regressions.",
+    "Reward redemption path at line 2394-2399 also correctly coerces cust['_id'] to ObjectId before update_one. The try/except around ObjectId coercion is good defensive coding for legacy str IDs.",
+    "Underlying type drift NOT fixed (cust['_id'] is still mutated to str by get_current_customer at line 2120-2123, and order docs still store the str). The ObjectId coercion is now applied at every db.customers query site that matters, but this remains a footgun for future code. Consider keeping cust['_id'] as ObjectId internally and only stringify in API responses — but this is a refactor, not blocking.",
+    "loyalty_transactions row is written ONLY after successful modified_count>0 — correct, prevents orphan tx logs. Good.",
+    "compute_business_hours_status still doesn't support overnight hours (e.g. 18:00 -> 02:00). MVP-acceptable, already noted in code."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_p0p4.py (added TestRewardRedemptionDeduction class for the new regression case)"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "not tested (skipped per request)"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123. Customers created on the fly: TEST_loyal_*@x.com, TEST_redeem_*@x.com.",
+  "seed_data_creation": "Each test class creates its own TEST_-prefixed customers, reviews, and a TEST_reward_* loyalty reward (deleted on teardown). Business hours forced to 24/7 inside loyalty/redeem tests, restored to default (10:00-23:00 all 7 days) by session-scoped autouse fixture.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All P0-P4 regression tests + the new reward-redemption regression now pass (18/18). Test file is /app/backend/tests/test_iteration4_p0p4.py. The CRITICAL loyalty bug from iteration_4 is RESOLVED. No outstanding action items. If touching loyalty further: (1) note get_current_customer still str-coerces cust['_id']; future code MUST wrap with ObjectId() before any db.customers query; (2) the logger.warning at server.py:2601 is the safety net — watch /var/log/supervisor/backend.err.log for 'Diamond credit found 0 matching customer' if regressions occur.",
+  "rca of the issue": "Original bug: customer_id stored as str on order doc but customers._id is ObjectId, so update_one matched 0 docs and silently skipped credit. Fix verified working: ObjectId() wrap on both find_one and update_one in PUT /online-orders/{id}/status (delivery path) and in POST /online-orders (reward redemption path). Defensive logger.warning added when modified_count==0. Reproduction now PASSES end-to-end."
+}
