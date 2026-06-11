@@ -57,7 +57,17 @@ The user shipped V1 of a full-stack restaurant ordering platform (FastAPI + Reac
 - Backend iteration 6 (V2): **15/15 PASS** — see `/app/test_reports/iteration_6.json` and `/app/backend/tests/test_iteration6_v2.py`. Covers: social login negative paths, offer min_order, coupon+reward stacking, admin reviews crash fix, /track v2 fields, operations endpoint (prep + delivery override + free + 400 guard), happy-path regressions.
 - Frontend V2 not yet covered by automated tests — visual verification only (login page renders both social buttons correctly).
 
+## Deployment readiness (12 Jun 2026) — Fly.io + Vercel + MongoDB Atlas
+User chose: backend → Fly.io, frontend → Vercel, DB → MongoDB Atlas.
+- ✅ `backend/Dockerfile` (python:3.11-slim, uvicorn :8080, emergentintegrations extra index) + `backend/.dockerignore`.
+- ✅ `backend/fly.toml` — always-on single machine (APScheduler + JWT INSTANCE_ID constraints), volume `knb_uploads` → `/app/uploads`, health check on `/api/public/restaurant-info`.
+- ✅ `frontend/vercel.json` — SPA rewrites for React Router deep links.
+- ✅ `DEPLOY_PRODUCTION.md` — full phase A→D guide (Atlas → Fly secrets/volume/deploy → Vercel env/build → custom domain), checklist + troubleshooting table.
+- ✅ Cross-domain auth fix (minimal, backward compatible): cookies now use env-driven `COOKIE_SECURE`/`COOKIE_SAMESITE` (defaults `false`/`lax` = unchanged locally); CORS `allow_credentials=True` only when `CORS_ORIGINS` lists explicit origins (legacy POS pages auth via cookies and would 401 cross-site otherwise). Production must set `COOKIE_SAMESITE=none COOKIE_SECURE=true CORS_ORIGINS=<frontend origin>`.
+- ✅ Regression: 13/15 pass on `tests/test_iteration6_v2.py` (2 failures are env-only: Google/FB keys empty → 503 by design). `yarn build` compiles. Admin login + cookie flags verified via curl.
+
 ## Next Action Items
-1. Frontend automated tests for: social login UI, order success auto-redirect, AdminOrders OperationsPanel, AdminOffers min-order, ReviewManagement reviews/feedback tabs, reward chip add/remove.
-2. Implement P1 items above.
-3. Provide Vercel deployment guide.
+1. USER ACTION: run the deploy per `DEPLOY_PRODUCTION.md` (needs Fly/Vercel/Atlas accounts; agent cannot run flyctl/vercel auth).
+2. Set production integration keys on Fly (Google/Facebook OAuth, Stripe live key + webhook, Twilio, EMERGENT_LLM_KEY) and add prod domain to Google OAuth authorized origins.
+3. Frontend automated tests for: social login UI, order success auto-redirect, AdminOrders OperationsPanel, AdminOffers min-order, ReviewManagement reviews/feedback tabs, reward chip add/remove.
+4. Implement P1 backlog items (push notifications, Contact Us, Diamond History, review sort control, location prompt, estimated Diamonds on checkout, feedback SMTP).

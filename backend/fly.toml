@@ -1,0 +1,31 @@
+# Fly.io config — KNB backend (FastAPI)
+# Deploy from /app/backend:  fly deploy
+app = "knb-backend"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # MUST stay always-on: APScheduler (daily Z-report) + JWT INSTANCE_ID
+  # (tokens are invalidated whenever the process restarts).
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/api/public/restaurant-info"
+
+[mounts]
+  source = "knb_uploads"
+  destination = "/app/uploads"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

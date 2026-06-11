@@ -25,6 +25,10 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 JWT_ALGORITHM = "HS256"
+# Cross-domain deploys (e.g. Vercel frontend + Fly.io backend) need samesite=none + secure=true.
+# Defaults preserve existing same-origin behavior (lax / not-secure).
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -298,8 +302,8 @@ async def login(req: LoginRequest, response: Response):
     uid = str(user["_id"])
     at = create_access_token(uid, email, user.get("role", "cashier"))
     rt = create_refresh_token(uid)
-    response.set_cookie(key="access_token", value=at, httponly=True, secure=False, samesite="lax", max_age=28800, path="/")
-    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
     return {"id": uid, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms, "token": at}
 
@@ -314,8 +318,8 @@ async def register(req: RegisterRequest, response: Response):
     uid = str(result.inserted_id)
     at = create_access_token(uid, email, req.role)
     rt = create_refresh_token(uid)
-    response.set_cookie(key="access_token", value=at, httponly=True, secure=False, samesite="lax", max_age=28800, path="/")
-    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return {"id": uid, "email": email, "name": req.name, "role": req.role, "permissions": perms, "token": at}
 
 @api_router.get("/auth/me")
@@ -2156,7 +2160,7 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
     result = await db.customers.insert_one(doc)
     cid = str(result.inserted_id)
     token = create_customer_token(cid, email)
-    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token}
 
 @api_router.post("/customer/login")
@@ -2167,7 +2171,7 @@ async def customer_login(req: CustomerLoginRequest, response: Response):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
-    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return {"id": cid, "email": email, "name": cust.get("name", ""), "phone": cust.get("phone", ""), "token": token}
 
 @api_router.get("/customer/me")
@@ -2258,7 +2262,7 @@ async def customer_google_login(req: GoogleLoginRequest, response: Response):
     cust = await _social_find_or_create_customer(email, name, "google", sub)
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
-    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return _serialize_customer_login_response(cust, token)
 
 
@@ -2308,7 +2312,7 @@ async def customer_facebook_login(req: FacebookLoginRequest, response: Response)
     cust = await _social_find_or_create_customer(email, name, "facebook", fb_user_id)
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
-    response.set_cookie(key="customer_token", value=token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return _serialize_customer_login_response(cust, token)
 
 # --- END Social Login ---

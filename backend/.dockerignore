@@ -1,0 +1,10 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+uploads/
+tests/
+test_upload.py
+.dockerignore
+Dockerfile
+fly.toml
