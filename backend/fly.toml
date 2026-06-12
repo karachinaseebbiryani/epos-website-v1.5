@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for knb-backend on 2026-06-11T21:45:57Z
+# fly.toml app configuration file generated for knb-backend on 2026-06-12T12:41:02Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'knb-backend'
-primary_region = 'ams'
+primary_region = 'lhr'
 
 [build]
   dockerfile = 'Dockerfile'
