@@ -4504,7 +4504,14 @@ async def get_available_rewards(request: Request):
 # =============================================================================
 
 app.include_router(api_router)
-app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("CORS_ORIGINS", "*").split(','), allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(',')]
+# allow_credentials requires explicit origins (browser rejects "*" with credentials).
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=("*" not in _cors_origins), allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/api/health")
+async def health():
+    """Deploy verification: confirms which code version is running."""
+    return {"status": "ok", "version": "1.4.2-cors-credentials", "cors_credentials_enabled": "*" not in _cors_origins}
 
 # --- Serve built frontend (production / local Windows install) ---
 # When `frontend/build` exists, serve it from the backend at "/".
