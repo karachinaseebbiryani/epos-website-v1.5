@@ -3399,9 +3399,9 @@ DEFAULT_ONLINE_SETTINGS = {
     "bank_account_number": "0123456789012",
     "bank_name": "Meezan Bank",
     "iban": "PK00MEZN0000000000000000",
-    "easypaisa_number": "03004928411",
+    "easypaisa_number": "03014117048",
     "easypaisa_account_title": "Karachi Naseeb",
-    "jazzcash_number": "03004928411",
+    "jazzcash_number": "03014117048",
     "jazzcash_account_title": "Karachi Naseeb",
     # Business hours — Mon..Sun. closed=true blocks ordering for that day.
     # "open"/"close" are HH:MM strings in the configured timezone.
