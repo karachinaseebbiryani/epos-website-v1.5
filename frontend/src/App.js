@@ -3,6 +3,7 @@ import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { GoogleOAuthProvider } from "@react-oauth/google";
+import { Analytics } from "@vercel/analytics/react";
 import { AuthProvider } from "./contexts/AuthContext";
 import { CartProvider } from "./contexts/CartContext";
 import { StaffAuthProvider, useStaffAuth } from "./contexts/StaffAuthContext";
@@ -155,6 +156,7 @@ function App() {
           </CartProvider>
         </StaffAuthProvider>
       </AuthProvider>
+      <Analytics />
     </div>
   );
   // Wrap in GoogleOAuthProvider only when a client id is configured. The provider must be a
