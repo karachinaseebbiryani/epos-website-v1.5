@@ -3,6 +3,7 @@ import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { GoogleOAuthProvider } from "@react-oauth/google";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import { AuthProvider } from "./contexts/AuthContext";
 import { CartProvider } from "./contexts/CartContext";
 import { StaffAuthProvider, useStaffAuth } from "./contexts/StaffAuthContext";
@@ -88,6 +89,7 @@ function App() {
           <CartProvider>
             <BrowserRouter>
               <Toaster position="top-center" richColors />
+              <SpeedInsights />
               <Routes>
                 {/* ------------ Public customer-facing site ------------ */}
                 <Route element={<Layout />}>
