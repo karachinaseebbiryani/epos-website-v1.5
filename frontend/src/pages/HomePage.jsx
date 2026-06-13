@@ -52,7 +52,7 @@ export default function HomePage() {
                         <div className="mt-12 flex flex-wrap gap-6 text-white/80 text-sm">
                             <div className="flex items-center gap-2"><Clock className="w-4 h-4 text-brand-yellow" /> <span>30–45 min delivery</span></div>
                             <div className="flex items-center gap-2"><Award className="w-4 h-4 text-brand-yellow" /> <span>15+ years tradition</span></div>
-                            <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-brand-yellow" /> <a href="tel:+923004928411" className="hover:text-white">+92 300 4928411</a></div>
+                            <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-brand-yellow" /> <a href="tel:+923014117048" className="hover:text-white">+92 300 4928411</a></div>
                         </div>
                     </div>
                 </div>
