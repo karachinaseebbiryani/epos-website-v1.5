@@ -149,8 +149,7 @@ export default function UnifiedLoginPage() {
           </button>
         </form>
         <p className="text-center text-xs text-neutral-400 mt-5">
-          Beta Password Rest Ki option Nai dali Ham na 😂
-        </p>
+          Passsword Reset Option Not Available Yet. Please Contact Admin 
         <p className="text-center text-xs text-neutral-400 mt-1">
           Customer ordering? <a href="/login" className="text-brand-red font-semibold">Customer login →</a>
         </p>
