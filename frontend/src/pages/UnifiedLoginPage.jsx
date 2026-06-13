@@ -149,7 +149,7 @@ export default function UnifiedLoginPage() {
           </button>
         </form>
         <p className="text-center text-xs text-neutral-400 mt-5">
-          Passsword Reset Option Not Available Yet. Please Contact Admin 
+          Passsword Reset Option Not Available Yet Please Contact Your_Admin
         <p className="text-center text-xs text-neutral-400 mt-1">
           Customer ordering? <a href="/login" className="text-brand-red font-semibold">Customer login →</a>
         </p>
