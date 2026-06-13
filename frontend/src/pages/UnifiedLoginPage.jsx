@@ -52,8 +52,8 @@ export default function UnifiedLoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, login } = useStaffAuth();
-  const [email, setEmail] = useState("admin@restaurant.com");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("use email to log in");
+  const [password, setPassword] = useState("use your password");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
