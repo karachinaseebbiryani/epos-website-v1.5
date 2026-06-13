@@ -4,7 +4,7 @@ import api, { formatApiError } from "../../lib/api";
 import { toast } from "sonner";
 
 export default function AdminLoginPage() {
-    const [form, setForm] = useState({ email: "use your email to log in", password: "Use your Password " });
+    const [form, setForm] = useState({ email: "admin@restaurant.com", password: "admin123" });
     const [loading, setLoading] = useState(false);
     const navigate = useNavigate();
 
