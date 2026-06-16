@@ -6,11 +6,13 @@ load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os, logging, bcrypt, jwt
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict, deque
 from bson import ObjectId
 import smtplib, ssl, asyncio
 from email.message import EmailMessage
@@ -29,6 +31,63 @@ JWT_ALGORITHM = "HS256"
 # Defaults preserve existing same-origin behavior (lax / not-secure).
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")
+
+# --- Security constants ---
+# Maximum accepted password length. bcrypt only uses the first 72 bytes, but accepting
+# unbounded passwords lets an attacker DoS the server with multi-MB payloads (each must be
+# JSON-parsed and bcrypt-checked). 128 chars is well above any realistic user password.
+MAX_PASSWORD_LEN = 128
+# How long after order creation a guest can still submit/replace a bank-payment reference
+# or upload a payment screenshot. Beyond this window the action is rejected to prevent
+# tampering / payment hijacking on long-lived orders.
+PAYMENT_SUBMIT_WINDOW_SEC = int(os.environ.get("PAYMENT_SUBMIT_WINDOW_SEC", "86400"))  # 24h
+# Login brute-force throttling. In-memory; per (ip,email) key. Resets on backend restart.
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "10"))
+LOGIN_WINDOW_SEC = int(os.environ.get("LOGIN_WINDOW_SEC", "300"))  # 5 min
+LOGIN_LOCKOUT_SEC = int(os.environ.get("LOGIN_LOCKOUT_SEC", "900"))  # 15 min
+_login_attempts: "dict[str, deque]" = defaultdict(deque)
+_login_lockouts: "dict[str, float]" = {}
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP. Trusts X-Forwarded-For when set by our edge (Fly proxy)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def _login_throttle_check(ip: str, email: str):
+    """Raise 429 if the (ip,email) pair is currently locked out."""
+    key = f"{ip}|{(email or '').lower().strip()}"
+    now = datetime.now(timezone.utc).timestamp()
+    locked_until = _login_lockouts.get(key)
+    if locked_until and now < locked_until:
+        retry = int(locked_until - now)
+        raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {retry}s.")
+
+def _login_record_failure(ip: str, email: str):
+    key = f"{ip}|{(email or '').lower().strip()}"
+    now = datetime.now(timezone.utc).timestamp()
+    dq = _login_attempts[key]
+    dq.append(now)
+    # Evict attempts older than the rolling window
+    while dq and (now - dq[0]) > LOGIN_WINDOW_SEC:
+        dq.popleft()
+    if len(dq) >= LOGIN_MAX_ATTEMPTS:
+        _login_lockouts[key] = now + LOGIN_LOCKOUT_SEC
+        dq.clear()
+
+def _login_record_success(ip: str, email: str):
+    key = f"{ip}|{(email or '').lower().strip()}"
+    _login_attempts.pop(key, None)
+    _login_lockouts.pop(key, None)
+
+def _validate_password_length(pw: str):
+    """Reject absurdly long passwords (bcrypt only uses first 72 bytes anyway).
+    Prevents long-password DoS amplification on register / login."""
+    if pw is None:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if len(pw) > MAX_PASSWORD_LEN or len(pw.encode("utf-8", errors="ignore")) > MAX_PASSWORD_LEN * 4:
+        raise HTTPException(status_code=400, detail=f"Password too long (max {MAX_PASSWORD_LEN} chars)")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -294,25 +353,34 @@ class LoyaltyAdjustRequest(BaseModel):
 
 # --- Auth ---
 @api_router.post("/auth/login")
-async def login(req: LoginRequest, response: Response):
+async def login(req: LoginRequest, request: Request, response: Response):
     email = req.email.lower().strip()
+    ip = _client_ip(request)
+    _login_throttle_check(ip, email)
+    _validate_password_length(req.password)
     user = await db.users.find_one({"email": email})
-    if not user: raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not verify_password(req.password, user["password_hash"]): raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user:
+        _login_record_failure(ip, email)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(req.password, user["password_hash"]):
+        _login_record_failure(ip, email)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    _login_record_success(ip, email)
     uid = str(user["_id"])
     at = create_access_token(uid, email, user.get("role", "cashier"))
     rt = create_refresh_token(uid)
     response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
     response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
-    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": uid, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms, "token": at}
 
 @api_router.post("/auth/register")
 async def register(req: RegisterRequest, response: Response):
     email = req.email.lower().strip()
+    _validate_password_length(req.password)
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already registered")
     hashed = hash_password(req.password)
-    perms = ["pos", "reports_x"]
+    perms = ["pos"]
     doc = {"email": email, "password_hash": hashed, "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.users.insert_one(doc)
     uid = str(result.inserted_id)
@@ -325,7 +393,7 @@ async def register(req: RegisterRequest, response: Response):
 @api_router.get("/auth/me")
 async def get_me(request: Request):
     user = await get_current_user(request)
-    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": user["_id"], "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms}
 
 @api_router.post("/auth/logout")
@@ -340,7 +408,7 @@ async def list_users(request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     users = await db.users.find({}, {"password_hash": 0}).to_list(500)
-    return [{"id": str(u["_id"]), "email": u["email"], "name": u.get("name", ""), "role": u.get("role", "cashier"), "permissions": u.get("permissions", ADMIN_PERMISSIONS if u.get("role") == "admin" else ["pos", "reports_x"]), "created_at": u.get("created_at", "")} for u in users]
+    return [{"id": str(u["_id"]), "email": u["email"], "name": u.get("name", ""), "role": u.get("role", "cashier"), "permissions": u.get("permissions", ADMIN_PERMISSIONS if u.get("role") == "admin" else ["pos"]), "created_at": u.get("created_at", "")} for u in users]
 
 @api_router.post("/users")
 async def create_user(req: UserCreate, request: Request):
@@ -348,7 +416,7 @@ async def create_user(req: UserCreate, request: Request):
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already exists")
-    perms = req.permissions if req.permissions else (ADMIN_PERMISSIONS if req.role == "admin" else ["pos", "reports_x"])
+    perms = req.permissions if req.permissions else (ADMIN_PERMISSIONS if req.role == "admin" else ["pos"])
     doc = {"email": email, "password_hash": hash_password(req.password), "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.users.insert_one(doc)
     return {"id": str(result.inserted_id), "email": email, "name": req.name, "role": req.role, "permissions": perms}
@@ -2148,6 +2216,7 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail="Invalid email")
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    _validate_password_length(req.password)
     if await db.customers.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
     doc = {
@@ -2164,11 +2233,16 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
     return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token}
 
 @api_router.post("/customer/login")
-async def customer_login(req: CustomerLoginRequest, response: Response):
+async def customer_login(req: CustomerLoginRequest, request: Request, response: Response):
     email = req.email.lower().strip()
+    ip = _client_ip(request)
+    _login_throttle_check(ip, email)
+    _validate_password_length(req.password)
     cust = await db.customers.find_one({"email": email})
     if not cust or not verify_password(req.password, cust["password_hash"]):
+        _login_record_failure(ip, email)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    _login_record_success(ip, email)
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
@@ -3768,12 +3842,28 @@ async def submit_bank_payment(order_id: str, req: BankPaymentReference):
         raise HTTPException(status_code=404, detail="Order not found")
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    # Hardening: this endpoint is unauthenticated by design (guest checkout), but we
+    # must not let an attacker overwrite payment details on an already-verified order
+    # or on a stale order they don't own. Reject if payment is already settled or if
+    # the submission window has elapsed.
+    if order.get("payment_status") in {"paid", "refunded", "failed"}:
+        raise HTTPException(status_code=400, detail="Payment can no longer be modified for this order")
+    if not _order_within_payment_window(order):
+        raise HTTPException(status_code=400, detail="Payment submission window has expired for this order")
+    # Lightweight input length caps so an attacker can't stuff arbitrary blobs into the DB.
+    txn_id = (req.transaction_id or "").strip()[:128]
+    payer = (req.payer_name or "").strip()[:128]
+    via = (req.payment_via or "bank").strip().lower()
+    if via not in {"bank", "easypaisa", "jazzcash"}:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
+    if not txn_id:
+        raise HTTPException(status_code=400, detail="Transaction reference is required")
     await db.online_orders.update_one(
         {"_id": ObjectId(order_id)},
         {"$set": {
-            "payment_method": req.payment_via,
-            "payment_reference": req.transaction_id,
-            "payer_name": req.payer_name or "",
+            "payment_method": via,
+            "payment_reference": txn_id,
+            "payer_name": payer,
             "payment_status": "pending_verification",
             "payment_submitted_at": datetime.now(timezone.utc).isoformat(),
         }},
@@ -3918,11 +4008,28 @@ async def _startup_storage():
     _init_obj_storage()
 
 ALLOWED_UPLOAD_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+ALLOWED_UPLOAD_EXTS = {"jpg", "jpeg", "png", "webp", "pdf"}
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+def _order_within_payment_window(order: dict) -> bool:
+    """A guest can only attach a payment reference / screenshot for PAYMENT_SUBMIT_WINDOW_SEC
+    after the order was created. Past that window the order is treated as immutable from
+    the guest side (admin can still update via authenticated endpoints)."""
+    try:
+        created = datetime.fromisoformat(str(order.get("created_at", "")).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    elapsed = (datetime.now(timezone.utc) - created).total_seconds()
+    return 0 <= elapsed <= PAYMENT_SUBMIT_WINDOW_SEC
 
 @api_router.post("/online-orders/{order_id}/payment-screenshot")
 async def upload_payment_screenshot(order_id: str, file: UploadFile = File(...)):
-    """Customer uploads payment proof screenshot/PDF for bank/easypaisa/jazzcash."""
+    """Customer uploads payment proof screenshot/PDF for bank/easypaisa/jazzcash.
+    Allowed only within PAYMENT_SUBMIT_WINDOW_SEC after order creation and only while
+    payment is still 'pending' / 'pending_verification' — prevents an attacker from
+    overwriting screenshots on paid or stale orders."""
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception as e:
@@ -3930,17 +4037,31 @@ async def upload_payment_screenshot(order_id: str, file: UploadFile = File(...))
         raise HTTPException(status_code=404, detail="Order not found")
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+    if order.get("payment_status") in {"paid", "refunded", "failed"}:
+        raise HTTPException(status_code=400, detail="Payment screenshot can no longer be submitted for this order")
+    if not _order_within_payment_window(order):
+        raise HTTPException(status_code=400, detail="Payment submission window has expired for this order")
+
     ctype = (file.content_type or "").lower()
     if ctype not in ALLOWED_UPLOAD_MIMES:
         raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: JPG, PNG, WebP, PDF")
-    
+
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large (max 5MB)")
-    
-    ext = (file.filename or "file").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    storage_path = f"{APP_NAME}/payments/{order_id}/{_uuid.uuid4().hex}.{ext}"
+
+    # Whitelist the extension. Never trust the raw filename — it can contain path
+    # separators, NUL bytes, or unicode tricks that would let the storage_path escape
+    # the upload jail (e.g. "x.jpg/../../etc/passwd").
+    raw_filename = file.filename or ""
+    raw_ext = raw_filename.rsplit(".", 1)[-1].lower() if "." in raw_filename else ""
+    # strip everything except a-z0-9
+    safe_ext = "".join(ch for ch in raw_ext if ch.isalnum())[:5]
+    if safe_ext not in ALLOWED_UPLOAD_EXTS:
+        # Fall back from content-type
+        safe_ext = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+                    "image/webp": "webp", "application/pdf": "pdf"}.get(ctype, "bin")
+    storage_path = f"{APP_NAME}/payments/{order_id}/{_uuid.uuid4().hex}.{safe_ext}"
     
     try:
         result = _put_object(storage_path, data, ctype)
@@ -4091,13 +4212,47 @@ async def public_restaurant_info():
 
 
 @api_router.get("/track/{order_id}")
-async def public_track_order(order_id: str):
+async def public_track_order(order_id: str, request: Request):
+    """Public tracking endpoint reachable via order receipt link / WhatsApp.
+    Customer PII (full phone, full address) is masked here to limit exposure when
+    the order id is shared/forwarded. The authenticated /api/online-orders/{id}
+    endpoint still returns the full record to the order owner and to admins."""
     try:
         o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
         raise HTTPException(status_code=404, detail="Order not found")
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # If the caller IS authenticated (admin OR the order owner) skip masking so
+    # existing flows that rely on the full address (driver app, admin tracking) keep working.
+    show_full = False
+    try:
+        user = await get_current_user(request)
+        if user.get("role") == "admin":
+            show_full = True
+    except HTTPException:
+        pass
+    if not show_full:
+        try:
+            cust = await get_current_customer(request)
+            if cust and o.get("customer_id") and str(o.get("customer_id")) == str(cust.get("_id")):
+                show_full = True
+        except HTTPException:
+            pass
+
+    def _mask_phone(p: str) -> str:
+        p = str(p or "")
+        if len(p) <= 4:
+            return "***"
+        return "*" * (len(p) - 4) + p[-4:]
+
+    def _mask_address(a: str) -> str:
+        a = str(a or "")
+        if len(a) <= 18:
+            return a[:6] + ("…" if len(a) > 6 else "")
+        return a[:18] + "…"
+
     return {
         "id": str(o["_id"]),
         "receipt_no": str(o["_id"])[-6:].upper(),
@@ -4109,9 +4264,9 @@ async def public_track_order(order_id: str):
         "delivery_fee": o.get("delivery_fee", 0),
         "delivery_fee_overridden": bool(o.get("delivery_fee_overridden", False)),
         "discount_amount": o.get("discount_amount", 0),
-        "customer_name": o.get("customer_name", ""),
-        "phone": o.get("phone", ""),
-        "address": o.get("address", ""),
+        "customer_name": o.get("customer_name", "") if show_full else (str(o.get("customer_name", "") or "").split(" ")[0] or "Customer"),
+        "phone": o.get("phone", "") if show_full else _mask_phone(o.get("phone", "")),
+        "address": o.get("address", "") if show_full else _mask_address(o.get("address", "")),
         "created_at": o.get("created_at", ""),
         "updated_at": o.get("updated_at", ""),
         "modified": bool(o.get("modified", False)),
@@ -4504,14 +4659,44 @@ async def get_available_rewards(request: Request):
 # =============================================================================
 
 app.include_router(api_router)
-_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(',')]
-# allow_credentials requires explicit origins (browser rejects "*" with credentials).
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=("*" not in _cors_origins), allow_methods=["*"], allow_headers=["*"])
+# CORS hardening: in production set CORS_ORIGINS to an explicit comma-separated list
+# (e.g. "https://karachinaseeb.com,https://www.karachinaseeb.com"). If the env var is
+# missing we DEFAULT TO CLOSED instead of "*" so a misconfigured production deploy fails
+# safe rather than silently accepting cross-origin requests from anywhere.
+_cors_origins_raw = os.environ.get("CORS_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(',') if o.strip()] if _cors_origins_raw else []
+_cors_allow_credentials = bool(_cors_origins) and ("*" not in _cors_origins)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Adds baseline HTTP security headers to every response. The headers picked here are
+    OWASP-recommended and safe defaults for an API + SPA stack — they do not break the
+    POS or the online ordering frontend. Strict-Transport-Security is only meaningful
+    when served over HTTPS (Fly.io edge already enforces force_https=true)."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        # Don't override headers already set by an upstream proxy.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(self), camera=()")
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 @app.get("/api/health")
 async def health():
     """Deploy verification: confirms which code version is running."""
-    return {"status": "ok", "version": "1.4.2-cors-credentials", "cors_credentials_enabled": "*" not in _cors_origins}
+    return {"status": "ok", "version": "1.4.2-cors-credentials", "cors_credentials_enabled": _cors_allow_credentials}
 
 # --- Serve built frontend (production / local Windows install) ---
 # When `frontend/build` exists, serve it from the backend at "/".
@@ -4525,6 +4710,7 @@ try:
     if _frontend_build.exists() and (_frontend_build / "index.html").exists():
         # Static assets (JS/CSS/images)
         app.mount("/static", StaticFiles(directory=str(_frontend_build / "static")), name="static")
+        _build_real = os.path.realpath(str(_frontend_build))
 
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str):
@@ -4532,9 +4718,18 @@ try:
             # Anything else returns index.html so React Router can take over.
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="API route not found")
+            # Reject any path that contains traversal sequences or NUL bytes outright.
+            if ".." in full_path.split("/") or "\x00" in full_path:
+                return FileResponse(str(_frontend_build / "index.html"))
             asset = _frontend_build / full_path
-            if asset.is_file():
-                return FileResponse(str(asset))
+            # Resolve symlinks and verify the resolved file is still inside the build dir
+            # to prevent reading arbitrary files via crafted full_path values.
+            try:
+                asset_real = os.path.realpath(str(asset))
+            except Exception:
+                asset_real = ""
+            if asset_real and (asset_real == _build_real or asset_real.startswith(_build_real + os.sep)) and os.path.isfile(asset_real):
+                return FileResponse(asset_real)
             return FileResponse(str(_frontend_build / "index.html"))
         logger.info(f"Serving built frontend from: {_frontend_build}")
 except Exception as e:
