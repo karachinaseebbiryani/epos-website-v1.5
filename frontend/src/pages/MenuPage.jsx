@@ -246,7 +246,7 @@ function ComfortableCard({ item, onAdd }) {
     );
 }
 
-function VariationPicker({ item, onClose, onPick }) {
+export function VariationPicker({ item, onClose, onPick }) {
     const [selected, setSelected] = useState(item.variations[0]?.name || "");
     const [qty, setQty] = useState(1);
     const variation = item.variations.find((v) => v.name === selected) || item.variations[0];

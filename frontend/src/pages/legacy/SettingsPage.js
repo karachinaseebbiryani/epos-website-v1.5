@@ -118,6 +118,7 @@ function BrandingCard({ currentLogo, onSaved }) {
 }
 
 const ALL_PERMS = [
+  // --- POS Operations ---
   { key: "dashboard", label: "Dashboard" },
   { key: "pos", label: "POS / Sales" },
   { key: "menu", label: "Menu Management" },
@@ -131,6 +132,13 @@ const ALL_PERMS = [
   { key: "reprint_invoices", label: "Reprint Invoices" },
   { key: "refunds", label: "Refunds" },
   { key: "settings", label: "Settings" },
+  // --- Online Store (each toggleable independently) ---
+  { key: "online_dashboard", label: "Online — Dashboard" },
+  { key: "online_orders", label: "Online — Orders" },
+  { key: "online_menu", label: "Online — Menu & Categories" },
+  { key: "online_offers", label: "Online — Offers" },
+  { key: "online_events", label: "Online — Events" },
+  { key: "online_settings", label: "Online — Settings / Reviews / Loyalty" },
 ];
 
 export default function SettingsPage() {
@@ -141,7 +149,7 @@ export default function SettingsPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [userDialog, setUserDialog] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
-  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "cashier", permissions: ["pos", "reports_x"] });
+  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "cashier", permissions: ["pos"] });
   const [deleteUserConfirm, setDeleteUserConfirm] = useState({ open: false, id: "", name: "" });
   const [settingsForm, setSettingsForm] = useState({ tax_rate: "8", online_tax_rate: "0", foodpanda1_tax_rate: "0", foodpanda2_tax_rate: "0", currency: "Rs", restaurant_name: "", restaurant_address: "", restaurant_phone: "", restaurant_email: "" });
   // Email config
@@ -540,7 +548,7 @@ export default function SettingsPage() {
     });
   };
 
-  const openCreateUser = () => { setEditingUser(null); setUserForm({ name: "", email: "", password: "", role: "cashier", permissions: ["pos", "reports_x"] }); setUserDialog(true); };
+  const openCreateUser = () => { setEditingUser(null); setUserForm({ name: "", email: "", password: "", role: "cashier", permissions: ["pos"] }); setUserDialog(true); };
   const openEditUser = (u) => { setEditingUser(u); setUserForm({ name: u.name, email: u.email, password: "", role: u.role, permissions: u.permissions || [] }); setUserDialog(true); };
 
   const saveUser = async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Eye, EyeOff, Lock } from "lucide-react";
 import { toast } from "sonner";
@@ -57,20 +57,31 @@ export default function UnifiedLoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Guard: once submit() fires its own hard-redirect we must NOT also let the
+  // [user] effect kick off a second (soft) navigation. Two concurrent
+  // navigations cancel each other's lazy-chunk downloads and leave the user
+  // stuck on the LoadingScreen until they hit refresh.
+  const redirectingRef = useRef(false);
 
   const nextUrl = new URLSearchParams(location.search).get("next");
 
-  // If already signed in, route straight in
+  // If already signed in when the page first opens, route straight in.
+  // We deliberately use window.location.replace (not navigate) so the
+  // destination route remounts with both localStorage tokens already in place
+  // — the same code path submit() uses below, keeping behaviour consistent.
   useEffect(() => {
+    if (redirectingRef.current) return;
     if (user && user !== false) {
-      navigate(nextUrl || pickLandingRoute(user.role, user.permissions || []), { replace: true });
+      redirectingRef.current = true;
+      window.location.replace(nextUrl || pickLandingRoute(user.role, user.permissions || []));
     }
-  }, [user, navigate, nextUrl]);
+  }, [user, nextUrl]);
 
   const submit = async (e) => {
     e.preventDefault();
     setError("");
     setLoading(true);
+    redirectingRef.current = true; // suppress the [user] effect's auto-redirect
     try {
       // Use StaffAuthContext's login() so the React user state updates atomically.
       const data = await login(email, password);
@@ -81,16 +92,22 @@ export default function UnifiedLoginPage() {
       }
       toast.success(`Welcome, ${data.name || data.email}`);
       const target = nextUrl || pickLandingRoute(data.role, data.permissions || []);
-      // Hard redirect — guarantees the destination route remounts fresh with
-      // both localStorage tokens already in place. Avoids any concurrent-render
-      // race where StaffGate momentarily sees the old user state.
+      // Single hard redirect — guarantees the destination route remounts fresh
+      // with both localStorage tokens already in place and avoids any
+      // concurrent-render race with React Router soft navigation.
       window.location.replace(target);
     } catch (err) {
+      redirectingRef.current = false; // allow retry
       const msg = err.response?.data?.detail || "Login failed";
       setError(typeof msg === "string" ? msg : "Login failed");
       setLoading(false);
     }
   };
+
+  // `navigate` is intentionally unused — we use window.location.replace
+  // everywhere to keep the redirect path uniform. Keep the import so React
+  // Router context stays mounted for nested links.
+  void navigate;
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-[#1E3F20] via-[#264D27] to-[#1A1D1A]" data-testid="unified-login-page">
