@@ -4,11 +4,13 @@ import api from "../lib/api";
 import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
+import { VariationPicker } from "./MenuPage";
 
 export default function HomePage() {
     const [menuData, setMenuData] = useState({ categories: [], items: [] });
     const [offers, setOffers] = useState([]);
     const [reviews, setReviews] = useState([]);
+    const [picker, setPicker] = useState(null); // { item } when a variation-required item is being chosen
     const { addItem } = useCart();
 
     useEffect(() => {
@@ -18,6 +20,18 @@ export default function HomePage() {
     }, []);
 
     const popular = menuData.items.filter((i) => i.is_popular).slice(0, 6);
+
+    // Handle bestseller "+" tap. If the item declares variations (Small/Medium/Large
+    // etc.), open the same picker MenuPage uses so the customer chooses a size
+    // BEFORE the item lands in the cart. Plain items go straight into the cart.
+    const handleAdd = (item) => {
+        if (item.variations && item.variations.length > 0) {
+            setPicker({ item });
+            return;
+        }
+        addItem(item);
+        toast.success(`${item.name} added to cart`);
+    };
 
     return (
         <div data-testid="home-page">
@@ -94,7 +108,7 @@ export default function HomePage() {
                                     <span className="font-display font-black text-2xl text-brand-red">Rs. {item.price}</span>
                                     <button
                                         data-testid={`popular-add-${item.id}`}
-                                        onClick={() => { addItem(item); toast.success(`${item.name} added to cart`); }}
+                                        onClick={() => handleAdd(item)}
                                         className="bg-brand-ink hover:bg-brand-red text-white rounded-full w-11 h-11 flex items-center justify-center transition-colors"
                                         aria-label={`Add ${item.name} to cart`}
                                     >
@@ -175,6 +189,20 @@ export default function HomePage() {
                     </Link>
                 </div>
             </section>
+
+            {/* Size / variation picker shared with MenuPage so the UX is identical
+                whether the customer taps "+" on the home bestsellers or in the full menu. */}
+            {picker && (
+                <VariationPicker
+                    item={picker.item}
+                    onClose={() => setPicker(null)}
+                    onPick={(variation, qty) => {
+                        addItem(picker.item, qty, variation);
+                        toast.success(`${picker.item.name} (${variation.name}) added`);
+                        setPicker(null);
+                    }}
+                />
+            )}
         </div>
     );
 }
