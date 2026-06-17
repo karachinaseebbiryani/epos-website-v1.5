@@ -2606,9 +2606,24 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                     elif reward_type == "discount_fixed":
                         reward_discount = min(float(reward_value), final_total)
                     elif reward_type == "free_item":
-                        # Free item handled by adding to order items with 0 price
-                        # For now, just track the reward
-                        pass
+                        # Resolve the free menu item and append it to the order so it shows up
+                        # on both the customer's order summary AND the restaurant's order
+                        # ticket. Price is 0 (it's free) and the name is tagged so the kitchen
+                        # immediately spots it as a Diamond freebie (no charge collected).
+                        try:
+                            free_item_doc = await db.menu_items.find_one({"_id": ObjectId(str(reward_value))})
+                        except Exception:
+                            free_item_doc = None
+                        if free_item_doc:
+                            free_line = OnlineOrderItem(
+                                item_id=str(free_item_doc["_id"]),
+                                name=f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
+                                price=0.0,
+                                quantity=1,
+                            )
+                            order.items.append(free_line)
+                        else:
+                            logger.warning(f"free_item reward {reward.get('_id')} references missing menu item {reward_value}")
                     
                     # Update final total
                     final_total = max(0, final_total - reward_discount)

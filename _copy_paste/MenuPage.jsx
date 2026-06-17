@@ -305,6 +305,9 @@ function CompactCard({ item, onAdd }) {
             </div>
             <div className="p-2.5 md:p-3">
                 <h3 className="font-display font-bold text-xs md:text-sm text-brand-ink line-clamp-1 leading-tight">{item.name}</h3>
+                {item.description && (
+                    <p className="text-[10px] md:text-xs text-neutral-500 line-clamp-2 leading-snug mt-1">{item.description}</p>
+                )}
                 <div className="flex items-center justify-between mt-2 gap-1">
                     <PriceBlock item={item} />
                     <button

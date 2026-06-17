@@ -24,7 +24,14 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
-### 2026-06-17 — Phase A (done, agent-tested)
+### 2026-06-17 — P0 Bug Fixes (Round 2)
+- **`frontend/src/lib/api.js`** (issue #4 — mobile Google sign-in order linkage): split the `/online-orders` routing — `POST /online-orders` is now always treated as customer-facing (uses `knb_token`, never `knb_admin_token`). Was previously misrouted as an admin call when both tokens existed in localStorage, causing customer orders placed after Google sign-in to be created with `customer_id: null` and never appear in Order History.
+- **`backend/server.py`** (issue #5 — free-item Diamond reward): replaced the `pass` stub at the `reward_type == "free_item"` branch. Now resolves the menu item via `reward_value`, appends an `OnlineOrderItem` with `price=0.0, quantity=1` and `name="<item name> (FREE — Diamond Reward)"`. The free item appears both in the customer order summary and the restaurant's kitchen ticket. Diamonds are still deducted, but no longer silently — the customer actually receives the freebie.
+- **`frontend/src/pages/TrackingPage.jsx`** (issue #2 — review CTA after delivery): added a prominent green "Delivered! How was it?" banner linking to `/review/{id}` that surfaces immediately when `order.status === "delivered"`.
+- **`frontend/src/components/Header.jsx`** (issue #4 — profile/diamonds discoverability on mobile): mobile sticky chip row now shows a yellow Diamond-balance chip + a black profile chip (first name) when the user is signed in, and a red Sign In chip when not. No more burrowing into the hamburger to find diamonds/profile.
+- **`frontend/src/pages/MenuPage.jsx`** (issue #6 — item descriptions invisible): added a 2-line description below the item name on `CompactCard`. Was previously only shown on the comfortable view.
+
+### 2026-06-17 — Phase A (done, user verifying)
 - `frontend/src/components/ScrollToTop.jsx` (new): scroll-to-top on route change.
 - `frontend/src/components/Layout.jsx`: mount ScrollToTop.
 - `frontend/src/pages/HomePage.jsx`: shorter mobile hero (`py-10 sm:py-16 md:py-28 lg:py-36`), Best Seller cards now use `PriceBlock` + `Badges` (strikethrough original price + % OFF badge + variation picker on add).

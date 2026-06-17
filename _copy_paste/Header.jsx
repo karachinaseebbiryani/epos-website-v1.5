@@ -204,6 +204,35 @@ export default function Header() {
                             Orders
                         </NavLink>
                     )}
+                    {user && (
+                        <Link
+                            to="/rewards"
+                            data-testid="mobile-inline-nav-diamonds-link"
+                            className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-full bg-brand-yellow text-brand-ink hover:bg-brand-yellow/90"
+                        >
+                            <Diamond className="w-3.5 h-3.5" fill="currentColor" />
+                            {diamondBalance}
+                        </Link>
+                    )}
+                    {user && (
+                        <Link
+                            to="/profile"
+                            data-testid="mobile-inline-nav-profile-link"
+                            className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-full bg-brand-ink text-white hover:bg-brand-ink/90"
+                        >
+                            <User className="w-3.5 h-3.5" />
+                            {user.name?.split(" ")[0] || "Profile"}
+                        </Link>
+                    )}
+                    {!user && (
+                        <Link
+                            to="/login"
+                            data-testid="mobile-inline-nav-signin-link"
+                            className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-full bg-brand-red text-white hover:bg-brand-red-dark"
+                        >
+                            Sign In
+                        </Link>
+                    )}
                 </div>
             </div>
 
