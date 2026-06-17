@@ -71,7 +71,7 @@
 
 ## C. Backend URLs
 
-- **Preview (Emergent)**: `https://project-handoff-12.preview.emergentagent.com`
+- **Preview (Emergent)**: `https://order-management-139.preview.emergentagent.com`
 - **Local**: `http://localhost:8001`
 - **All API endpoints prefixed**: `/api/...` (e.g. `/api/auth/login`, `/api/orders`)
 - **API docs**: `/docs` (FastAPI auto-generated Swagger UI) and `/openapi.json`
@@ -135,7 +135,7 @@ curl -s -X DELETE "$API/vendors/$VID" -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Frontend smoke test
-1. Open `https://project-handoff-12.preview.emergentagent.com/admin/sign-in`
+1. Open `https://order-management-139.preview.emergentagent.com/admin/sign-in`
 2. Click Sign In (defaults pre-filled: admin@restaurant.com / admin123)
 3. Should redirect to `/admin/pos` within ~1 second
 4. Verify left sidebar shows "POS Operations" section first, then "Online Store"
