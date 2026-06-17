@@ -1,5 +1,5 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
 import { Menu, X, ShoppingBag, User, LogOut, Package, Diamond } from "lucide-react";
@@ -38,6 +38,37 @@ export default function Header() {
         loadBalance();
         // eslint-disable-next-line
     }, [user]);
+
+    // Auto-hide header on scroll-down, reveal on scroll-up.
+    // Sensible defaults: only hide after the user has scrolled past ~120px so
+    // the header never disappears while still near the top of the page; the
+    // mobile menu (hamburger) panel disables hiding so it doesn't snap shut.
+    const [hidden, setHidden] = useState(false);
+    const lastYRef = useRef(0);
+    const hiddenRef = useRef(false);
+    useEffect(() => {
+        hiddenRef.current = hidden;
+    });
+    useEffect(() => {
+        const apply = (next) => {
+            if (hiddenRef.current !== next) {
+                hiddenRef.current = next;
+                setHidden(next);
+            }
+        };
+        const onScroll = () => {
+            const y = window.scrollY;
+            const last = lastYRef.current;
+            lastYRef.current = y;
+            if (open) return apply(false);
+            if (y < 120) return apply(false);
+            const delta = y - last;
+            if (delta > 6) apply(true);          // scrolling down — hide
+            else if (delta < -6) apply(false);   // scrolling up — show
+        };
+        window.addEventListener("scroll", onScroll, { passive: true });
+        return () => window.removeEventListener("scroll", onScroll);
+    }, [open]);
     
     // Refresh balance when user navigates (catches post-checkout updates)
     useEffect(() => {
@@ -56,7 +87,10 @@ export default function Header() {
     }, [user]);
 
     return (
-        <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-xl border-b border-black/5" data-testid="site-header">
+        <header
+            className={`sticky top-0 z-40 bg-white/80 backdrop-blur-xl border-b border-black/5 transition-transform duration-300 will-change-transform ${hidden ? "-translate-y-full" : "translate-y-0"}`}
+            data-testid="site-header"
+        >
             <div className="max-w-7xl mx-auto px-4 md:px-8 flex items-center justify-between h-16 md:h-20">
                 <Link to="/" className="flex items-center gap-2" data-testid="logo-link">
                     <div className="w-9 h-9 rounded-full bg-brand-red text-white flex items-center justify-center font-display font-black text-lg">K</div>
