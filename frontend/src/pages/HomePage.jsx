@@ -95,24 +95,27 @@ export default function HomePage() {
                     </Link>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8">
+                {/* Best Sellers grid — mirrors the menu layout (2 cols on mobile, 3 on tablet,
+                    4 on large) so customers see multiple bestsellers above the fold on phones
+                    instead of one large card per row. Gap + padding tuned for smaller cards. */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5 md:gap-6">
                     {popular.map((item) => (
                         <article key={item.id} data-testid={`popular-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
                             <div className="aspect-[4/3] overflow-hidden bg-neutral-100">
                                 <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                             </div>
-                            <div className="p-5">
-                                <h3 className="font-display font-bold text-lg text-brand-ink mb-1">{item.name}</h3>
-                                <p className="text-sm text-neutral-500 line-clamp-2 mb-4 min-h-[40px]">{item.description}</p>
-                                <div className="flex items-center justify-between">
-                                    <span className="font-display font-black text-2xl text-brand-red">Rs. {item.price}</span>
+                            <div className="p-3 sm:p-4 md:p-5">
+                                <h3 className="font-display font-bold text-sm sm:text-base md:text-lg text-brand-ink mb-1 line-clamp-1">{item.name}</h3>
+                                <p className="hidden sm:block text-sm text-neutral-500 line-clamp-2 mb-4 min-h-[40px]">{item.description}</p>
+                                <div className="flex items-center justify-between gap-2 mt-2 sm:mt-0">
+                                    <span className="font-display font-black text-base sm:text-xl md:text-2xl text-brand-red whitespace-nowrap">Rs. {item.price}</span>
                                     <button
                                         data-testid={`popular-add-${item.id}`}
                                         onClick={() => handleAdd(item)}
-                                        className="bg-brand-ink hover:bg-brand-red text-white rounded-full w-11 h-11 flex items-center justify-center transition-colors"
+                                        className="bg-brand-ink hover:bg-brand-red text-white rounded-full w-9 h-9 sm:w-11 sm:h-11 flex items-center justify-center transition-colors shrink-0"
                                         aria-label={`Add ${item.name} to cart`}
                                     >
-                                        <Plus className="w-5 h-5" />
+                                        <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
                                     </button>
                                 </div>
                             </div>

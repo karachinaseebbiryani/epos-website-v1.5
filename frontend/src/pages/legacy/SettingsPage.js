@@ -1268,7 +1268,7 @@ export default function SettingsPage() {
 
       {/* User Dialog with Permission Checkboxes */}
       <Dialog open={userDialog} onOpenChange={setUserDialog}>
-        <DialogContent className="border-[#E5E2DC] max-w-lg">
+        <DialogContent className="border-[#E5E2DC] max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle style={{ fontFamily: "Manrope" }}>{editingUser ? "Edit User" : "Add New User"}</DialogTitle><DialogDescription>{editingUser ? "Update details and permissions" : "Create a new user"}</DialogDescription></DialogHeader>
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
@@ -1280,7 +1280,10 @@ export default function SettingsPage() {
             <div className="space-y-2">
               <Label className="text-sm font-semibold">Permissions</Label>
               <p className="text-xs" style={{ color: "#5C5F5C" }}>Select which sections this user can access</p>
-              <div className="grid grid-cols-2 gap-2">
+              {/* Bounded, scrollable list — with 19 permission rows the dialog body would
+                  otherwise overflow the viewport (especially on mobile / short laptop screens)
+                  and push the Save button below the fold. */}
+              <div className="grid grid-cols-2 gap-2 max-h-[45vh] overflow-y-auto pr-1 -mr-1">
                 {ALL_PERMS.map((p) => (
                   <label key={p.key} className="flex items-center gap-2 p-2 rounded-lg border border-[#E5E2DC] cursor-pointer hover:bg-[#F9F8F6]" data-testid={`perm-${p.key}`}>
                     <Checkbox checked={userForm.permissions.includes(p.key)} onCheckedChange={() => togglePerm(p.key)} />
