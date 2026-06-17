@@ -138,7 +138,7 @@ export default function MenuPage() {
     );
 }
 
-function PriceBlock({ item }) {
+export function PriceBlock({ item }) {
     const has = item.variations && item.variations.length > 0;
     if (has) {
         const min = Math.min(...item.variations.map((v) => Number(v.price) || 0));
@@ -155,7 +155,7 @@ function PriceBlock({ item }) {
     return <span className="font-display font-black text-base md:text-xl text-brand-red leading-none">Rs. {item.price}</span>;
 }
 
-function Badges({ item, compact = false }) {
+export function Badges({ item, compact = false }) {
     // Stack of small badges shown on top-right of the image
     const sz = compact ? "text-[9px] px-2 py-0.5" : "text-xs px-2.5 py-1";
     return (

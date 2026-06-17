@@ -2,7 +2,7 @@ import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useState, useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
-import { Menu, X, ShoppingBag, User, LogOut, UtensilsCrossed, Package, Diamond } from "lucide-react";
+import { Menu, X, ShoppingBag, User, LogOut, Package, Diamond } from "lucide-react";
 import axios from "axios";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -103,15 +103,6 @@ export default function Header() {
                 </nav>
 
                 <div className="flex items-center gap-2">
-                    {/* Prominent Menu CTA for mobile — visible without opening hamburger */}
-                    <Link
-                        to="/menu"
-                        data-testid="mobile-menu-quick-link"
-                        className="md:hidden inline-flex items-center gap-1.5 bg-brand-red text-white rounded-full px-4 py-2 text-sm font-bold hover:bg-brand-red-dark transition-colors"
-                    >
-                        <UtensilsCrossed className="w-4 h-4" /> Menu
-                    </Link>
-
                     <Link
                         to="/cart"
                         data-testid="cart-icon-button"
@@ -148,6 +139,37 @@ export default function Header() {
                     >
                         {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                     </button>
+                </div>
+            </div>
+
+            {/* Mobile inline nav row — always visible (sticky w/ header). 
+                Customers can jump to Menu/Offers/Events/Feedback without opening the hamburger. */}
+            <div className="md:hidden border-t border-black/5 bg-white/90 backdrop-blur" data-testid="mobile-inline-nav">
+                <div className="max-w-7xl mx-auto px-2 py-2 flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
+                    {NAV.map((n) => (
+                        <NavLink
+                            key={n.to}
+                            to={n.to}
+                            end={n.to === "/"}
+                            data-testid={`mobile-inline-nav-${n.label.toLowerCase()}-link`}
+                            className={({ isActive }) =>
+                                `shrink-0 px-3.5 py-1.5 text-xs font-bold rounded-full transition-colors ${isActive ? "bg-brand-red text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`
+                            }
+                        >
+                            {n.label}
+                        </NavLink>
+                    ))}
+                    {user && (
+                        <NavLink
+                            to="/orders"
+                            data-testid="mobile-inline-nav-orders-link"
+                            className={({ isActive }) =>
+                                `shrink-0 px-3.5 py-1.5 text-xs font-bold rounded-full transition-colors ${isActive ? "bg-brand-red text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`
+                            }
+                        >
+                            Orders
+                        </NavLink>
+                    )}
                 </div>
             </div>
 

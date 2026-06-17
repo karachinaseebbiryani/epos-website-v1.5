@@ -22,7 +22,8 @@ export default function ClosedBanner({ inline = false }) {
             } catch { /* */ }
             return "next open day";
         }
-        return `today at ${todayOpenAt || bh.next_open_at || "opening time"}`;
+        const display = bh.next_open_display || todayOpenAt || bh.next_open_at;
+        return `today at ${display || "opening time"}`;
     })();
 
     if (inline) {

@@ -3505,17 +3505,52 @@ async def get_online_settings_doc():
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _parse_hhmm(value: str, default_minutes: int) -> int:
-    """Parse 'HH:MM' string into minutes since midnight. Returns default_minutes on parse failure."""
+    """Parse a time string into minutes since midnight.
+
+    Accepts:
+      - 24-hour: "13:00", "9:30", "23", "13"
+      - 12-hour: "1:00 PM", "01:00 pm", "1 PM", "11pm", "12:30 AM"
+    Returns default_minutes on parse failure.
+    """
     try:
-        parts = (value or "").split(":")
-        h = int(parts[0]); m = int(parts[1]) if len(parts) > 1 else 0
-        return max(0, min(24 * 60, h * 60 + m))
+        if value is None:
+            return default_minutes
+        s = str(value).strip().lower()
+        if not s:
+            return default_minutes
+        ampm = None
+        if s.endswith("am") or s.endswith("pm"):
+            ampm = s[-2:]
+            s = s[:-2].strip()
+        parts = s.replace(".", ":").split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 and parts[1] != "" else 0
+        if ampm == "am":
+            if h == 12:
+                h = 0
+        elif ampm == "pm":
+            if h < 12:
+                h += 12
+        total = h * 60 + m
+        return max(0, min(24 * 60, total))
     except Exception:
         return default_minutes
 
+
+def _fmt_12h(minutes: int) -> str:
+    """Format minutes-since-midnight as a 12-hour string like '1:00 PM'."""
+    minutes = max(0, min(24 * 60 - 1, int(minutes)))
+    h, m = divmod(minutes, 60)
+    suffix = "AM" if h < 12 else "PM"
+    hh = h % 12
+    if hh == 0:
+        hh = 12
+    return f"{hh}:{m:02d} {suffix}"
+
 def compute_business_hours_status(settings: dict) -> dict:
     """Return current open/closed status using the configured weekly_schedule + timezone.
-    Falls back to "always open" when business_hours_enabled is False."""
+    Falls back to "always open" when business_hours_enabled is False.
+    Supports overnight wrap (e.g. open 22:00 close 02:00) when close <= open."""
     enabled = settings.get("business_hours_enabled", True)
     tz_name = settings.get("business_hours_timezone", "Asia/Karachi") or "Asia/Karachi"
     schedule = settings.get("weekly_schedule") or DEFAULT_ONLINE_SETTINGS["weekly_schedule"]
@@ -3541,15 +3576,33 @@ def compute_business_hours_status(settings: dict) -> dict:
     is_open = False
     next_close_at = None
     next_open_at = None
-    if not today.get("closed", False):
-        open_min = _parse_hhmm(today.get("open", "10:00"), 10 * 60)
-        close_min = _parse_hhmm(today.get("close", "23:00"), 23 * 60)
-        # Same-day open/close window (no overnight wrap supported in this MVP)
-        if open_min <= current_minutes < close_min:
-            is_open = True
-            next_close_at = today.get("close", "23:00")
-        elif current_minutes < open_min:
-            next_open_at = today.get("open", "10:00")
+    # Check yesterday's window for overnight-wrap (e.g. open 22:00, close 02:00)
+    yesterday_key = DAY_KEYS[(now_local.weekday() - 1) % 7]
+    y = schedule.get(yesterday_key) or {}
+    if not y.get("closed", False):
+        y_open = _parse_hhmm(y.get("open"), 10 * 60)
+        y_close = _parse_hhmm(y.get("close"), 23 * 60)
+        if y_close <= y_open:  # wrapped overnight
+            if current_minutes < y_close:
+                is_open = True
+                next_close_at = y.get("close")
+    if not is_open and not today.get("closed", False):
+        open_min = _parse_hhmm(today.get("open"), 10 * 60)
+        close_min = _parse_hhmm(today.get("close"), 23 * 60)
+        if close_min > open_min:
+            # Same-day window
+            if open_min <= current_minutes < close_min:
+                is_open = True
+                next_close_at = today.get("close", "23:00")
+            elif current_minutes < open_min:
+                next_open_at = today.get("open", "10:00")
+        elif close_min <= open_min:
+            # Overnight window starting today (close is tomorrow)
+            if current_minutes >= open_min:
+                is_open = True
+                next_close_at = today.get("close", "23:00")
+            elif current_minutes < open_min:
+                next_open_at = today.get("open", "10:00")
     if not is_open and next_open_at is None:
         # Look ahead up to 7 days for the next open day
         for offset in range(1, 8):
@@ -3558,18 +3611,28 @@ def compute_business_hours_status(settings: dict) -> dict:
             if d.get("closed", False):
                 continue
             next_dt = (now_local + timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
-            open_min = _parse_hhmm(d.get("open", "10:00"), 10 * 60)
+            open_min = _parse_hhmm(d.get("open"), 10 * 60)
             next_dt = next_dt + timedelta(minutes=open_min)
             next_open_at = next_dt.isoformat()
             break
+    # Derive a friendly 12-hour display for next_open_at when it's a simple HH:MM
+    next_open_display = None
+    if next_open_at and ":" in str(next_open_at) and "T" not in str(next_open_at):
+        next_open_display = _fmt_12h(_parse_hhmm(next_open_at, 0))
+    next_close_display = None
+    if next_close_at:
+        next_close_display = _fmt_12h(_parse_hhmm(next_close_at, 0))
     return {
         "is_open": is_open,
         "enabled": True,
         "timezone": tz_name,
         "today": {"day": today_key, **today},
         "now": now_local.strftime("%H:%M"),
+        "now_display": _fmt_12h(current_minutes),
         "next_open_at": next_open_at,
+        "next_open_display": next_open_display,
         "next_close_at": next_close_at,
+        "next_close_display": next_close_display,
         "weekly_schedule": schedule,
     }
 
