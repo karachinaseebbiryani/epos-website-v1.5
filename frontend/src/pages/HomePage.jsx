@@ -4,7 +4,7 @@ import api from "../lib/api";
 import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
-import { VariationPicker } from "./MenuPage";
+import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 
 export default function HomePage() {
     const [menuData, setMenuData] = useState({ categories: [], items: [] });
@@ -42,16 +42,16 @@ export default function HomePage() {
                     style={{ backgroundImage: "url('https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85')" }}
                 />
                 <div className="absolute inset-0 bg-gradient-to-r from-black/85 via-black/50 to-black/10" />
-                <div className="relative max-w-7xl mx-auto px-4 md:px-8 py-24 md:py-36 lg:py-44">
+                <div className="relative max-w-7xl mx-auto px-4 md:px-8 py-10 sm:py-16 md:py-28 lg:py-36">
                     <div className="max-w-2xl">
-                        <span className="inline-flex items-center gap-2 bg-brand-yellow/15 text-brand-yellow border border-brand-yellow/30 backdrop-blur-sm rounded-full px-4 py-1.5 text-xs uppercase tracking-[0.2em] font-bold mb-6" data-testid="hero-badge">
+                        <span className="inline-flex items-center gap-2 bg-brand-yellow/15 text-brand-yellow border border-brand-yellow/30 backdrop-blur-sm rounded-full px-4 py-1.5 text-xs uppercase tracking-[0.2em] font-bold mb-4 md:mb-6" data-testid="hero-badge">
                             <Flame className="w-3.5 h-3.5" /> Authentic Karachi Flavors
                         </span>
-                        <h1 className="font-display font-black text-white text-4xl sm:text-5xl lg:text-7xl leading-[1.05] tracking-tight mb-6">
+                        <h1 className="font-display font-black text-white text-3xl sm:text-5xl lg:text-7xl leading-[1.05] tracking-tight mb-4 md:mb-6">
                             Karachi Naseeb<br />
                             <span className="text-brand-yellow">Biryani</span> &amp; <span className="text-brand-red">Murg Pulao</span>
                         </h1>
-                        <p className="text-white/85 text-base md:text-lg max-w-xl mb-10 leading-relaxed">
+                        <p className="text-white/85 text-sm md:text-lg max-w-xl mb-6 md:mb-10 leading-relaxed">
                             Slow-cooked basmati, hand-picked spices, generations of recipe. Order online — fresh, fast, and full of soul.
                         </p>
                         <div className="flex flex-wrap gap-3">
@@ -101,14 +101,15 @@ export default function HomePage() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5 md:gap-6">
                     {popular.map((item) => (
                         <article key={item.id} data-testid={`popular-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
-                            <div className="aspect-[4/3] overflow-hidden bg-neutral-100">
+                            <div className="aspect-[4/3] overflow-hidden bg-neutral-100 relative">
                                 <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                                <Badges item={item} compact />
                             </div>
                             <div className="p-3 sm:p-4 md:p-5">
                                 <h3 className="font-display font-bold text-sm sm:text-base md:text-lg text-brand-ink mb-1 line-clamp-1">{item.name}</h3>
                                 <p className="hidden sm:block text-sm text-neutral-500 line-clamp-2 mb-4 min-h-[40px]">{item.description}</p>
                                 <div className="flex items-center justify-between gap-2 mt-2 sm:mt-0">
-                                    <span className="font-display font-black text-base sm:text-xl md:text-2xl text-brand-red whitespace-nowrap">Rs. {item.price}</span>
+                                    <PriceBlock item={item} />
                                     <button
                                         data-testid={`popular-add-${item.id}`}
                                         onClick={() => handleAdd(item)}

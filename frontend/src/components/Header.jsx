@@ -1,8 +1,8 @@
 import { Link, NavLink, useNavigate } from "react-router-dom";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
-import { Menu, X, ShoppingBag, User, LogOut, UtensilsCrossed, Package, Diamond } from "lucide-react";
+import { Menu, X, ShoppingBag, User, LogOut, Package, Diamond } from "lucide-react";
 import axios from "axios";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -38,6 +38,37 @@ export default function Header() {
         loadBalance();
         // eslint-disable-next-line
     }, [user]);
+
+    // Auto-hide header on scroll-down, reveal on scroll-up.
+    // Sensible defaults: only hide after the user has scrolled past ~120px so
+    // the header never disappears while still near the top of the page; the
+    // mobile menu (hamburger) panel disables hiding so it doesn't snap shut.
+    const [hidden, setHidden] = useState(false);
+    const lastYRef = useRef(0);
+    const hiddenRef = useRef(false);
+    useEffect(() => {
+        hiddenRef.current = hidden;
+    });
+    useEffect(() => {
+        const apply = (next) => {
+            if (hiddenRef.current !== next) {
+                hiddenRef.current = next;
+                setHidden(next);
+            }
+        };
+        const onScroll = () => {
+            const y = window.scrollY;
+            const last = lastYRef.current;
+            lastYRef.current = y;
+            if (open) return apply(false);
+            if (y < 120) return apply(false);
+            const delta = y - last;
+            if (delta > 6) apply(true);          // scrolling down — hide
+            else if (delta < -6) apply(false);   // scrolling up — show
+        };
+        window.addEventListener("scroll", onScroll, { passive: true });
+        return () => window.removeEventListener("scroll", onScroll);
+    }, [open]);
     
     // Refresh balance when user navigates (catches post-checkout updates)
     useEffect(() => {
@@ -56,7 +87,10 @@ export default function Header() {
     }, [user]);
 
     return (
-        <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-xl border-b border-black/5" data-testid="site-header">
+        <header
+            className={`sticky top-0 z-40 bg-white/80 backdrop-blur-xl border-b border-black/5 transition-transform duration-300 will-change-transform ${hidden ? "-translate-y-full" : "translate-y-0"}`}
+            data-testid="site-header"
+        >
             <div className="max-w-7xl mx-auto px-4 md:px-8 flex items-center justify-between h-16 md:h-20">
                 <Link to="/" className="flex items-center gap-2" data-testid="logo-link">
                     <div className="w-9 h-9 rounded-full bg-brand-red text-white flex items-center justify-center font-display font-black text-lg">K</div>
@@ -103,15 +137,6 @@ export default function Header() {
                 </nav>
 
                 <div className="flex items-center gap-2">
-                    {/* Prominent Menu CTA for mobile — visible without opening hamburger */}
-                    <Link
-                        to="/menu"
-                        data-testid="mobile-menu-quick-link"
-                        className="md:hidden inline-flex items-center gap-1.5 bg-brand-red text-white rounded-full px-4 py-2 text-sm font-bold hover:bg-brand-red-dark transition-colors"
-                    >
-                        <UtensilsCrossed className="w-4 h-4" /> Menu
-                    </Link>
-
                     <Link
                         to="/cart"
                         data-testid="cart-icon-button"
@@ -148,6 +173,37 @@ export default function Header() {
                     >
                         {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                     </button>
+                </div>
+            </div>
+
+            {/* Mobile inline nav row — always visible (sticky w/ header). 
+                Customers can jump to Menu/Offers/Events/Feedback without opening the hamburger. */}
+            <div className="md:hidden border-t border-black/5 bg-white/90 backdrop-blur" data-testid="mobile-inline-nav">
+                <div className="max-w-7xl mx-auto px-2 py-2 flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
+                    {NAV.map((n) => (
+                        <NavLink
+                            key={n.to}
+                            to={n.to}
+                            end={n.to === "/"}
+                            data-testid={`mobile-inline-nav-${n.label.toLowerCase()}-link`}
+                            className={({ isActive }) =>
+                                `shrink-0 px-3.5 py-1.5 text-xs font-bold rounded-full transition-colors ${isActive ? "bg-brand-red text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`
+                            }
+                        >
+                            {n.label}
+                        </NavLink>
+                    ))}
+                    {user && (
+                        <NavLink
+                            to="/orders"
+                            data-testid="mobile-inline-nav-orders-link"
+                            className={({ isActive }) =>
+                                `shrink-0 px-3.5 py-1.5 text-xs font-bold rounded-full transition-colors ${isActive ? "bg-brand-red text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`
+                            }
+                        >
+                            Orders
+                        </NavLink>
+                    )}
                 </div>
             </div>
 

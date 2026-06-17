@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import api from "../lib/api";
 import { useCart } from "../contexts/CartContext";
 import { Plus, Search, LayoutGrid, Rows3, X } from "lucide-react";
@@ -8,27 +8,86 @@ const DENSITY_KEY = "knb_menu_density_v1"; // "compact" | "comfortable"
 
 export default function MenuPage() {
     const [data, setData] = useState({ categories: [], items: [] });
-    const [activeCat, setActiveCat] = useState("all");
+    const [loading, setLoading] = useState(true);
+    const [activeCat, setActiveCat] = useState(null);
     const [query, setQuery] = useState("");
-    const [picker, setPicker] = useState(null); // {item, defaultIdx}
+    const [picker, setPicker] = useState(null); // {item}
     const [density, setDensity] = useState(() => localStorage.getItem(DENSITY_KEY) || "compact");
     const { addItem } = useCart();
+    const sectionRefs = useRef({}); // catId -> HTMLElement
+    const tabRefs = useRef({});     // catId -> HTMLButtonElement
+    const tabBarRef = useRef(null);
+    const isUserScrollingRef = useRef(false); // suppress observer right after a tab-click jump
 
     useEffect(() => { localStorage.setItem(DENSITY_KEY, density); }, [density]);
 
     useEffect(() => {
-        api.get("/menu").then((r) => setData(r.data)).catch(() => toast.error("Failed to load menu"));
+        let cancelled = false;
+        api.get("/menu")
+            .then((r) => {
+                if (cancelled) return;
+                setData(r.data);
+                if (r.data.categories?.length) setActiveCat(r.data.categories[0].id);
+                setLoading(false);
+            })
+            .catch(() => { if (!cancelled) { toast.error("Failed to load menu"); setLoading(false); } });
+        return () => { cancelled = true; };
     }, []);
 
-    const filtered = useMemo(() => {
-        let items = data.items;
-        if (activeCat !== "all") items = items.filter((i) => i.category_id === activeCat);
-        if (query.trim()) {
-            const q = query.toLowerCase();
-            items = items.filter((i) => i.name.toLowerCase().includes(q));
+    // Group items per category (preserves the order returned by the backend).
+    // When a search query is active we still split by category so the sticky
+    // category bar continues to make sense.
+    const grouped = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        const filterFn = (i) => !q || i.name.toLowerCase().includes(q) || (i.description || "").toLowerCase().includes(q);
+        return data.categories.map((c) => ({
+            category: c,
+            items: data.items.filter((i) => i.category_id === c.id && filterFn(i)),
+        }));
+    }, [data, query]);
+
+    // IntersectionObserver — pick the topmost visible section and set it active.
+    useEffect(() => {
+        if (loading || !data.categories.length) return;
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (isUserScrollingRef.current) return;
+                // Choose the entry with the smallest positive top (closest to the top of the viewport).
+                const visible = entries
+                    .filter((e) => e.isIntersecting)
+                    .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+                if (visible.length) {
+                    const id = visible[0].target.getAttribute("data-cat-id");
+                    if (id) setActiveCat(id);
+                }
+            },
+            {
+                // Trigger when a section is in the top ~40% of the viewport.
+                // rootMargin pushes the trigger line down from the very top so
+                // the active tab updates as a category "enters" the screen, not
+                // only when it fully fills it.
+                rootMargin: "-25% 0px -60% 0px",
+                threshold: 0,
+            }
+        );
+        Object.values(sectionRefs.current).forEach((el) => el && observer.observe(el));
+        return () => observer.disconnect();
+    }, [loading, data.categories]);
+
+    // Keep the active tab horizontally visible inside the scrollable tab bar.
+    useEffect(() => {
+        if (!activeCat) return;
+        const tab = tabRefs.current[activeCat];
+        const bar = tabBarRef.current;
+        if (tab && bar) {
+            const tLeft = tab.offsetLeft;
+            const tRight = tLeft + tab.offsetWidth;
+            const bLeft = bar.scrollLeft;
+            const bRight = bLeft + bar.clientWidth;
+            if (tLeft < bLeft + 16) bar.scrollTo({ left: tLeft - 16, behavior: "smooth" });
+            else if (tRight > bRight - 16) bar.scrollTo({ left: tRight - bar.clientWidth + 16, behavior: "smooth" });
         }
-        return items;
-    }, [data.items, activeCat, query]);
+    }, [activeCat]);
 
     const handleAdd = (item) => {
         if (item.variations && item.variations.length > 0) {
@@ -39,21 +98,32 @@ export default function MenuPage() {
         }
     };
 
-    // Tailwind grid: compact => 2 cols on mobile, 3 on tablet, 4 on desktop / comfortable => 1, 2, 3.
+    const jumpToCategory = (catId) => {
+        const el = sectionRefs.current[catId];
+        if (!el) return;
+        setActiveCat(catId);
+        // Suppress observer briefly so it doesn't override the click during the scroll animation.
+        isUserScrollingRef.current = true;
+        // Offset by ~90px so the section heading isn't hidden behind the sticky tab bar.
+        const top = el.getBoundingClientRect().top + window.scrollY - 90;
+        window.scrollTo({ top, behavior: "smooth" });
+        setTimeout(() => { isUserScrollingRef.current = false; }, 700);
+    };
+
     const gridCls = density === "compact"
         ? "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4 md:gap-5"
         : "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6";
 
     return (
-        <div className="max-w-7xl mx-auto px-4 md:px-8 py-8 md:py-16" data-testid="menu-page">
-            <div className="mb-6 md:mb-10">
+        <div className="max-w-7xl mx-auto px-4 md:px-8 pt-6 md:pt-12 pb-12 md:pb-16" data-testid="menu-page">
+            <div className="mb-5 md:mb-8">
                 <span className="text-brand-red text-xs uppercase tracking-[0.2em] font-bold">Our Menu</span>
                 <h1 className="font-display font-black text-3xl md:text-6xl text-brand-ink mt-2">Pick Your Favorites</h1>
                 <p className="text-neutral-500 mt-2 max-w-xl text-sm md:text-base">Authentic Karachi flavors, freshly prepared every day.</p>
             </div>
 
             {/* Search + Density toggle */}
-            <div className="flex items-center gap-2 mb-5">
+            <div className="flex items-center gap-2 mb-3">
                 <div className="relative flex-1 max-w-md">
                     <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400" />
                     <input
@@ -89,38 +159,64 @@ export default function MenuPage() {
                 </div>
             </div>
 
-            {/* Category tabs */}
-            <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2 mb-6 md:mb-8 -mx-4 px-4">
-                <button
-                    data-testid="menu-cat-all"
-                    onClick={() => setActiveCat("all")}
-                    className={`whitespace-nowrap px-4 md:px-5 py-2 md:py-2.5 rounded-full text-xs md:text-sm font-semibold transition-colors ${activeCat === "all" ? "bg-brand-ink text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`}
+            {/* Sticky category bar — pinned to the very top of the viewport so it
+                stays visible after the site header slides away on scroll-down. */}
+            <div
+                className="sticky top-0 z-30 -mx-4 md:-mx-8 px-4 md:px-8 py-2 bg-white/95 backdrop-blur-md border-b border-neutral-200/70 mb-6 md:mb-8"
+                data-testid="menu-cat-bar"
+            >
+                <div
+                    ref={tabBarRef}
+                    className="flex gap-2 overflow-x-auto scrollbar-hide -mx-1 px-1"
                 >
-                    All Items
-                </button>
-                {data.categories.map((c) => (
-                    <button
-                        key={c.id}
-                        data-testid={`menu-cat-${c.id}`}
-                        onClick={() => setActiveCat(c.id)}
-                        className={`whitespace-nowrap px-4 md:px-5 py-2 md:py-2.5 rounded-full text-xs md:text-sm font-semibold transition-colors ${activeCat === c.id ? "bg-brand-red text-white" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`}
-                    >
-                        {c.name}
-                    </button>
-                ))}
+                    {data.categories.map((c) => {
+                        const active = activeCat === c.id;
+                        return (
+                            <button
+                                key={c.id}
+                                ref={(el) => (tabRefs.current[c.id] = el)}
+                                data-testid={`menu-cat-${c.id}`}
+                                data-active={active ? "true" : "false"}
+                                onClick={() => jumpToCategory(c.id)}
+                                className={`whitespace-nowrap px-4 md:px-5 py-2 md:py-2.5 rounded-full text-xs md:text-sm font-semibold transition-colors ${active ? "bg-brand-red text-white shadow-md shadow-brand-red/30" : "bg-neutral-100 text-brand-ink hover:bg-neutral-200"}`}
+                            >
+                                {c.name}
+                            </button>
+                        );
+                    })}
+                </div>
             </div>
 
-            {/* Items grid */}
-            {filtered.length === 0 ? (
-                <div className="text-center py-20 text-neutral-500">No items found.</div>
-            ) : (
-                <div className={gridCls}>
-                    {filtered.map((item) => (
-                        density === "compact"
-                            ? <CompactCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
-                            : <ComfortableCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
+            {/* Loading skeletons or grouped items */}
+            {loading ? (
+                <div className={gridCls} data-testid="menu-skeletons">
+                    {Array.from({ length: density === "compact" ? 10 : 6 }).map((_, i) => (
+                        <SkeletonCard key={i} density={density} />
                     ))}
                 </div>
+            ) : grouped.every((g) => g.items.length === 0) ? (
+                <div className="text-center py-20 text-neutral-500" data-testid="menu-empty">No items found.</div>
+            ) : (
+                grouped.map(({ category, items }) => (
+                    items.length > 0 && (
+                        <section
+                            key={category.id}
+                            data-cat-id={category.id}
+                            data-testid={`menu-section-${category.id}`}
+                            ref={(el) => (sectionRefs.current[category.id] = el)}
+                            className="scroll-mt-28 mb-10 md:mb-14"
+                        >
+                            <h2 className="font-display font-black text-2xl md:text-3xl text-brand-ink mb-4 md:mb-6">{category.name}</h2>
+                            <div className={gridCls}>
+                                {items.map((item) => (
+                                    density === "compact"
+                                        ? <CompactCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
+                                        : <ComfortableCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
+                                ))}
+                            </div>
+                        </section>
+                    )
+                ))
             )}
 
             {picker && (
@@ -138,7 +234,7 @@ export default function MenuPage() {
     );
 }
 
-function PriceBlock({ item }) {
+export function PriceBlock({ item }) {
     const has = item.variations && item.variations.length > 0;
     if (has) {
         const min = Math.min(...item.variations.map((v) => Number(v.price) || 0));
@@ -155,7 +251,7 @@ function PriceBlock({ item }) {
     return <span className="font-display font-black text-base md:text-xl text-brand-red leading-none">Rs. {item.price}</span>;
 }
 
-function Badges({ item, compact = false }) {
+export function Badges({ item, compact = false }) {
     // Stack of small badges shown on top-right of the image
     const sz = compact ? "text-[9px] px-2 py-0.5" : "text-xs px-2.5 py-1";
     return (
@@ -166,6 +262,23 @@ function Badges({ item, compact = false }) {
             {item.is_bestseller && (
                 <span className={`bg-brand-red text-white ${sz} font-bold uppercase tracking-wider rounded-full`}>Bestseller</span>
             )}
+        </div>
+    );
+}
+
+function SkeletonCard({ density }) {
+    const aspect = density === "compact" ? "aspect-square" : "aspect-[4/3]";
+    return (
+        <div className="bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm animate-pulse" data-testid="menu-skeleton">
+            <div className={`${aspect} bg-neutral-200`} />
+            <div className="p-3 md:p-4 space-y-2">
+                <div className="h-3 bg-neutral-200 rounded w-3/4" />
+                <div className="h-3 bg-neutral-200 rounded w-1/2" />
+                <div className="flex items-center justify-between pt-2">
+                    <div className="h-4 bg-neutral-200 rounded w-16" />
+                    <div className="h-8 w-8 bg-neutral-200 rounded-full" />
+                </div>
+            </div>
         </div>
     );
 }

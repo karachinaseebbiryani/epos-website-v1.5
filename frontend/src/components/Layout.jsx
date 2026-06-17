@@ -4,10 +4,12 @@ import Footer from "./Footer";
 import FloatingCart from "./FloatingCart";
 import FloatingWhatsApp from "./FloatingWhatsApp";
 import ClosedBanner from "./ClosedBanner";
+import ScrollToTop from "./ScrollToTop";
 
 export default function Layout() {
     return (
         <div className="min-h-screen flex flex-col bg-white">
+            <ScrollToTop />
             <Header />
             <ClosedBanner />
             <main className="flex-1">
