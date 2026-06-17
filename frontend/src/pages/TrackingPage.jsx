@@ -86,6 +86,24 @@ export default function TrackingPage() {
             {/* Status banner */}
             <StatusBanner status={order.status} reason={order.rejection_reason} modified={wasModified} responseSecondsLeft={order.response_deadline_seconds} />
 
+            {/* Delivered — prominent review CTA so customers actually see it after their meal */}
+            {order.status === "delivered" && (
+                <Link
+                    to={`/review/${id}`}
+                    data-testid="track-leave-review-cta"
+                    className="mt-4 block bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white rounded-2xl p-5 flex items-center gap-4 transition-colors shadow-md"
+                >
+                    <CheckCircle className="w-8 h-8 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <div className="font-display font-bold text-lg">Delivered! How was it?</div>
+                        <div className="text-sm text-white/90">Tap to rate this order and earn extra Diamonds.</div>
+                    </div>
+                    <span className="hidden sm:inline-flex items-center gap-1 bg-white/15 hover:bg-white/25 rounded-full px-4 py-2 text-sm font-bold">
+                        Leave a Review →
+                    </span>
+                </Link>
+            )}
+
             {/* V2: when accepted+, surface live prep time and any delivery discount */}
             {(isAccepted || ["preparing", "ready", "out_for_delivery"].includes(order.status)) && (
                 <div className="mt-4 bg-white border border-neutral-100 rounded-2xl p-4 md:p-5 grid grid-cols-1 md:grid-cols-2 gap-3" data-testid="track-live-meta">
