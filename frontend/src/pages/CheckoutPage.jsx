@@ -101,6 +101,37 @@ export default function CheckoutPage() {
         api.post("/delivery/quote", { ...coords, subtotal }).then(({ data }) => setDelivery(data)).catch(() => {});
     }, [subtotal, coords]);
 
+    // Auto-apply the customer's most recent personal coupon when they reach checkout,
+    // so they don't have to copy-paste their own one-time code. Only fires once and
+    // only if the user hasn't already typed something in the coupon field.
+    // NOTE: Must be declared BEFORE any conditional early-return below to satisfy
+    // react-hooks/rules-of-hooks (every render must call the same hooks in the same order).
+    useEffect(() => {
+        if (!user) return;
+        if (form.coupon_code || coupon) return;
+        let cancelled = false;
+        api.get("/personal-coupons/me").then(({ data }) => {
+            if (cancelled || !data || !data.length) return;
+            const top = data[0];
+            setForm((f) => ({ ...f, coupon_code: top.code }));
+            // Compute discount inline so we don't have to re-call applyCoupon.
+            let discount = 0;
+            if (top.discount_percent) discount = (subtotal * top.discount_percent) / 100;
+            else discount = top.discount_amount;
+            setCoupon({
+                coupon_code: top.code,
+                title: "Personal coupon",
+                discount: Math.min(discount, subtotal),
+                discount_percent: top.discount_percent || 0,
+                discount_amount: top.discount_amount || 0,
+                personal: true,
+            });
+            toast.success(`Your personal coupon ${top.code} was auto-applied`);
+        }).catch(() => { /* silent */ });
+        return () => { cancelled = true; };
+        // eslint-disable-next-line
+    }, [user]);
+
     const detectLocation = () => {
         if (!navigator.geolocation) { toast.error("Geolocation not supported"); return; }
         setLocating(true);
@@ -202,35 +233,6 @@ export default function CheckoutPage() {
             toast.error("Failed to validate coupon");
         }
     };
-
-    // Auto-apply the customer's most recent personal coupon when they reach checkout,
-    // so they don't have to copy-paste their own one-time code. Only fires once and
-    // only if the user hasn't already typed something in the coupon field.
-    useEffect(() => {
-        if (!user) return;
-        if (form.coupon_code || coupon) return;
-        let cancelled = false;
-        api.get("/personal-coupons/me").then(({ data }) => {
-            if (cancelled || !data || !data.length) return;
-            const top = data[0];
-            setForm((f) => ({ ...f, coupon_code: top.code }));
-            // Compute discount inline so we don't have to re-call applyCoupon.
-            let discount = 0;
-            if (top.discount_percent) discount = (subtotal * top.discount_percent) / 100;
-            else discount = top.discount_amount;
-            setCoupon({
-                coupon_code: top.code,
-                title: "Personal coupon",
-                discount: Math.min(discount, subtotal),
-                discount_percent: top.discount_percent || 0,
-                discount_amount: top.discount_amount || 0,
-                personal: true,
-            });
-            toast.success(`Your personal coupon ${top.code} was auto-applied`);
-        }).catch(() => { /* silent */ });
-        return () => { cancelled = true; };
-        // eslint-disable-next-line
-    }, [user]);
 
     const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
     const enabledMethods = settings?.payment_methods || { cod: true };
