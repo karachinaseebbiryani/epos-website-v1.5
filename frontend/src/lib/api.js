@@ -11,6 +11,7 @@ api.interceptors.request.use((config) => {
     const method = (config.method || "get").toLowerCase();
     // POST /online-orders is the customer-facing "place my order" call. It must ALWAYS go
     // out with the customer token (never the admin token) so the backend can link the order
+    // to the signed-in customer â€” otherwise the order shows up as a guest order even though
     // to the signed-in customer — otherwise the order shows up as a guest order even though
     // the user is logged in. (Was the root cause of Google-sign-in orders disappearing from
     // a customer's order history on mobile.)
