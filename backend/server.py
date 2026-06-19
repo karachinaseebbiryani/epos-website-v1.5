@@ -2153,6 +2153,7 @@ class OfferCreate(BaseModel):
     image_url: Optional[str] = ""
     active: bool = True
     min_order_amount: Optional[float] = 0  # V2: minimum cart subtotal required to apply this offer
+    one_time_per_customer: bool = False  # If true, each customer (or phone for guests) can use this coupon at most once
 
 class OfferUpdate(BaseModel):
     title: Optional[str] = None
@@ -2163,6 +2164,7 @@ class OfferUpdate(BaseModel):
     image_url: Optional[str] = None
     active: Optional[bool] = None
     min_order_amount: Optional[float] = None
+    one_time_per_customer: Optional[bool] = None
 
 class EventBookingCreate(BaseModel):
     name: str
@@ -2554,6 +2556,19 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             min_amount = float(offer.get("min_order_amount", 0) or 0)
             if min_amount > 0 and float(order.total_price or 0) < min_amount:
                 raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
+            # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
+            # should only fire once per signed-in customer (matched by id) and once
+            # per phone number for guests. Without this, a single customer can apply
+            # WELCOME100 repeatedly on every order — straight-up revenue leak.
+            if offer.get("one_time_per_customer"):
+                used_filter = {"coupon_code": offer["coupon_code"]}
+                if cust:
+                    used_filter["customer_id"] = str(cust["_id"])
+                else:
+                    used_filter["phone"] = order.phone
+                already_used = await db.online_orders.find_one(used_filter)
+                if already_used:
+                    raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
             if offer.get("discount_percent"):
                 discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
             elif offer.get("discount_amount"):
@@ -3290,6 +3305,7 @@ async def list_offers(active_only: bool = True):
         "image_url": o.get("image_url", ""),
         "active": o.get("active", True),
         "min_order_amount": float(o.get("min_order_amount", 0) or 0),
+        "one_time_per_customer": bool(o.get("one_time_per_customer", False)),
         "created_at": o.get("created_at", ""),
     } for o in offers]
 
@@ -3307,6 +3323,7 @@ async def create_offer(offer: OfferCreate, request: Request):
         "image_url": offer.image_url or "",
         "active": offer.active,
         "min_order_amount": float(offer.min_order_amount or 0),
+        "one_time_per_customer": bool(offer.one_time_per_customer),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.offers.insert_one(doc)
@@ -3407,9 +3424,9 @@ SAMPLE_MENU_DATA = {
 }
 
 SAMPLE_OFFERS = [
-    {"title": "Family Feast — 15% OFF", "description": "Get 15% off on orders above Rs. 1500. Use code FAMILY15.", "discount_percent": 15, "discount_amount": 0, "coupon_code": "FAMILY15", "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
-    {"title": "First Order — Rs. 100 OFF", "description": "Welcome offer! Flat Rs. 100 off on your first order. Code: WELCOME100.", "discount_percent": 0, "discount_amount": 100, "coupon_code": "WELCOME100", "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "active": True},
-    {"title": "Weekend BBQ Bonanza", "description": "Free Raita + Salad with any BBQ Platter on weekends.", "discount_percent": 0, "discount_amount": 0, "coupon_code": "", "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
+    {"title": "Family Feast — 15% OFF", "description": "Get 15% off on orders above Rs. 1500. Use code FAMILY15.", "discount_percent": 15, "discount_amount": 0, "coupon_code": "FAMILY15", "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True, "one_time_per_customer": False},
+    {"title": "First Order — Rs. 100 OFF", "description": "Welcome offer! Flat Rs. 100 off on your first order. Code: WELCOME100.", "discount_percent": 0, "discount_amount": 100, "coupon_code": "WELCOME100", "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "active": True, "one_time_per_customer": True},
+    {"title": "Weekend BBQ Bonanza", "description": "Free Raita + Salad with any BBQ Platter on weekends.", "discount_percent": 0, "discount_amount": 0, "coupon_code": "", "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True, "one_time_per_customer": False},
 ]
 
 async def seed_online_data():
@@ -3442,12 +3459,24 @@ async def seed_online_data():
         for o in SAMPLE_OFFERS:
             await db.offers.insert_one({**o, "created_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Seeded {len(SAMPLE_OFFERS)} offers")
+    # Backfill: any pre-existing offer whose code starts with WELCOME or FIRST is treated
+    # as one-time-per-customer by default. Without this, the WELCOME100 code in production
+    # could be reused indefinitely by the same customer — straight revenue leak.
+    await db.offers.update_many(
+        {
+            "$or": [{"coupon_code": {"$regex": "^WELCOME", "$options": "i"}}, {"coupon_code": {"$regex": "^FIRST", "$options": "i"}}],
+            "one_time_per_customer": {"$exists": False},
+        },
+        {"$set": {"one_time_per_customer": True}},
+    )
     # Indexes
     try:
         await db.customers.create_index("email", unique=True)
         await db.online_orders.create_index([("created_at", -1)])
         await db.online_orders.create_index("customer_id")
         await db.online_orders.create_index("status")
+        await db.online_orders.create_index([("coupon_code", 1), ("customer_id", 1)])
+        await db.online_orders.create_index([("coupon_code", 1), ("phone", 1)])
         await db.reviews.create_index([("created_at", -1)])
         await db.offers.create_index("coupon_code")
     except Exception as e:
@@ -4727,10 +4756,25 @@ async def get_my_loyalty_transactions(request: Request, limit: int = 50):
 async def get_available_rewards(request: Request):
     # Public or authenticated - shows active rewards
     rewards = await db.loyalty_rewards.find({"is_active": True}).to_list(500)
-    return [{
-        "id": str(r.pop("_id")),
-        **{k: v for k, v in r.items() if k not in ["created_by", "updated_by"]}
-    } for r in rewards]
+    out = []
+    for r in rewards:
+        rid = str(r.pop("_id"))
+        item = {"id": rid, **{k: v for k, v in r.items() if k not in ["created_by", "updated_by"]}}
+        # Enrich free_item rewards with the linked menu item's name + image so the
+        # frontend can render a proper "FREE — <item name>" line in the cart / checkout
+        # summary instead of just the reward title. (Customers complained they couldn't
+        # tell which item they'd get until the order was placed.)
+        if item.get("reward_type") == "free_item" and item.get("reward_value"):
+            try:
+                mi = await db.menu_items.find_one({"_id": ObjectId(str(item["reward_value"]))}, {"name": 1, "image_url": 1, "price": 1})
+                if mi:
+                    item["free_item_name"] = mi.get("name", "")
+                    item["free_item_image"] = mi.get("image_url", "")
+                    item["free_item_value"] = float(mi.get("price", 0) or 0)
+            except Exception:
+                pass
+        out.append(item)
+    return out
 
 # =============================================================================
 # END LOYALTY SYSTEM
