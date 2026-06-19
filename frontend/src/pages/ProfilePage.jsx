@@ -4,7 +4,7 @@ import api, { formatApiError } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
 import { toast } from "sonner";
-import { Star, RotateCcw, ChevronRight, Package, Diamond } from "lucide-react";
+import { Star, RotateCcw, ChevronRight, Package, Diamond, Tag } from "lucide-react";
 
 const STATUS_COLORS = {
     pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
@@ -26,6 +26,7 @@ export default function ProfilePage() {
     const navigate = useNavigate();
     const [orders, setOrders] = useState([]);
     const [diamondBalance, setDiamondBalance] = useState(0);
+    const [personalCoupons, setPersonalCoupons] = useState([]);
     const [reviewOrder, setReviewOrder] = useState(null);
     const [reviewForm, setReviewForm] = useState({ rating: 5, comment: "" });
     const [submitting, setSubmitting] = useState(false);
@@ -35,6 +36,7 @@ export default function ProfilePage() {
         if (user) {
             loadOrders();
             loadBalance();
+            loadPersonalCoupons();
         }
         // eslint-disable-next-line
     }, [user]);
@@ -45,7 +47,7 @@ export default function ProfilePage() {
     // listens to focus + the diamondsUpdated event and lightly polls every 30s.
     useEffect(() => {
         if (!user) return;
-        const refresh = () => { loadBalance(); loadOrders(); };
+        const refresh = () => { loadBalance(); loadOrders(); loadPersonalCoupons(); };
         window.addEventListener("focus", refresh);
         window.addEventListener("diamondsUpdated", refresh);
         const t = setInterval(refresh, 30000);
@@ -62,6 +64,19 @@ export default function ProfilePage() {
             const { data } = await api.get("/loyalty/balance");
             setDiamondBalance(data.diamond_balance || 0);
         } catch (err) { /* silent */ }
+    };
+
+    const loadPersonalCoupons = async () => {
+        try {
+            const { data } = await api.get("/personal-coupons/me");
+            setPersonalCoupons(data || []);
+        } catch (err) { /* silent */ }
+    };
+
+    const copyCoupon = (code) => {
+        if (!code) return;
+        try { navigator.clipboard.writeText(code); toast.success(`Copied: ${code}`); }
+        catch { toast.success(`Code: ${code}`); }
     };
 
     const loadOrders = async () => {
@@ -124,6 +139,37 @@ export default function ProfilePage() {
                 </div>
                 <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-2" />
             </Link>
+
+            {/* Personal coupons — surface the customer's unique single-use codes (e.g. the
+                second-order bonus). They're auto-applied at checkout, but we show them
+                here too so the customer feels rewarded and remembers they have a perk. */}
+            {personalCoupons.length > 0 && (
+                <div className="mb-8 p-5 bg-gradient-to-br from-brand-red to-brand-red-dark text-white rounded-2xl" data-testid="profile-personal-coupons">
+                    <div className="flex items-center gap-2 mb-1">
+                        <Tag className="w-4 h-4" />
+                        <span className="text-[11px] uppercase tracking-[0.2em] font-bold">Just for you</span>
+                    </div>
+                    <h2 className="font-display font-black text-lg">Your personal codes</h2>
+                    <p className="text-sm text-white/85 mt-1">Auto-applied at checkout. Tap a code to copy.</p>
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {personalCoupons.map((pc) => (
+                            <button
+                                key={pc.id}
+                                type="button"
+                                onClick={() => copyCoupon(pc.code)}
+                                data-testid={`profile-coupon-${pc.id}`}
+                                className="text-left bg-white/15 hover:bg-white/25 backdrop-blur-sm border-2 border-dashed border-white/60 rounded-xl px-3 py-2 transition-colors"
+                            >
+                                <div className="font-display font-black text-base tracking-wider">{pc.code}</div>
+                                <div className="text-[11px] text-white/80">
+                                    {pc.discount_percent > 0 ? `${pc.discount_percent}% OFF` : `Rs. ${pc.discount_amount} OFF`}
+                                    {pc.expires_at && ` · expires ${new Date(pc.expires_at).toLocaleDateString()}`}
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <h2 className="font-display font-bold text-2xl text-brand-ink mb-5">Order History</h2>
 

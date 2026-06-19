@@ -150,7 +150,39 @@ export default function CheckoutPage() {
     const applyCoupon = async () => {
         const code = form.coupon_code.trim().toUpperCase();
         if (!code) return;
+        // Stacking guard applies to both personal and public coupons against Diamond discount rewards.
+        if (reward && (reward.reward_type === "discount_percent" || reward.reward_type === "discount_fixed")) {
+            setCoupon(null);
+            toast.error("You can use either a coupon OR a Diamond discount — not both. Remove your Diamond reward first to apply this coupon.");
+            return;
+        }
         try {
+            // 1) Try the customer's personal coupons first (only available when signed in).
+            //    These are unique single-use codes (e.g. WELCOME2-XXXXXX from the
+            //    second-order bonus). They take priority over public offers and the
+            //    backend will validate ownership + expiry again at order-place time.
+            if (user) {
+                try {
+                    const { data: personal } = await api.get("/personal-coupons/me");
+                    const myCode = (personal || []).find((p) => (p.code || "").toUpperCase() === code);
+                    if (myCode) {
+                        let discount = 0;
+                        if (myCode.discount_percent) discount = (subtotal * myCode.discount_percent) / 100;
+                        else discount = myCode.discount_amount;
+                        setCoupon({
+                            coupon_code: myCode.code,
+                            title: "Personal coupon",
+                            discount: Math.min(discount, subtotal),
+                            discount_percent: myCode.discount_percent || 0,
+                            discount_amount: myCode.discount_amount || 0,
+                            personal: true,
+                        });
+                        toast.success(`Personal coupon applied · saved Rs. ${Math.min(discount, subtotal).toFixed(0)}`);
+                        return;
+                    }
+                } catch { /* fall through to public offers */ }
+            }
+
             const { data } = await api.get("/offers");
             const found = data.find((o) => (o.coupon_code || "").toUpperCase() === code && o.active);
             if (!found) { setCoupon(null); toast.error("Invalid coupon code"); return; }
@@ -159,12 +191,6 @@ export default function CheckoutPage() {
             if (minAmount > 0 && subtotal < minAmount) {
                 setCoupon(null);
                 toast.error(`Spend at least Rs. ${minAmount.toFixed(0)} to use ${found.coupon_code}. Add Rs. ${(minAmount - subtotal).toFixed(0)} more.`);
-                return;
-            }
-            // V2: prevent stacking discount coupon + Diamond DISCOUNT reward (free-item rewards are OK)
-            if (reward && (reward.reward_type === "discount_percent" || reward.reward_type === "discount_fixed")) {
-                setCoupon(null);
-                toast.error("You can use either a coupon OR a Diamond discount — not both. Remove your Diamond reward first to apply this coupon.");
                 return;
             }
             let discount = 0;
@@ -176,6 +202,35 @@ export default function CheckoutPage() {
             toast.error("Failed to validate coupon");
         }
     };
+
+    // Auto-apply the customer's most recent personal coupon when they reach checkout,
+    // so they don't have to copy-paste their own one-time code. Only fires once and
+    // only if the user hasn't already typed something in the coupon field.
+    useEffect(() => {
+        if (!user) return;
+        if (form.coupon_code || coupon) return;
+        let cancelled = false;
+        api.get("/personal-coupons/me").then(({ data }) => {
+            if (cancelled || !data || !data.length) return;
+            const top = data[0];
+            setForm((f) => ({ ...f, coupon_code: top.code }));
+            // Compute discount inline so we don't have to re-call applyCoupon.
+            let discount = 0;
+            if (top.discount_percent) discount = (subtotal * top.discount_percent) / 100;
+            else discount = top.discount_amount;
+            setCoupon({
+                coupon_code: top.code,
+                title: "Personal coupon",
+                discount: Math.min(discount, subtotal),
+                discount_percent: top.discount_percent || 0,
+                discount_amount: top.discount_amount || 0,
+                personal: true,
+            });
+            toast.success(`Your personal coupon ${top.code} was auto-applied`);
+        }).catch(() => { /* silent */ });
+        return () => { cancelled = true; };
+        // eslint-disable-next-line
+    }, [user]);
 
     const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
     const enabledMethods = settings?.payment_methods || { cod: true };

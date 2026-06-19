@@ -8,7 +8,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Upload
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, bcrypt, jwt
+import os, logging, bcrypt, jwt, secrets
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -2549,31 +2549,56 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # Coupon validation
     discount_amount = 0.0
     coupon_used = None
+    personal_coupon_id = None
     if order.coupon_code:
-        offer = await db.offers.find_one({"coupon_code": order.coupon_code.upper().strip(), "active": True})
-        if offer:
-            # V2: enforce minimum order amount on offers
-            min_amount = float(offer.get("min_order_amount", 0) or 0)
-            if min_amount > 0 and float(order.total_price or 0) < min_amount:
-                raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
-            # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
-            # should only fire once per signed-in customer (matched by id) and once
-            # per phone number for guests. Without this, a single customer can apply
-            # WELCOME100 repeatedly on every order — straight-up revenue leak.
-            if offer.get("one_time_per_customer"):
-                used_filter = {"coupon_code": offer["coupon_code"]}
-                if cust:
-                    used_filter["customer_id"] = str(cust["_id"])
-                else:
-                    used_filter["phone"] = order.phone
-                already_used = await db.online_orders.find_one(used_filter)
-                if already_used:
-                    raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
-            if offer.get("discount_percent"):
-                discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
-            elif offer.get("discount_amount"):
-                discount_amount = float(offer["discount_amount"])
-            coupon_used = offer["coupon_code"]
+        code_normalized = order.coupon_code.upper().strip()
+        # 1) Personal customer coupons (e.g. WELCOME2-XXXXXX issued on first-order delivery)
+        #    take priority over public offers. They are single-use, owned by a specific
+        #    customer, and have an expiry. We must verify ownership server-side — never
+        #    trust the client.
+        personal = await db.personal_coupons.find_one({"code": code_normalized})
+        if personal:
+            if personal.get("used"):
+                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has already been used.")
+            try:
+                expires = datetime.fromisoformat(personal.get("expires_at", "").replace("Z", "+00:00"))
+            except Exception:
+                expires = None
+            if expires and expires < datetime.now(timezone.utc):
+                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has expired.")
+            if not cust or str(cust["_id"]) != str(personal.get("customer_id")):
+                raise HTTPException(status_code=400, detail="This coupon belongs to a different account. Please sign in with the correct account.")
+            if personal.get("discount_percent"):
+                discount_amount = round(order.total_price * float(personal["discount_percent"]) / 100, 2)
+            else:
+                discount_amount = float(personal.get("discount_amount", 0))
+            coupon_used = code_normalized
+            personal_coupon_id = personal["_id"]
+        else:
+            offer = await db.offers.find_one({"coupon_code": code_normalized, "active": True})
+            if offer:
+                # V2: enforce minimum order amount on offers
+                min_amount = float(offer.get("min_order_amount", 0) or 0)
+                if min_amount > 0 and float(order.total_price or 0) < min_amount:
+                    raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
+                # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
+                # should only fire once per signed-in customer (matched by id) and once
+                # per phone number for guests. Without this, a single customer can apply
+                # WELCOME100 repeatedly on every order — straight-up revenue leak.
+                if offer.get("one_time_per_customer"):
+                    used_filter = {"coupon_code": offer["coupon_code"]}
+                    if cust:
+                        used_filter["customer_id"] = str(cust["_id"])
+                    else:
+                        used_filter["phone"] = order.phone
+                    already_used = await db.online_orders.find_one(used_filter)
+                    if already_used:
+                        raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
+                if offer.get("discount_percent"):
+                    discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
+                elif offer.get("discount_amount"):
+                    discount_amount = float(offer["discount_amount"])
+                coupon_used = offer["coupon_code"]
     # Delivery fee calculation (server-side, ignores any frontend value)
     delivery_fee = 0.0
     distance_km = None
@@ -2719,6 +2744,16 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     result = await db.online_orders.insert_one(doc)
     doc["_id"] = result.inserted_id
     order_id = str(result.inserted_id)
+
+    # Mark personal coupon as used so it can't be redeemed twice.
+    if personal_coupon_id:
+        try:
+            await db.personal_coupons.update_one(
+                {"_id": personal_coupon_id},
+                {"$set": {"used": True, "used_on_order_id": order_id, "used_at": now.isoformat()}},
+            )
+        except Exception as e:
+            logger.error(f"Failed to mark personal coupon {personal_coupon_id} as used: {e}")
     
     # Log loyalty transaction for spending only (earning happens at delivery)
     if cust and diamonds_spent > 0 and reward_applied:
@@ -2754,6 +2789,29 @@ async def get_my_orders(request: Request):
     cust = await get_current_customer(request)
     orders = await db.online_orders.find({"customer_id": cust["_id"]}).sort("created_at", -1).to_list(200)
     return [_serialize_online_order(o) for o in orders]
+
+
+@api_router.get("/personal-coupons/me")
+async def get_my_personal_coupons(request: Request):
+    """List the signed-in customer's active (unused + unexpired) personal coupons.
+    Used to surface the second-order bonus and any future per-customer perks on
+    Profile / Rewards screens and to auto-apply at checkout."""
+    cust = await get_current_customer(request)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    coupons = await db.personal_coupons.find({
+        "customer_id": str(cust["_id"]),
+        "used": False,
+        "expires_at": {"$gt": now_iso},
+    }).sort("created_at", -1).to_list(50)
+    return [{
+        "id": str(c["_id"]),
+        "code": c["code"],
+        "discount_amount": float(c.get("discount_amount", 0)),
+        "discount_percent": float(c.get("discount_percent", 0)),
+        "source": c.get("source", ""),
+        "expires_at": c.get("expires_at"),
+        "created_at": c.get("created_at"),
+    } for c in coupons]
 
 @api_router.get("/online-orders")
 async def list_online_orders(request: Request, status: Optional[str] = None):
@@ -2856,6 +2914,38 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
                         logger.warning(f"Diamond credit found 0 matching customer for order {order_id} (customer_id={customer_id!r})")
             except Exception as e:
                 logger.error(f"Failed to award Diamonds for order {order_id}: {e}")
+
+        # === Second-order bonus trigger ===
+        # If this delivery makes the customer's 1st-EVER delivered order, mint them a
+        # personal one-time coupon worth Rs. 50 off for their 2nd order. Single-use,
+        # 30-day expiry, auto-applied at checkout when present. Tracked in its own
+        # collection so it never collides with the public offers table.
+        if customer_id:
+            try:
+                cust_id_str = str(customer_id)
+                delivered_count = await db.online_orders.count_documents({"customer_id": customer_id, "status": "delivered"})
+                # delivered_count INCLUDES this order (we just set status=delivered above).
+                already_has = await db.personal_coupons.find_one({"customer_id": cust_id_str, "source": "second_order_bonus"})
+                if delivered_count == 1 and not already_has:
+                    code = f"WELCOME2-{secrets.token_hex(3).upper()}"
+                    while await db.personal_coupons.find_one({"code": code}):
+                        code = f"WELCOME2-{secrets.token_hex(3).upper()}"
+                    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+                    await db.personal_coupons.insert_one({
+                        "code": code,
+                        "customer_id": cust_id_str,
+                        "discount_amount": 50,
+                        "discount_percent": 0,
+                        "source": "second_order_bonus",
+                        "issued_for_order_id": order_id,
+                        "used": False,
+                        "used_on_order_id": None,
+                        "expires_at": expires_at.isoformat(),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    logger.info(f"Issued second-order bonus coupon {code} to customer {cust_id_str}")
+            except Exception as e:
+                logger.error(f"Failed to issue second-order bonus for order {order_id}: {e}")
     
     # WhatsApp status update
     try:
@@ -3477,6 +3567,8 @@ async def seed_online_data():
         await db.online_orders.create_index("status")
         await db.online_orders.create_index([("coupon_code", 1), ("customer_id", 1)])
         await db.online_orders.create_index([("coupon_code", 1), ("phone", 1)])
+        await db.personal_coupons.create_index("code", unique=True)
+        await db.personal_coupons.create_index([("customer_id", 1), ("used", 1)])
         await db.reviews.create_index([("created_at", -1)])
         await db.offers.create_index("coupon_code")
     except Exception as e:

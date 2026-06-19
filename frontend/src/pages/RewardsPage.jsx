@@ -4,6 +4,7 @@ import { useAuth } from "../contexts/AuthContext";
 import axios from "axios";
 import { toast } from "sonner";
 import { Diamond, Gift, Percent, DollarSign, ShoppingBag, Lock } from "lucide-react";
+import GuestGateSheet from "../components/GuestGateSheet";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -13,10 +14,11 @@ export default function RewardsPage() {
     const [rewards, setRewards] = useState([]);
     const [balance, setBalance] = useState(0);
     const [loading, setLoading] = useState(true);
+    const [gateOpen, setGateOpen] = useState(false);
 
     useEffect(() => {
-        if (user === null) navigate("/login");
-        if (user) loadData();
+        // Guests can BROWSE the catalog. The sign-in gate fires only on the "Use" action.
+        loadData();
         // eslint-disable-next-line
     }, [user]);
     
@@ -54,13 +56,17 @@ export default function RewardsPage() {
     const loadData = async () => {
         setLoading(true);
         try {
-            const token = localStorage.getItem('knb_token');
-            const [rewardsRes, balanceRes] = await Promise.all([
-                axios.get(`${API}/loyalty/rewards`),
-                axios.get(`${API}/loyalty/balance`, { headers: { Authorization: `Bearer ${token}` } })
-            ]);
+            // Rewards catalog is public — load it for everyone.
+            const rewardsRes = await axios.get(`${API}/loyalty/rewards`);
             setRewards(rewardsRes.data);
-            setBalance(balanceRes.data.diamond_balance || 0);
+            if (user) {
+                // Balance only makes sense for signed-in customers.
+                const token = localStorage.getItem('knb_token');
+                const balanceRes = await axios.get(`${API}/loyalty/balance`, { headers: { Authorization: `Bearer ${token}` } });
+                setBalance(balanceRes.data.diamond_balance || 0);
+            } else {
+                setBalance(0);
+            }
         } catch (err) {
             toast.error("Failed to load rewards");
         } finally {
@@ -82,22 +88,35 @@ export default function RewardsPage() {
 
     const canAfford = (cost) => balance >= cost;
 
-    if (!user) return null;
-
     return (
         <div className="max-w-6xl mx-auto px-4 md:px-8 py-8 md:py-12" data-testid="rewards-page">
             {/* Header with Balance */}
             <div className="mb-8">
                 <span className="text-brand-red text-xs uppercase tracking-[0.2em] font-bold">Diamond Rewards</span>
                 <h1 className="font-display font-black text-3xl md:text-4xl text-brand-ink mt-2">Rewards Catalog</h1>
-                
-                <div className="mt-4 inline-flex items-center gap-3 px-6 py-4 bg-brand-yellow rounded-2xl">
-                    <Diamond className="w-8 h-8" fill="currentColor" />
-                    <div>
-                        <p className="text-xs font-semibold text-brand-ink/70 uppercase tracking-wider">Your Balance</p>
-                        <p className="text-2xl font-black text-brand-ink">{balance} Diamonds</p>
+
+                {user ? (
+                    <div className="mt-4 inline-flex items-center gap-3 px-6 py-4 bg-brand-yellow rounded-2xl">
+                        <Diamond className="w-8 h-8" fill="currentColor" />
+                        <div>
+                            <p className="text-xs font-semibold text-brand-ink/70 uppercase tracking-wider">Your Balance</p>
+                            <p className="text-2xl font-black text-brand-ink">{balance} Diamonds</p>
+                        </div>
                     </div>
-                </div>
+                ) : (
+                    <button
+                        type="button"
+                        onClick={() => setGateOpen(true)}
+                        data-testid="rewards-guest-signin-cta"
+                        className="mt-4 inline-flex items-center gap-3 px-6 py-4 bg-brand-yellow rounded-2xl hover:bg-brand-yellow/90 transition-colors text-left"
+                    >
+                        <Diamond className="w-8 h-8 text-brand-ink/70" fill="currentColor" />
+                        <div>
+                            <p className="text-xs font-semibold text-brand-ink/70 uppercase tracking-wider">Sign in to see your balance</p>
+                            <p className="text-base font-bold text-brand-ink">Earn Diamonds on every order →</p>
+                        </div>
+                    </button>
+                )}
             </div>
 
             {loading ? (
@@ -115,13 +134,16 @@ export default function RewardsPage() {
                 <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                     {rewards.map((reward) => {
                         const affordable = canAfford(reward.cost_diamonds);
-                        
+                        // Guests should see full-brightness cards (they're browsing); affordability
+                        // dimming only makes sense for signed-in users who actually have a balance.
+                        const dim = user && !affordable;
+
                         return (
                             <div
                                 key={reward.id}
                                 data-testid={`reward-${reward.id}`}
                                 className={`bg-white border rounded-2xl p-3 md:p-6 shadow-sm transition-all ${
-                                    affordable ? "border-neutral-100 hover:shadow-lg hover:scale-105" : "border-neutral-100 opacity-50"
+                                    dim ? "border-neutral-100 opacity-50" : "border-neutral-100 hover:shadow-lg hover:scale-105"
                                 }`}
                             >
                                 {/* Icon & Type */}
@@ -129,7 +151,7 @@ export default function RewardsPage() {
                                     <div className="w-9 h-9 md:w-12 md:h-12 rounded-full bg-brand-yellow/20 flex items-center justify-center text-brand-ink">
                                         {getRewardIcon(reward.reward_type)}
                                     </div>
-                                    {!affordable && (
+                                    {dim && (
                                         <Lock className="w-4 h-4 md:w-5 md:h-5 text-neutral-400" />
                                     )}
                                 </div>
@@ -156,9 +178,13 @@ export default function RewardsPage() {
                                             <Diamond className="w-4 h-4 md:w-5 md:h-5" fill="currentColor" />
                                             <span className="text-sm md:text-lg">{reward.cost_diamonds}</span>
                                         </div>
-                                        {affordable ? (
+                                        {affordable || !user ? (
                                             <button
                                                 onClick={() => {
+                                                    if (!user) {
+                                                        setGateOpen(true);
+                                                        return;
+                                                    }
                                                     localStorage.setItem('selected_reward', JSON.stringify(reward));
                                                     try { window.dispatchEvent(new Event("rewardSelectionChanged")); } catch { /* */ }
                                                     navigate('/menu');
@@ -167,7 +193,7 @@ export default function RewardsPage() {
                                                 data-testid={`use-reward-${reward.id}`}
                                                 className="px-2.5 py-1.5 md:px-4 md:py-2 bg-brand-red text-white text-[11px] md:text-sm font-semibold rounded-full hover:bg-brand-red-dark transition-colors"
                                             >
-                                                Use
+                                                {!user ? "Sign in" : "Use"}
                                             </button>
                                         ) : (
                                             <span className="text-[10px] md:text-xs text-neutral-400 font-semibold text-right">Need {reward.cost_diamonds - balance}<br className="md:hidden" /> more</span>
@@ -204,6 +230,13 @@ export default function RewardsPage() {
                     </li>
                 </ul>
             </div>
+
+            <GuestGateSheet
+                open={gateOpen}
+                title="Sign in to redeem rewards"
+                subtitle="Sign in to start earning Diamonds and unlock free items, discounts and exclusive perks."
+                onClose={() => setGateOpen(false)}
+            />
         </div>
     );
 }

@@ -1,85 +1,67 @@
-# How to update your repo — Round 3 (your latest 10 bugs)
+# How to update your repo — Round 4 (Second-order bonus + Guest gate)
 
-This round fixes the **10 issues** you reported. It's a bigger batch — please copy all the files.
+What this round does:
 
-| # | Bug / request | Fixed? | Where |
+1. **Second-order bonus** — when a customer's **first** order is marked **Delivered**, the backend automatically mints a unique single-use coupon worth **Rs. 50 off**, valid for **30 days**. The code is shown on Profile + Offers pages **and auto-applied** at checkout, so the customer can't miss it.
+2. **Guest gate on Offers + Rewards** — guests can still browse the lists (great for FOMO), but when they tap a coupon code or "Use" a reward, a small bottom-sheet pops up: **"Sign in"** primary button + **"Continue as guest"** secondary button.
+
+---
+
+## Files to copy this round (6 files)
+
+| # | From (Emergent) | To (your repo) | Why |
 |---|---|---|---|
-| 1a | Offers / Rewards catalog → 4 items per screen on mobile (was 1 per row) | ✅ | `OffersPage.jsx`, `RewardsPage.jsx` |
-| 1b | Diamond balance didn't update in **Profile** after delivery (only in Rewards) | ✅ | `ProfilePage.jsx` |
-| 2 | **WELCOME100 abuse** — same customer could use it forever | ✅ | `server.py` (offer model + per-customer enforcement + DB index + backfill) |
-| 3 | Sign In + customer's name + Diamonds visible at the top on mobile | ✅ | `Header.jsx` (already shipped in round 2, still in this build) |
-| 4 | Confusing "POS button → customer sign-in page" | ✅ | `UnifiedLoginPage.jsx` now clearly labeled **"Staff / POS Sign In"** with a "Customer? Sign in here" link |
-| 5 | Price cuts not showing on items | ⚠️ | Verified backend is correct — see "Discount sanity check" below. If still missing, the issue is your menu items don't have `discount_value > 0` saved in your DB. |
-| 6 | 10% item discount "not adding" | ✅ verified | Confirmed end-to-end with a real test on our server: a Rs. 350 item with 10% discount → API returns `price: 315`, `original_price: 350`, `discount_percent: 10`. The customer pays Rs. 315 in cart. **If you still see full price**, please share a screenshot of the admin item edit page so I can see the values you entered. |
-| 7 | Pages zoomed / buttons cut off on mobile | ✅ | `index.css` — forces `overflow-x: hidden` on `<html>` + `<body>` so no wide element triggers Safari/Chrome auto-zoom-out |
-| 8 | Free item missing from **cart & checkout** (only on tracking page) | ✅ | `CartPage.jsx`, `CheckoutPage.jsx` show a green "1× <Free Item Name> · FREE" line in the summary. Backend now enriches the rewards endpoint with `free_item_name`, `free_item_image`, `free_item_value`. |
-| 9 | Restaurant didn't know **why** the total was lower (coupon vs reward) | ✅ | `AdminOrders.jsx` — every order card now has a yellow "Rewards / Discounts applied" panel showing the coupon code (with savings) and / or the loyalty reward title with its type. Free items are also highlighted in green inside the items list. |
-| 10 | Restaurant status button should **blink in different colors** until terminal status | ✅ | `index.css` (new keyframes) + `AdminOrders.jsx` (status select gets `status-pulse-<status>` class). Colors: red = pending, blue = accepted, orange = preparing, yellow = ready, purple = out for delivery. Delivered / Rejected / Cancelled = no animation. |
+| 1 | 🆕 `/app/_copy_paste/GuestGateSheet.jsx` **NEW FILE** | `frontend/src/components/GuestGateSheet.jsx` | The popup that asks guests to sign in (with "Continue as guest" escape hatch). |
+| 2 | 🆕 `/app/_copy_paste/server.py` ⭐ | `backend/server.py` | Issues the personal coupon on first-delivered, new `/api/personal-coupons/me` endpoint, accepts personal codes at checkout. |
+| 3 | 🆕 `/app/_copy_paste/OffersPage.jsx` | `frontend/src/pages/OffersPage.jsx` | Personal coupons banner + guest gate when tapping a code. |
+| 4 | 🆕 `/app/_copy_paste/RewardsPage.jsx` | `frontend/src/pages/RewardsPage.jsx` | Guests can browse but "Use" opens the gate. Balance card shows "Sign in to see your balance" for guests. |
+| 5 | 🆕 `/app/_copy_paste/ProfilePage.jsx` | `frontend/src/pages/ProfilePage.jsx` | "Just for you" panel with your personal codes (tap to copy). |
+| 6 | 🆕 `/app/_copy_paste/CheckoutPage.jsx` | `frontend/src/pages/CheckoutPage.jsx` | Auto-applies the customer's personal coupon on load. Also accepts the code if they type it manually. |
 
 ---
 
-## Files to copy this time (13 total)
+## How it works (plain words)
 
-> Some are from earlier rounds and still in here for completeness — if you already copied them and **didn't touch the file in your repo since**, you can skip those. Files marked 🆕 are brand new or changed in this round.
+1. Customer signs up → places their first order → restaurant marks it **Delivered**.
+2. Backend instantly creates a row in a new `personal_coupons` collection: e.g. `WELCOME2-7A3F2D`, Rs. 50 off, expires in 30 days, single-use, tied to that customer's account.
+3. Next time the customer opens **Profile**, **Offers**, or **Checkout**:
+   - Profile + Offers show a red "Just for you" panel with the code.
+   - Checkout **auto-fills** the code into the coupon field and applies the discount.
+4. When they place the next order, the backend marks the coupon as `used: true`. They can never use the same code again.
+5. If they try to give the code to a friend, the backend rejects it: "This coupon belongs to a different account."
 
-| # | From (Emergent) | To (your repo) |
-|---|---|---|
-| 1 | 🆕 `/app/_copy_paste/server.py` ⭐ critical | `backend/server.py` |
-| 2 | 🆕 `/app/_copy_paste/index.css` | `frontend/src/index.css` |
-| 3 | 🆕 `/app/_copy_paste/AdminOrders.jsx` | `frontend/src/pages/admin/AdminOrders.jsx` |
-| 4 | 🆕 `/app/_copy_paste/CartPage.jsx` | `frontend/src/pages/CartPage.jsx` |
-| 5 | 🆕 `/app/_copy_paste/CheckoutPage.jsx` | `frontend/src/pages/CheckoutPage.jsx` |
-| 6 | 🆕 `/app/_copy_paste/OffersPage.jsx` | `frontend/src/pages/OffersPage.jsx` |
-| 7 | 🆕 `/app/_copy_paste/RewardsPage.jsx` | `frontend/src/pages/RewardsPage.jsx` |
-| 8 | 🆕 `/app/_copy_paste/ProfilePage.jsx` | `frontend/src/pages/ProfilePage.jsx` |
-| 9 | 🆕 `/app/_copy_paste/UnifiedLoginPage.jsx` | `frontend/src/pages/UnifiedLoginPage.jsx` |
-| 10 | `/app/_copy_paste/api.js` (round 2) | `frontend/src/lib/api.js` |
-| 11 | `/app/_copy_paste/Header.jsx` (round 2) | `frontend/src/components/Header.jsx` |
-| 12 | `/app/_copy_paste/MenuPage.jsx` (round 2) | `frontend/src/pages/MenuPage.jsx` |
-| 13 | `/app/_copy_paste/TrackingPage.jsx` (round 2) | `frontend/src/pages/TrackingPage.jsx` |
-
----
-
-## Discount sanity check (for #5 / #6)
-
-Before you tell me it's still broken, please do this **one** check on your deployed site (not on Emergent's preview):
-
-1. Open your site → press F12 → Network tab → reload the menu page.
-2. Look for the request to `/api/menu`.
-3. Click the request → look at the **Response** tab → find any item where you set a discount.
-4. The JSON should show: `"price": <SALE_PRICE>`, `"original_price": <BASE_PRICE>`, `"discount_percent": <YOUR_PERCENT>`.
-
-- If you see those fields → your backend is fine. The customer is paying the discounted price; you just need the latest `MenuPage.jsx` / `HomePage.jsx` to make the strikethrough visible.
-- If `original_price` is missing or `discount_percent` is 0 → please share a screenshot of the admin item edit page so I can see what was saved. Possibly the admin form is not persisting `discount_value`.
+### What guests see now
+- Offers page: full list visible. "Just for you" banner shows "Sign in to unlock your personal codes" → opens the gate. Tapping a public coupon code also opens the gate (with "Continue as guest" available).
+- Rewards page: full catalog visible. Balance card says "Sign in to see your balance". Tapping "Use" on any reward opens the gate.
 
 ---
 
 ## Step-by-step copy (newborn-baby version)
 
-For each row in the table above:
-1. Find the file in your repo at the same path.
-2. Open it → select everything → delete.
+For each of the 6 files in the table:
+1. Find the same file in your repo.
+2. Open → select everything → delete.
 3. Open the Emergent file at the path shown → copy everything.
-4. Paste into your repo file. Save.
+4. Paste into your repo file → save.
 
-Then push to GitHub. Wait for deploy. Done.
+⚠️ Note: `GuestGateSheet.jsx` is **brand new** — your repo doesn't have this file yet. Create it at `frontend/src/components/GuestGateSheet.jsx`.
 
-> ⚠️ For `server.py`: **don't delete the file**, just paste over the contents. After deploy, the backfill runs once — it'll mark your existing `WELCOME*` and `FIRST*` coupon codes as one-time-per-customer automatically. You don't have to do anything manually.
+Push to GitHub → wait for deploy → done.
+
+> The backend automatically creates the `personal_coupons` collection and its indexes on first startup — you don't need to run any DB migration.
 
 ---
 
-## Post-deploy checklist
+## Post-deploy verification
 
-### Issue-by-issue verification
-- [ ] **#1a** On a phone, open Offers — you see **2 cards side by side**, so 4 total in one screen.
-- [ ] **#1a** Same for Rewards Catalog — 2 columns on mobile.
-- [ ] **#1b** Place an order → restaurant marks Delivered → wait <30s OR tap the page → open Profile → **Diamond balance has updated** (no need to refresh).
-- [ ] **#2** Place an order with `WELCOME100` → second order from same phone/account using `WELCOME100` → you get the error **"Coupon WELCOME100 can only be used once per customer."**
-- [ ] **#3** On mobile, top sticky row shows your **Diamond chip + your first name as a Profile chip** when signed in. Sign In chip when not.
-- [ ] **#4** Go to `/admin/pos` — you land on a page that clearly says **"Staff / POS Sign In"** with a small link saying "Customer? Use customer sign-in →".
-- [ ] **#7** No more horizontal scroll on any mobile page. Buttons never get cut at the edge.
-- [ ] **#8** Customer redeems a free-item reward → in Cart **and** Checkout, you see a green line with the item image + name + "FREE · Diamond Reward" + Rs. 0.
-- [ ] **#9** As restaurant, open Online Orders → any order with a coupon OR a loyalty reward shows a yellow "Rewards / Discounts applied" panel right under the items.
-- [ ] **#10** Online Orders → orders that are pending/accepted/preparing/ready/out-for-delivery show a **pulsing color ring** around the status selector. Delivered / Rejected / Cancelled stay still.
+- [ ] As a **guest**, open `/offers` → top banner says **"Sign in to unlock your personal codes"**. Tapping it opens a bottom-sheet with **"Sign in"** + **"Continue as guest"**.
+- [ ] As a **guest**, tap any **dashed coupon code** (e.g. WELCOME100) → same bottom-sheet appears. Pick "Continue as guest" → the code is copied to clipboard as a fallback.
+- [ ] As a **guest**, open `/rewards` → catalog is visible but the balance card says **"Sign in to see your balance"**. Tapping "Use" / "Sign in" opens the gate.
+- [ ] As a **signed-in** customer with **zero** delivered orders → no personal coupon visible anywhere (expected).
+- [ ] Place an order → mark it **Delivered** from the admin → check Profile → a red **"Just for you"** panel appears with a `WELCOME2-XXXXXX` code. Tap it → copied to clipboard.
+- [ ] On the same customer, go to **Checkout** for a new order → coupon field is **auto-filled** with the code and the discount line shows **-Rs. 50**.
+- [ ] Place the 2nd order → personal code is now marked used. Try to apply it on a 3rd order → backend rejects with **"Coupon … has already been used."**
 
-If any item fails → tell me **which checkbox** + screenshot. Don't try to "guess fix" by digging in code yourself — I'd rather see what your eyes see.
+---
+
+If anything breaks, tell me which checkbox failed and I'll target-fix.

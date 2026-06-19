@@ -2,18 +2,44 @@ import { useEffect, useState } from "react";
 import api from "../lib/api";
 import { Tag, Flame } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "../contexts/AuthContext";
+import GuestGateSheet from "../components/GuestGateSheet";
 
 export default function OffersPage() {
     const [offers, setOffers] = useState([]);
+    const [personalCoupons, setPersonalCoupons] = useState([]);
+    const [gateOpen, setGateOpen] = useState(false);
+    const [pendingCode, setPendingCode] = useState(null);
+    const { user } = useAuth();
 
     useEffect(() => {
         api.get("/offers").then((r) => setOffers(r.data)).catch(() => { });
     }, []);
 
+    // Pull this customer's personal one-time codes (e.g. WELCOME2-XXXXXX) so we can
+    // showcase them at the very top of the offers page. Public until-signed-in fallback
+    // is a friendly "Sign in to unlock your personal code" placeholder.
+    useEffect(() => {
+        if (!user) { setPersonalCoupons([]); return; }
+        api.get("/personal-coupons/me").then((r) => setPersonalCoupons(r.data || [])).catch(() => { });
+    }, [user]);
+
     const copyCode = (code) => {
         if (!code) return;
         navigator.clipboard.writeText(code);
         toast.success(`Copied: ${code}`);
+    };
+
+    // When a guest taps the coupon code, open the sign-in gate first. We still allow
+    // "Continue as guest" so they're never blocked from copying the public offer code.
+    const handleOfferTap = (code) => {
+        if (!code) return;
+        if (!user) {
+            setPendingCode(code);
+            setGateOpen(true);
+        } else {
+            copyCode(code);
+        }
     };
 
     return (
@@ -25,6 +51,51 @@ export default function OffersPage() {
                 </h1>
                 <p className="text-neutral-500 mt-3 max-w-xl">Save more with our limited-time offers. Tap a code to copy.</p>
             </div>
+
+            {/* Personal coupons block — shows the customer's own one-time codes
+                (e.g. the second-order bonus). Guests get a teaser card that opens
+                the sign-in gate when tapped. */}
+            {user && personalCoupons.length > 0 && (
+                <div className="mb-8 bg-gradient-to-br from-brand-red to-brand-red-dark text-white rounded-2xl p-5 md:p-6 shadow-lg" data-testid="personal-coupons-banner">
+                    <div className="flex items-center gap-2 mb-1">
+                        <Tag className="w-4 h-4" />
+                        <span className="text-[11px] uppercase tracking-[0.2em] font-bold">Just for you</span>
+                    </div>
+                    <h2 className="font-display font-black text-xl md:text-2xl">Your personal codes</h2>
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {personalCoupons.map((pc) => (
+                            <button
+                                key={pc.id}
+                                type="button"
+                                onClick={() => copyCode(pc.code)}
+                                data-testid={`personal-coupon-${pc.id}`}
+                                className="text-left bg-white/15 hover:bg-white/25 backdrop-blur-sm border-2 border-dashed border-white/60 rounded-xl px-3 py-2 transition-colors"
+                            >
+                                <div className="font-display font-black text-lg tracking-wider">{pc.code}</div>
+                                <div className="text-[11px] text-white/80">
+                                    {pc.discount_percent > 0 ? `${pc.discount_percent}% OFF` : `Rs. ${pc.discount_amount} OFF`}
+                                    {pc.expires_at && ` · expires ${new Date(pc.expires_at).toLocaleDateString()}`}
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+            {!user && (
+                <button
+                    type="button"
+                    onClick={() => setGateOpen(true)}
+                    data-testid="personal-coupons-teaser"
+                    className="w-full text-left mb-8 bg-gradient-to-br from-brand-red to-brand-red-dark text-white rounded-2xl p-5 md:p-6 shadow-lg hover:shadow-xl transition-shadow"
+                >
+                    <div className="flex items-center gap-2 mb-1">
+                        <Tag className="w-4 h-4" />
+                        <span className="text-[11px] uppercase tracking-[0.2em] font-bold">Just for you</span>
+                    </div>
+                    <h2 className="font-display font-black text-xl md:text-2xl">Sign in to unlock your personal codes</h2>
+                    <p className="text-sm text-white/85 mt-1">Customers get a unique Rs. 50 off coupon after their first delivered order.</p>
+                </button>
+            )}
 
             {offers.length === 0 ? (
                 <div className="text-center py-16 text-neutral-500">No active offers right now. Check back soon!</div>
@@ -50,7 +121,7 @@ export default function OffersPage() {
                                 {o.coupon_code && (
                                     <button
                                         data-testid={`offer-copy-${o.id}`}
-                                        onClick={() => copyCode(o.coupon_code)}
+                                        onClick={() => handleOfferTap(o.coupon_code)}
                                         className="w-full inline-flex items-center justify-center gap-1.5 md:gap-2 border-2 border-dashed border-brand-red text-brand-red rounded-lg md:rounded-xl py-2 md:py-3 font-bold text-[11px] md:text-sm uppercase tracking-wider hover:bg-brand-red hover:text-white transition-colors"
                                     >
                                         <Tag className="w-3 h-3 md:w-4 md:h-4" /> {o.coupon_code}
@@ -61,6 +132,18 @@ export default function OffersPage() {
                     ))}
                 </div>
             )}
+
+            <GuestGateSheet
+                open={gateOpen}
+                title="Sign in to use this offer"
+                subtitle="Sign in so we can apply your coupon at checkout and protect it from abuse. You can still browse without signing in."
+                onClose={() => setGateOpen(false)}
+                onContinueGuest={() => {
+                    setGateOpen(false);
+                    if (pendingCode) copyCode(pendingCode);
+                    setPendingCode(null);
+                }}
+            />
         </div>
     );
 }

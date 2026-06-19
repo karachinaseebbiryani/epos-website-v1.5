@@ -24,6 +24,17 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-19 — Round 4: Second-order bonus + Guest gate
+- **`backend/server.py`**: new `personal_coupons` collection. On `PUT /online-orders/{id}/status` with `status=delivered`, if this is the customer's 1st-ever delivered order AND they don't already have a `second_order_bonus` coupon, mint one (`WELCOME2-<6 hex>`, Rs. 50 off, 30-day expiry, single-use, tied to `customer_id`).
+- **`backend/server.py`**: new `GET /api/personal-coupons/me` (auth required) returns active (unused + unexpired) personal coupons for the signed-in customer.
+- **`backend/server.py`**: order-place `coupon_code` validation now checks `personal_coupons` first — verifies ownership (must match `customer_id`), expiry, not-used. Marks as used after order insert.
+- **`backend/server.py`**: indexes added: `personal_coupons.code` (unique) and `(customer_id, used)`.
+- **`frontend/src/components/GuestGateSheet.jsx`** (new): reusable bottom-sheet / modal asking guests to sign in with optional "Continue as guest" escape hatch. `data-testid` attributes cover gate, signin, continue-guest, close.
+- **`frontend/src/pages/OffersPage.jsx`**: For signed-in users, shows red "Just for you" panel with their personal coupons (tap to copy). For guests, shows a teaser banner that opens the gate. Tapping any public coupon code also opens the gate (with "Continue as guest" fallback that just copies the code).
+- **`frontend/src/pages/RewardsPage.jsx`**: Removed forced guest redirect. Catalog now public. Balance card swaps to "Sign in to see your balance" CTA when not signed in. "Use" button on each reward opens the gate for guests. Card opacity dimming only applies to signed-in users with insufficient balance.
+- **`frontend/src/pages/ProfilePage.jsx`**: "Just for you" panel listing the customer's personal coupons under the Diamond balance card. Refreshes alongside diamond balance/orders.
+- **`frontend/src/pages/CheckoutPage.jsx`**: `applyCoupon()` now checks personal coupons before falling back to public offers. Added auto-apply effect: on mount (if signed in and no coupon already set), fetches `/personal-coupons/me` and auto-fills + applies the top coupon. Toast: "Your personal coupon X was auto-applied".
+
 ### 2026-06-19 — Round 3: 10-issue batch
 - **`backend/server.py`** (issue #2 — coupon abuse): Added `one_time_per_customer` boolean to `OfferCreate`/`OfferUpdate` models. Enforce server-side: if a coupon is flagged one-time, reject when an order already exists with that `coupon_code` + same `customer_id` (signed-in) or same `phone` (guest). Added a startup backfill that flips any `WELCOME*` / `FIRST*` codes to `one_time_per_customer=True`. Added composite indexes `(coupon_code, customer_id)` and `(coupon_code, phone)` so the lookup is O(log n) at scale.
 - **`backend/server.py`** (issue #8 — free item visible pre-order): `/loyalty/rewards` now enriches `free_item` rewards with the linked menu item's `name`, `image_url`, `price` so the client can render a proper "1× Salad · FREE · Diamond Reward · Rs. 0" line in cart/checkout summary.
