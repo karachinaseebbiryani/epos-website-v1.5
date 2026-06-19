@@ -237,8 +237,20 @@ export default function MenuPage() {
 export function PriceBlock({ item }) {
     const has = item.variations && item.variations.length > 0;
     if (has) {
-        const min = Math.min(...item.variations.map((v) => Number(v.price) || 0));
-        return <span className="font-display font-black text-base md:text-xl text-brand-red leading-none">From Rs. {min}</span>;
+        // Find the cheapest variation's sale price AND its original (pre-discount) price.
+        // If the discount made the price drop, show "From Rs. X" + strikethrough "Rs. Y"
+        // so customers see the price cut on items with sizes too.
+        const sale_min = Math.min(...item.variations.map((v) => Number(v.price) || 0));
+        const orig_min = Math.min(...item.variations.map((v) => Number(v.original_price || v.price) || 0));
+        if (orig_min > sale_min) {
+            return (
+                <span className="leading-none">
+                    <span className="font-display font-black text-base md:text-xl text-brand-red">From Rs. {sale_min}</span>
+                    <span className="ml-1.5 text-[11px] md:text-xs text-neutral-400 line-through font-medium">Rs. {orig_min}</span>
+                </span>
+            );
+        }
+        return <span className="font-display font-black text-base md:text-xl text-brand-red leading-none">From Rs. {sale_min}</span>;
     }
     if (item.original_price && item.original_price > item.price) {
         return (
@@ -403,7 +415,12 @@ export function VariationPicker({ item, onClose, onPick }) {
                                 />
                                 <span className="font-semibold text-brand-ink">{v.name}</span>
                             </span>
-                            <span className="font-display font-black text-brand-red">Rs. {v.price}</span>
+                            <span className="text-right leading-none">
+                                <span className="font-display font-black text-brand-red">Rs. {v.price}</span>
+                                {v.original_price && v.original_price > v.price && (
+                                    <span className="ml-1.5 text-[11px] text-neutral-400 line-through font-medium">Rs. {v.original_price}</span>
+                                )}
+                            </span>
                         </label>
                     ))}
                 </div>

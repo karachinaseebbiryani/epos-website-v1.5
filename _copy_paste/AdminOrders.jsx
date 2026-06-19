@@ -354,6 +354,45 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
             )}
 
             {o.notes && <div className="mt-2 text-xs bg-yellow-50 text-yellow-800 p-2 rounded">📝 {o.notes}</div>}
+
+            {/* Customer-shared GPS updates. Latest pinned at top with a Google Maps deep
+                link so the rider can navigate in one tap. Older entries collapsed into
+                "+ N more updates" so the order card doesn't blow up vertically. */}
+            {o.customer_location_history && o.customer_location_history.length > 0 && (
+                <div className="mt-2 text-xs bg-blue-50 border border-blue-200 text-blue-900 p-2 rounded space-y-1" data-testid={`order-location-history-${o.id}`}>
+                    <div className="font-bold uppercase tracking-wider text-[10px] text-blue-700">📍 Customer-shared location ({o.customer_location_history.length} update{o.customer_location_history.length > 1 ? "s" : ""})</div>
+                    {(() => {
+                        const latest = o.customer_location_history[o.customer_location_history.length - 1];
+                        return (
+                            <div>
+                                <a
+                                    href={`https://www.google.com/maps?q=${latest.lat},${latest.lng}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-semibold underline hover:text-blue-700"
+                                >Open in Google Maps →</a>
+                                {latest.address && <span className="block text-blue-800 mt-0.5">{latest.address}</span>}
+                                <span className="block text-[10px] text-blue-700/80 mt-0.5">{new Date(latest.updated_at).toLocaleString()}</span>
+                            </div>
+                        );
+                    })()}
+                    {o.customer_location_history.length > 1 && (
+                        <details className="cursor-pointer">
+                            <summary className="text-[10px] text-blue-700 hover:underline">+ {o.customer_location_history.length - 1} earlier update{o.customer_location_history.length - 1 > 1 ? "s" : ""}</summary>
+                            <ul className="mt-1 space-y-1 pl-2 border-l border-blue-200">
+                                {o.customer_location_history.slice(0, -1).reverse().map((e, idx) => (
+                                    <li key={idx}>
+                                        <a href={`https://www.google.com/maps?q=${e.lat},${e.lng}`} target="_blank" rel="noreferrer" className="underline">Map</a>
+                                        {e.address && <span> · {e.address}</span>}
+                                        <span className="block text-[10px] text-blue-700/70">{new Date(e.updated_at).toLocaleString()}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </details>
+                    )}
+                </div>
+            )}
+
             {isRejected && o.rejection_reason && (
                 <div data-testid={`order-rejection-${o.id}`} className="mt-2 text-xs bg-red-50 border border-red-200 text-red-800 p-2 rounded">
                     <strong>Rejected:</strong> {humanReason(o.rejection_reason)}

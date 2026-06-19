@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../lib/api";
-import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil } from "lucide-react";
+import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation } from "lucide-react";
+import { toast } from "sonner";
 
 const STEPS = [
     { key: "pending", label: "Order Placed", icon: Package },
@@ -25,6 +26,36 @@ export default function TrackingPage() {
     const [order, setOrder] = useState(null);
     const [error, setError] = useState(null);
     const [restaurantPhone, setRestaurantPhone] = useState("+923004928411");
+    const [locSubmitting, setLocSubmitting] = useState(false);
+
+    const shareLocation = async () => {
+        if (!navigator.geolocation) {
+            toast.error("Your browser doesn't support location sharing.");
+            return;
+        }
+        setLocSubmitting(true);
+        try {
+            const pos = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 }));
+            const { latitude, longitude } = pos.coords;
+            // Best-effort reverse geocode via OSM Nominatim (free, no key). Failure is fine.
+            let address = "";
+            try {
+                const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}`);
+                const j = await r.json();
+                address = j?.display_name || "";
+            } catch { /* */ }
+            const token = localStorage.getItem("knb_token");
+            await axios.post(`${API}/online-orders/${id}/customer-location`, { lat: latitude, lng: longitude, address }, {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
+            toast.success("Location shared — the restaurant has been notified.");
+        } catch (err) {
+            const msg = err?.response?.data?.detail || err?.message || "Couldn't share location. Please try again.";
+            toast.error(msg);
+        } finally {
+            setLocSubmitting(false);
+        }
+    };
 
     useEffect(() => {
         axios.get(`${API}/public/restaurant-info`).then(({ data }) => {
@@ -213,13 +244,36 @@ export default function TrackingPage() {
                     <div className="space-y-2 text-sm">
                         <div className="flex items-start gap-2">
                             <MapPin className="w-4 h-4 text-brand-red mt-0.5 flex-shrink-0" />
-                            <span className="text-neutral-600">{order.address}</span>
+                            <span className="text-neutral-600">{order.customer_address_updated || order.address}</span>
                         </div>
                         <div className="flex items-center gap-2">
                             <Phone className="w-4 h-4 text-brand-red" />
                             <a href={`tel:${order.phone}`} className="text-neutral-600 hover:text-brand-red">{order.phone}</a>
                         </div>
                     </div>
+
+                    {/* Customer can re-share GPS at any time before delivery — useful when
+                        the original pin was off, the rider got lost, or the customer moved.
+                        The restaurant sees every update in their AdminOrders panel. */}
+                    {order.status !== "delivered" && order.status !== "cancelled" && order.status !== "rejected" && (
+                        <div className="mt-4 pt-4 border-t border-neutral-100">
+                            <button
+                                onClick={shareLocation}
+                                disabled={locSubmitting}
+                                data-testid="track-share-location"
+                                className="w-full inline-flex items-center justify-center gap-2 bg-brand-ink hover:bg-brand-red text-white rounded-full px-4 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors disabled:opacity-60"
+                            >
+                                {locSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
+                                {locSubmitting ? "Sharing..." : (order.customer_location_history && order.customer_location_history.length > 0 ? "Update my location again" : "Share my live location")}
+                            </button>
+                            {order.customer_location_history && order.customer_location_history.length > 0 && (
+                                <p className="text-[11px] text-neutral-500 mt-2 text-center">
+                                    ✓ Shared {order.customer_location_history.length} time{order.customer_location_history.length > 1 ? "s" : ""}. The restaurant has the latest.
+                                </p>
+                            )}
+                        </div>
+                    )}
+
                     <div className="mt-4 pt-4 border-t border-neutral-100 text-xs text-neutral-500">
                         <div>Payment: <span className="font-semibold uppercase text-brand-ink">{order.payment_method}</span></div>
                         <div className="mt-1">Payment Status: <span className={`font-semibold uppercase ${order.payment_status === "paid" ? "text-green-700" : order.payment_status === "pending_verification" ? "text-yellow-700" : "text-neutral-600"}`}>{order.payment_status?.replace(/_/g, " ")}</span></div>

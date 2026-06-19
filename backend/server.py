@@ -2493,6 +2493,24 @@ async def get_public_menu():
             sale_price = round(max(0, base_price * (1 - d_val / 100.0)), 2)
         elif d_type == "fixed" and d_val > 0:
             sale_price = round(max(0, base_price - d_val), 2)
+        # Apply the item-level discount to each variation's price as well so the
+        # Half/Medium/Full prices reflect the discount. Without this, the "9% OFF"
+        # badge on a variations-item is a lie — the customer pays the un-discounted
+        # variation price. We attach `original_price` to each variation too so the
+        # frontend can strike through it like the main price.
+        raw_variations = i.get("variations", []) or []
+        variations_out = []
+        for v in raw_variations:
+            v_base = float(v.get("price", 0) or 0)
+            v_sale = v_base
+            if d_type == "percentage" and d_val > 0:
+                v_sale = round(max(0, v_base * (1 - d_val / 100.0)), 2)
+            elif d_type == "fixed" and d_val > 0:
+                v_sale = round(max(0, v_base - d_val), 2)
+            v_out = {"name": v.get("name", ""), "price": v_sale}
+            if v_sale < v_base:
+                v_out["original_price"] = v_base
+            variations_out.append(v_out)
         item_list.append({
             "id": str(i["_id"]),
             "name": i["name"],
@@ -2508,7 +2526,7 @@ async def get_public_menu():
             "description": i.get("description", ""),
             "is_popular": i.get("is_popular", False),
             "is_bestseller": i.get("is_bestseller", False),
-            "variations": i.get("variations", []),
+            "variations": variations_out,
         })
     return {"categories": cat_list, "items": item_list}
 
@@ -3112,6 +3130,57 @@ class OrderOperationsUpdate(BaseModel):
     prep_time_min: Optional[int] = None  # 1..240. Defaults to 30 if never set.
     delivery_fee_override: Optional[float] = None  # 0 = free delivery. None = clear override.
     free_delivery: Optional[bool] = None  # True = force delivery fee to 0.
+
+
+class CustomerLocationUpdate(BaseModel):
+    lat: float
+    lng: float
+    address: Optional[str] = None
+    note: Optional[str] = None
+
+
+@api_router.post("/online-orders/{order_id}/customer-location")
+async def update_customer_location(order_id: str, body: CustomerLocationUpdate, request: Request):
+    """Customer-initiated location update from the tracking page. Lets the customer
+    re-share their GPS coords (e.g. after they moved, the rider got lost, or the
+    initial pin was wrong). We append every update to `customer_location_history`
+    so the restaurant can see the trail and reach the customer at the latest spot."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"This order is already {order.get('status')} — location updates are no longer accepted.")
+    cust = await get_optional_customer(request)
+    # If the order belongs to a signed-in customer, verify ownership before letting
+    # someone update its location. Guest orders are protected by the order_id (which
+    # is unguessable enough to act as a token).
+    if order.get("customer_id"):
+        if not cust or str(cust["_id"]) != str(order.get("customer_id")):
+            raise HTTPException(status_code=403, detail="You don't have permission to update this order's location.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry = {
+        "lat": float(body.lat),
+        "lng": float(body.lng),
+        "address": (body.address or "").strip() or None,
+        "note": (body.note or "").strip() or None,
+        "updated_at": now_iso,
+    }
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {
+            "$push": {"customer_location_history": entry},
+            "$set": {
+                "customer_lat": entry["lat"],
+                "customer_lng": entry["lng"],
+                "customer_address_updated": entry["address"] or order.get("customer_address_updated"),
+                "updated_at": now_iso,
+            },
+        },
+    )
+    return {"ok": True, "history_count": len((order.get("customer_location_history") or [])) + 1, "last_entry": entry}
 
 
 @api_router.put("/online-orders/{order_id}/operations")

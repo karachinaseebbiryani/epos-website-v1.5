@@ -24,6 +24,14 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-19 — Round 6: Variation discounts + Customer location update
+- **`backend/server.py` `/api/menu`**: For items with `discount_type` + `discount_value`, the discount is now applied to EACH variation's price too (Half/Medium/Full all get the % or fixed cut). Each variation in the response now carries `original_price` when discounted so the frontend can render the strikethrough. Root cause of the user's reported "discount badge shows but price doesn't change on variations item" — the variations were sent as raw, un-discounted prices.
+- **`frontend/src/pages/MenuPage.jsx` `PriceBlock`**: When item has variations AND any variation has `original_price > price`, shows "From Rs. {sale_min}" with strikethrough "Rs. {orig_min}". Was previously showing "From Rs. {min}" with no strikethrough for variations items.
+- **`frontend/src/pages/MenuPage.jsx` `VariationPicker`**: Each size's row now shows the sale price + strikethrough original (e.g. `Half Rs. 182 ~~Rs. 200~~`).
+- **`backend/server.py`**: New `POST /api/online-orders/{order_id}/customer-location` endpoint. Customer-initiated. Verifies ownership for signed-in orders (rejects 403 if mismatch). Appends `{lat, lng, address, note, updated_at}` to `customer_location_history` array on the order. Updates `customer_lat`, `customer_lng`, `customer_address_updated` to the latest values.
+- **`frontend/src/pages/TrackingPage.jsx`**: Added "Share my live location" / "Update my location again" button (visible only while order is in a non-terminal status). Uses `navigator.geolocation.getCurrentPosition` and a best-effort OSM Nominatim reverse-geocode. Shows the customer's "Shared N times" confirmation. Also surfaces `customer_address_updated` as the displayed address when present.
+- **`frontend/src/pages/admin/AdminOrders.jsx`**: New blue panel "📍 Customer-shared location (N updates)" with a one-tap Google Maps deep link to the latest pin, plus a collapsible `<details>` of older updates. Each entry timestamped.
+
 ### 2026-06-19 — Round 5: 5 more user-reported issues
 - **`frontend/src/components/Header.jsx`**: mobile top-right now ALWAYS shows two chips when signed in (yellow Diamond balance + black Profile button) and a red "Sign In" pill when not. Visible without opening the hamburger or scrolling.
 - **`frontend/src/pages/CheckoutPage.jsx`**: When a Diamond reward of type `discount_percent` or `discount_fixed` is selected, the order summary now previews the discount BEFORE the order is placed (line item "Diamond discount (10%): − Rs. X") and the displayed total `totalAfterReward` reflects it. Was previously only visible on the tracking page.
