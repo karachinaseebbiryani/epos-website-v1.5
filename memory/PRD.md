@@ -1,73 +1,107 @@
-# PRD — Karachi Naseeb Biryani Online Store (KNB)
+# Karachi Naseeb Biryani — PRD
 
 ## Original Problem Statement
-The user shipped V1 of a full-stack restaurant ordering platform (FastAPI + React + MongoDB) for Karachi Naseeb Biryani & Murg Pulao. The system is LIVE in production at the restaurant. V2 feedback was provided as 18+ items spanning:
-- Social login (Google + Facebook)
-- Order operations (Accept/Reject/Modify color-coded buttons, 2-min response countdown, call-restaurant CTA, prep time control, delivery discount control)
-- Diamond rewards UX bugs (auto-restore on cart empty / item remove)
-- Offer Management min-order-amount
-- Review/Feedback separation
-- Reward stacking rules (Diamond OR coupon, not both for discounts; free-item rewards CAN stack)
-- Push notifications, contact us page, Diamond history page, location prompt
-- Vercel deployment readiness for karachinaseebbiryani.com
-- Invoice QR print fix, "Failed to load reviews" fix
-- Auto-redirect to live tracking on order acceptance
+Unified restaurant platform (online ordering + POS + admin). User submitted a 12-point improvement list:
+
+1. Reduce mobile landing banner height
+2. Embed menu ("Pick Your Favourites") on homepage  → **DEFERRED on user request**
+3. Sticky mobile nav buttons (Menu, Offers, Events, Feedback)
+4. "View Full Menu" opens at top of page
+5. Improve online menu loading speed
+6. Active-category tracking while scrolling menu + sticky top category bar
+7. Cart page opens at top when adding from homepage
+8. Best Sellers: original price, discounted price, % off
+9. PWA Home Screen Shortcut prompt
+10. Admin Notifications page to send promotional alerts to subscribers
+11. Sync "Online Store Settings" in Admin Portal with the live website
+12. (CRITICAL) Fix Opening Hours bug — customers couldn't order even when open
 
 ## Architecture
-- Backend: FastAPI (`/app/backend/server.py`) — single file, MongoDB via motor, JWT (cookies + Bearer), Stripe payments, Twilio WhatsApp, APScheduler, SMTP for emails.
-- Frontend: React 19 + craco + Tailwind. Three contexts — `AuthContext` (customer), `StaffAuthContext` (POS staff), `CartContext`. React Router v7. axios via `src/lib/api.js` (auto-selects customer/admin token by URL).
-- DB collections: `users`, `customers`, `menu_items`, `categories`, `online_orders`, `offers`, `reviews`, `loyalty_settings`, `loyalty_rewards`, `loyalty_transactions`, `online_settings`, `event_bookings`, `payment_transactions`.
+- Frontend: React + Tailwind (CRA, port 3000) in `/app/frontend`
+- Backend: FastAPI (port 8001) in `/app/backend/server.py`
+- DB: MongoDB
+- Workflow: User does NOT use Save-to-Github; they manually copy files from Emergent into their repo (`/app/_copy_paste/` is the staging folder).
 
-## V2 — What's been implemented (Iteration 1, 11 Jun 2026)
-### Backend (`server.py`)
-- ✅ Google OAuth: `POST /api/customer/google` — verifies ID token via `google.oauth2.id_token.verify_oauth2_token`, find-or-create customer, issues normal customer JWT.
-- ✅ Facebook OAuth: `POST /api/customer/facebook` — re-verifies access_token via Graph API `debug_token`, same JWT shape.
-- ✅ Offer model: added `min_order_amount` (Pydantic + Mongo + GET/POST/PUT). Enforced in `create_online_order` coupon validation (400 if subtotal below min).
-- ✅ Reward stacking rule: HTTPException 400 when a `discount_percent`/`discount_fixed` reward is combined with a coupon code. Free-item rewards still stack.
-- ✅ Live operations on accepted orders: `PUT /api/online-orders/{id}/operations` accepts `prep_time_min` (1..240), `delivery_fee_override` (≥0), `free_delivery` (bool). Total is recomputed when fee changes.
-- ✅ Public tracking `/api/track/{id}` now exposes `prep_time_min` (default 30), `response_deadline_seconds` (2-min window for pending orders, computed per-request), `accepted_at`, `delivery_fee_overridden`.
-- ✅ Admin Reviews crash fix: `/api/admin/reviews` no longer crashes when feedback rows have `order_id=None`. Returns `order_id="", is_feedback=true` for feedback entries. Also surfaces `customer_email`, `customer_phone` on feedback.
+## Implementation Log
 
-### Frontend
-- ✅ `<GoogleOAuthProvider>` wrapped around the app in `App.js`.
-- ✅ New `SocialLoginButtons` component (Google credential flow + Facebook JS SDK with `public_profile,email` scope) wired into both `LoginPage` and `RegisterPage`.
-- ✅ `AuthContext.socialLogin(provider, payload)` calls the corresponding backend endpoint and stores the same `knb_token` in localStorage.
-- ✅ `AdminOrders.jsx`: kept existing Accept/Reject/Modify color-coded buttons (green/red/amber). Strengthened RejectModal copy to "Are you sure you want to reject this order?". Added a live `ResponseCountdown` chip on pending orders (counts down from 2:00). Added `OperationsPanel` (prep time +/- 5 min, delivery fee input, "Make Free" button) on accepted/preparing/ready/out_for_delivery orders.
-- ✅ `OrderSuccessPage.jsx`: rewritten to poll `/api/track/{id}` every 3s and auto-redirect to `/track/{id}` when status leaves "pending". Shows live 2-min countdown driven by server `response_deadline_seconds` plus a prominent **Call Restaurant** button.
-- ✅ `TrackingPage.jsx`: pending banner now shows the same 2-min countdown. After acceptance, surfaces live `prep_time_min` and current `delivery_fee` (with FREE / by restaurant tag when overridden). Phone number for the Call Restaurant button is sourced from `/api/public/restaurant-info` (no more hardcoded fallback).
-- ✅ Diamond reward UX: `CartContext` clears `localStorage.selected_reward` whenever the cart becomes empty (via `clear()` or removing last item). New event `rewardSelectionChanged` keeps the reward chip in sync across pages.
-- ✅ `CartPage` + `CheckoutPage`: reward chip with a remove button. Removing the reward does NOT debit Diamonds (debit only happens server-side on order create).
-- ✅ `CheckoutPage.applyCoupon`: enforces offer `min_order_amount` on the client AND prevents stacking a coupon with a discount-Diamond reward (tells user which to remove).
-- ✅ `AdminOffers.jsx`: new `min_order_amount` field on the form; displayed on the card when > 0.
-- ✅ `ReviewManagement.jsx`: rewritten to use the authenticated `api` axios instance (was using raw `axios` + cookie, which is why "Failed to load reviews" showed). Added separate "Order Reviews" / "Private Feedback" tabs, with mailto/tel actions on private feedback.
-- ✅ `ReceiptModal.js` (legacy POS receipt): print iframe now serializes the rendered `<QRCodeSVG/>` nodes from the preview (via `data-print-qr="find-us"|"review"` attrs and `XMLSerializer`) so the Find-Us and Rate-Order QR codes actually appear on paper/PDF prints.
+### 2026-06-19 — Round 4: Second-order bonus + Guest gate
+- **`backend/server.py`**: new `personal_coupons` collection. On `PUT /online-orders/{id}/status` with `status=delivered`, if this is the customer's 1st-ever delivered order AND they don't already have a `second_order_bonus` coupon, mint one (`WELCOME2-<6 hex>`, Rs. 50 off, 30-day expiry, single-use, tied to `customer_id`).
+- **`backend/server.py`**: new `GET /api/personal-coupons/me` (auth required) returns active (unused + unexpired) personal coupons for the signed-in customer.
+- **`backend/server.py`**: order-place `coupon_code` validation now checks `personal_coupons` first — verifies ownership (must match `customer_id`), expiry, not-used. Marks as used after order insert.
+- **`backend/server.py`**: indexes added: `personal_coupons.code` (unique) and `(customer_id, used)`.
+- **`frontend/src/components/GuestGateSheet.jsx`** (new): reusable bottom-sheet / modal asking guests to sign in with optional "Continue as guest" escape hatch. `data-testid` attributes cover gate, signin, continue-guest, close.
+- **`frontend/src/pages/OffersPage.jsx`**: For signed-in users, shows red "Just for you" panel with their personal coupons (tap to copy). For guests, shows a teaser banner that opens the gate. Tapping any public coupon code also opens the gate (with "Continue as guest" fallback that just copies the code).
+- **`frontend/src/pages/RewardsPage.jsx`**: Removed forced guest redirect. Catalog now public. Balance card swaps to "Sign in to see your balance" CTA when not signed in. "Use" button on each reward opens the gate for guests. Card opacity dimming only applies to signed-in users with insufficient balance.
+- **`frontend/src/pages/ProfilePage.jsx`**: "Just for you" panel listing the customer's personal coupons under the Diamond balance card. Refreshes alongside diamond balance/orders.
+- **`frontend/src/pages/CheckoutPage.jsx`**: `applyCoupon()` now checks personal coupons before falling back to public offers. Added auto-apply effect: on mount (if signed in and no coupon already set), fetches `/personal-coupons/me` and auto-fills + applies the top coupon. Toast: "Your personal coupon X was auto-applied".
 
-## What's deferred to a follow-up iteration (P1/P2 backlog)
-1. Web Push notifications (VAPID + Service Worker + permission UX). Defer — needs ~half a session on its own.
-2. Contact Us page (#13) — straightforward static + form.
-3. Diamond History page (#14) — exists partially via `/api/loyalty/transactions`; needs a dedicated `/diamonds` route.
-4. Vercel deployment guide (#2) — produce a step-by-step `DEPLOY_VERCEL.md` and a sample `vercel.json` for the React build; backend stays on Emergent or moves to Railway. Document DNS for karachinaseebbiryani.com.
-5. Review display order control (admin setting: newest / highest / lowest first).
-6. Location permission prompt with stronger copy (#17). The existing `detectLocation` button already requests geolocation; we need a banner that explains *why* and an explicit "I'm ordering for someone else" toggle for the address field.
-7. Loyalty: display "Estimated Diamonds to be earned" on Checkout (#12) — use `loyalty_settings.earning_rate` and `min_order_for_points`.
-8. Admin private feedback emailing (#10) — wire SMTP send on `POST /api/feedback` to `FEEDBACK_RECIPIENT_EMAIL` env var (already in .env).
-9. Push notifications fix (#15).
+### 2026-06-19 — Round 3: 10-issue batch
+- **`backend/server.py`** (issue #2 — coupon abuse): Added `one_time_per_customer` boolean to `OfferCreate`/`OfferUpdate` models. Enforce server-side: if a coupon is flagged one-time, reject when an order already exists with that `coupon_code` + same `customer_id` (signed-in) or same `phone` (guest). Added a startup backfill that flips any `WELCOME*` / `FIRST*` codes to `one_time_per_customer=True`. Added composite indexes `(coupon_code, customer_id)` and `(coupon_code, phone)` so the lookup is O(log n) at scale.
+- **`backend/server.py`** (issue #8 — free item visible pre-order): `/loyalty/rewards` now enriches `free_item` rewards with the linked menu item's `name`, `image_url`, `price` so the client can render a proper "1× Salad · FREE · Diamond Reward · Rs. 0" line in cart/checkout summary.
+- **`frontend/src/pages/CartPage.jsx`** + **`CheckoutPage.jsx`** (issue #8): Show a green free-item line item in the order summary when the customer's selected reward is a free_item — uses the new `free_item_name`/`free_item_image` from the backend.
+- **`frontend/src/pages/admin/AdminOrders.jsx`** (issue #9 — restaurant context): Added a yellow "Rewards / Discounts applied" panel under each order's items list. Shows coupon code + savings, and the loyalty reward title + reward_type detail (% off, Rs off, free item). Free items in the items list are highlighted in emerald with "FREE" instead of the price.
+- **`frontend/src/pages/admin/AdminOrders.jsx`** + **`frontend/src/index.css`** (issue #10 — blinking status): Added 5 keyframe animations (`pulse-ring`, `pulse-ring-blue`, `-orange`, `-yellow`, `-purple`) and matching `status-pulse-<status>` classes. The status `<select>` is wrapped in a div with that class, so non-terminal statuses get a colored pulsing ring. Terminal states (delivered/rejected/cancelled) have no matching class → no animation.
+- **`frontend/src/index.css`** (issue #7 — mobile zoom-out): Added `overflow-x: hidden` to both `<html>` and `<body>` so a wide element doesn't push the viewport sideways and trigger mobile browsers to auto-zoom-out.
+- **`frontend/src/pages/OffersPage.jsx`** + **`RewardsPage.jsx`** (issue #1a — 4 per screen mobile): Changed mobile grid from `grid-cols-1` → `grid-cols-2` with compacted padding, smaller fonts and shorter line-clamps so two columns x two rows = 4 cards visible on a phone.
+- **`frontend/src/pages/ProfilePage.jsx`** (issue #1b — diamond balance sync): Added a Diamond balance card at the top of the Profile page that polls `/loyalty/balance` every 30s, refreshes on window focus, and refreshes on the `diamondsUpdated` event. Same listener also re-fetches orders so order statuses stay current.
+- **`frontend/src/pages/UnifiedLoginPage.jsx`** (issue #4): Re-titled to **"Staff / POS Sign In"** with a small "Customer? Use customer sign-in →" link, so when a logged-in customer accidentally hits `/admin/pos` they understand this isn't the customer page.
 
-## Test Coverage Status
-- Backend iteration 6 (V2): **15/15 PASS** — see `/app/test_reports/iteration_6.json` and `/app/backend/tests/test_iteration6_v2.py`. Covers: social login negative paths, offer min_order, coupon+reward stacking, admin reviews crash fix, /track v2 fields, operations endpoint (prep + delivery override + free + 400 guard), happy-path regressions.
-- Frontend V2 not yet covered by automated tests — visual verification only (login page renders both social buttons correctly).
+### 2026-06-17 — P0 Bug Fixes (Round 2)
+- **`frontend/src/lib/api.js`** (issue #4 — mobile Google sign-in order linkage): split the `/online-orders` routing — `POST /online-orders` is now always treated as customer-facing (uses `knb_token`, never `knb_admin_token`). Was previously misrouted as an admin call when both tokens existed in localStorage, causing customer orders placed after Google sign-in to be created with `customer_id: null` and never appear in Order History.
+- **`backend/server.py`** (issue #5 — free-item Diamond reward): replaced the `pass` stub at the `reward_type == "free_item"` branch. Now resolves the menu item via `reward_value`, appends an `OnlineOrderItem` with `price=0.0, quantity=1` and `name="<item name> (FREE — Diamond Reward)"`. The free item appears both in the customer order summary and the restaurant's kitchen ticket. Diamonds are still deducted, but no longer silently — the customer actually receives the freebie.
+- **`frontend/src/pages/TrackingPage.jsx`** (issue #2 — review CTA after delivery): added a prominent green "Delivered! How was it?" banner linking to `/review/{id}` that surfaces immediately when `order.status === "delivered"`.
+- **`frontend/src/components/Header.jsx`** (issue #4 — profile/diamonds discoverability on mobile): mobile sticky chip row now shows a yellow Diamond-balance chip + a black profile chip (first name) when the user is signed in, and a red Sign In chip when not. No more burrowing into the hamburger to find diamonds/profile.
+- **`frontend/src/pages/MenuPage.jsx`** (issue #6 — item descriptions invisible): added a 2-line description below the item name on `CompactCard`. Was previously only shown on the comfortable view.
 
-## Deployment readiness (12 Jun 2026) — Fly.io + Vercel + MongoDB Atlas
-User chose: backend → Fly.io, frontend → Vercel, DB → MongoDB Atlas.
-- ✅ `backend/Dockerfile` (python:3.11-slim, uvicorn :8080, emergentintegrations extra index) + `backend/.dockerignore`.
-- ✅ `backend/fly.toml` — always-on single machine (APScheduler + JWT INSTANCE_ID constraints), volume `knb_uploads` → `/app/uploads`, health check on `/api/public/restaurant-info`.
-- ✅ `frontend/vercel.json` — SPA rewrites for React Router deep links.
-- ✅ `DEPLOY_PRODUCTION.md` — full phase A→D guide (Atlas → Fly secrets/volume/deploy → Vercel env/build → custom domain), checklist + troubleshooting table.
-- ✅ Cross-domain auth fix (minimal, backward compatible): cookies now use env-driven `COOKIE_SECURE`/`COOKIE_SAMESITE` (defaults `false`/`lax` = unchanged locally); CORS `allow_credentials=True` only when `CORS_ORIGINS` lists explicit origins (legacy POS pages auth via cookies and would 401 cross-site otherwise). Production must set `COOKIE_SAMESITE=none COOKIE_SECURE=true CORS_ORIGINS=<frontend origin>`.
-- ✅ Regression: 13/15 pass on `tests/test_iteration6_v2.py` (2 failures are env-only: Google/FB keys empty → 503 by design). `yarn build` compiles. Admin login + cookie flags verified via curl.
+### 2026-06-17 — Phase A (done, user verifying)
+- `frontend/src/components/ScrollToTop.jsx` (new): scroll-to-top on route change.
+- `frontend/src/components/Layout.jsx`: mount ScrollToTop.
+- `frontend/src/pages/HomePage.jsx`: shorter mobile hero (`py-10 sm:py-16 md:py-28 lg:py-36`), Best Seller cards now use `PriceBlock` + `Badges` (strikethrough original price + % OFF badge + variation picker on add).
+- `frontend/src/components/Header.jsx`: sticky mobile inline-nav chips (Menu/Offers/Events/Feedback).
+- `backend/server.py`: hardened `_parse_hhmm` (accepts "9:00", "09:00", "9", trims whitespace) + overnight wrap-around support in opening-hours evaluator.
+- `frontend/src/components/ClosedBanner.jsx`: uses backend's evaluated open/close state.
 
-## Next Action Items
-1. USER ACTION: run the deploy per `DEPLOY_PRODUCTION.md` (needs Fly/Vercel/Atlas accounts; agent cannot run flyctl/vercel auth).
-2. Set production integration keys on Fly (Google/Facebook OAuth, Stripe live key + webhook, Twilio, EMERGENT_LLM_KEY) and add prod domain to Google OAuth authorized origins.
-3. Frontend automated tests for: social login UI, order success auto-redirect, AdminOrders OperationsPanel, AdminOffers min-order, ReviewManagement reviews/feedback tabs, reward chip add/remove.
-4. Implement P1 backlog items (push notifications, Contact Us, Diamond History, review sort control, location prompt, estimated Diamonds on checkout, feedback SMTP).
+Covers items 1, 3, 4, 7, 8 (display), 12.
+
+### 2026-06-17 — Phase B Task 2 + 3 (done, agent-tested)
+- `frontend/src/pages/MenuPage.jsx`:
+  - Sectioned layout (all categories rendered, no client-side filter).
+  - Sticky category bar at `top-0 z-30` (pinned to viewport top — sits where header was when header auto-hides).
+  - IntersectionObserver (`rootMargin: "-25% 0px -60% 0px"`) auto-updates `activeCat` as user scrolls.
+  - Click on category chip → smooth scroll to that section (with 90px offset).
+  - Active chip auto-scrolls horizontally into view in the tab bar.
+  - Loading skeleton grid while `/api/menu` resolves.
+  - Search now filters by name + description across all sections.
+- `frontend/src/components/Header.jsx`:
+  - Auto-hide on scroll-down (>120px scrollY, >6px delta), reveal on scroll-up.
+  - Disabled while mobile hamburger panel is open.
+
+Covers items 5 (perceived perf via skeletons), 6.
+
+## Phase B Task 1 — DEFERRED
+User explicitly said "leave 1 i dont need it anymore" — homepage menu embed is NOT being built.
+
+## Roadmap (P0 → P2)
+- **P1**: Item 9 — PWA install prompt (manifest, service worker, beforeinstallprompt UI).
+- **P2**: Item 11 — Sync Admin "Online Store Settings" to the live website (name/logo/identity).
+- **P2**: Item 10 — Admin Notifications UI (web push or in-app banner — decision pending).
+
+## Known Issues / Notes
+- User's preview is on their own deploy, not Emergent's. They manually copy files from `/app/_copy_paste/` into their GitHub repo.
+- Pre-existing lint warnings (`react-hooks/set-state-in-effect`) in Header.jsx exist in baseline and are unrelated to this work.
+- Seed data in Emergent preview has items split as "Chicken Biryani (Half)" / "(Full)" instead of one item with variations — so the variation picker doesn't fire in Emergent's preview, but it WILL fire in the user's prod DB which has true variation arrays.
+
+## 3rd Party Integrations
+- WhatsApp (existing, notifications)
+- OpenAI Whisper (existing, voice)
+
+## Files of Reference (current)
+- `/app/_copy_paste/HOW_TO_UPDATE.md` — step-by-step guide for the user
+- `/app/_copy_paste/*.jsx`, `*.py` — staged copies ready to paste
+- `/app/frontend/src/pages/MenuPage.jsx`
+- `/app/frontend/src/pages/HomePage.jsx`
+- `/app/frontend/src/components/Header.jsx`
+- `/app/frontend/src/components/Layout.jsx`
+- `/app/frontend/src/components/ScrollToTop.jsx`
+- `/app/frontend/src/components/ClosedBanner.jsx`
+- `/app/backend/server.py`

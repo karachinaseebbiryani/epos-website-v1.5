@@ -8,7 +8,7 @@ import pytest
 import requests
 from bson import ObjectId
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://project-handoff-12.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://order-management-139.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
 
