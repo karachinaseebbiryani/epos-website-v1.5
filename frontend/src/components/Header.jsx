@@ -151,18 +151,51 @@ export default function Header() {
                     </Link>
 
                     {user ? (
-                        <div className="hidden md:flex items-center gap-2">
-                            <Link to="/profile" data-testid="profile-link" className="px-3 py-2 rounded-full hover:bg-neutral-100 flex items-center gap-2 text-sm font-semibold text-brand-ink">
-                                <User className="w-4 h-4" /> {user.name?.split(" ")[0] || "Profile"}
+                        <>
+                            {/* Mobile top-right: Diamond balance + Profile chip, always visible
+                                without opening the hamburger so the customer knows their status
+                                at a glance. */}
+                            <Link
+                                to="/rewards"
+                                data-testid="mobile-top-diamonds"
+                                className="md:hidden inline-flex items-center gap-1 px-2.5 h-9 rounded-full bg-brand-yellow text-brand-ink text-xs font-bold"
+                                aria-label="Diamond balance"
+                            >
+                                <Diamond className="w-3.5 h-3.5" fill="currentColor" />
+                                {diamondBalance}
                             </Link>
-                            <button onClick={() => { logout(); navigate("/"); }} data-testid="logout-button" className="w-10 h-10 rounded-full hover:bg-neutral-100 flex items-center justify-center" aria-label="Logout">
-                                <LogOut className="w-4 h-4" />
-                            </button>
-                        </div>
+                            <Link
+                                to="/profile"
+                                data-testid="mobile-top-profile"
+                                className="md:hidden inline-flex items-center justify-center w-9 h-9 rounded-full bg-brand-ink text-white"
+                                aria-label="Profile"
+                            >
+                                <User className="w-4 h-4" />
+                            </Link>
+                            <div className="hidden md:flex items-center gap-2">
+                                <Link to="/profile" data-testid="profile-link" className="px-3 py-2 rounded-full hover:bg-neutral-100 flex items-center gap-2 text-sm font-semibold text-brand-ink">
+                                    <User className="w-4 h-4" /> {user.name?.split(" ")[0] || "Profile"}
+                                </Link>
+                                <button onClick={() => { logout(); navigate("/"); }} data-testid="logout-button" className="w-10 h-10 rounded-full hover:bg-neutral-100 flex items-center justify-center" aria-label="Logout">
+                                    <LogOut className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </>
                     ) : (
-                        <Link to="/login" data-testid="login-link" className="hidden md:inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-brand-red text-white font-semibold text-sm hover:bg-brand-red-dark transition-colors">
-                            Sign In
-                        </Link>
+                        <>
+                            {/* Mobile top-right: compact red Sign-in pill so guests can sign in
+                                without opening the hamburger menu. */}
+                            <Link
+                                to="/login"
+                                data-testid="mobile-top-signin"
+                                className="md:hidden inline-flex items-center px-3.5 h-9 rounded-full bg-brand-red text-white text-xs font-bold hover:bg-brand-red-dark"
+                            >
+                                Sign In
+                            </Link>
+                            <Link to="/login" data-testid="login-link" className="hidden md:inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-brand-red text-white font-semibold text-sm hover:bg-brand-red-dark transition-colors">
+                                Sign In
+                            </Link>
+                        </>
                     )}
 
                     <button

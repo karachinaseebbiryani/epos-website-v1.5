@@ -2552,6 +2552,13 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     personal_coupon_id = None
     if order.coupon_code:
         code_normalized = order.coupon_code.upper().strip()
+        # Sign-in gate at the API layer. Without this a guest could just memorize the
+        # coupon code shown on the public offers page and type it manually, completely
+        # bypassing the front-end sign-in popup. Requiring an authenticated customer here
+        # ALSO means the per-customer abuse limits below are enforceable by customer_id
+        # instead of the easily-spoofable phone number alone.
+        if not cust:
+            raise HTTPException(status_code=401, detail="Please sign in to use a coupon. Offers and discounts are linked to your account.")
         # 1) Personal customer coupons (e.g. WELCOME2-XXXXXX issued on first-order delivery)
         #    take priority over public offers. They are single-use, owned by a specific
         #    customer, and have an expiry. We must verify ownership server-side — never

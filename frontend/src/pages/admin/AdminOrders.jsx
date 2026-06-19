@@ -405,6 +405,20 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     </div>
                 )}
 
+                {/* One-tap "Mark Delivered" — designed for staff who don't want to fiddle with
+                    a dropdown. Big, green, unmissable. Only shows on non-terminal orders so once
+                    delivered it disappears. Anyone on the floor can press it. */}
+                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "cancelled" && (
+                    <button
+                        onClick={() => onUpdateStatus("delivered")}
+                        disabled={busyId === o.id}
+                        data-testid={`order-mark-delivered-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-full px-5 py-2.5 text-sm font-black uppercase tracking-wider shadow-md shadow-emerald-600/30 transition-colors disabled:opacity-60"
+                    >
+                        <CheckCircle2 className="w-5 h-5" /> Mark Delivered
+                    </button>
+                )}
+
                 {isAccepted && o.modified && !o.modification_pending && (
                     <button onClick={onModify} data-testid={`order-edit-again-${o.id}`} className="inline-flex items-center gap-2 bg-white border border-amber-300 text-amber-700 rounded-full px-4 py-2 text-xs font-semibold hover:bg-amber-50">
                         <Pencil className="w-3.5 h-3.5" /> Edit again

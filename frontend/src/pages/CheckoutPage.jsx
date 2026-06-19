@@ -110,6 +110,34 @@ export default function CheckoutPage() {
         if (!user) return;
         if (form.coupon_code || coupon) return;
         let cancelled = false;
+        // 1) PUBLIC coupon staged from the Offers page (tap-to-apply). Highest priority
+        //    because the customer explicitly chose this code.
+        let stagedCode = null;
+        try { stagedCode = localStorage.getItem("pending_coupon_code"); } catch { /* */ }
+        if (stagedCode) {
+            setForm((f) => ({ ...f, coupon_code: stagedCode }));
+            // Look up the offer details to compute the discount immediately.
+            api.get("/offers").then(({ data }) => {
+                if (cancelled) return;
+                const found = (data || []).find((o) => (o.coupon_code || "").toUpperCase() === stagedCode.toUpperCase() && o.active);
+                if (!found) return;
+                const minAmount = Number(found.min_order_amount || 0);
+                if (minAmount > 0 && subtotal < minAmount) {
+                    toast.error(`Add Rs. ${(minAmount - subtotal).toFixed(0)} more to unlock ${stagedCode}.`);
+                    return;
+                }
+                let discount = 0;
+                if (found.discount_percent) discount = (subtotal * found.discount_percent) / 100;
+                else if (found.discount_amount) discount = found.discount_amount;
+                setCoupon({ ...found, discount: Math.min(discount, subtotal) });
+                toast.success(`Coupon ${stagedCode} auto-applied · saved Rs. ${Math.min(discount, subtotal).toFixed(0)}`);
+            }).catch(() => { /* silent */ });
+            // Whether or not the look-up succeeds, consume the staged code so it doesn't
+            // re-apply itself on every revisit.
+            try { localStorage.removeItem("pending_coupon_code"); } catch { /* */ }
+            return () => { cancelled = true; };
+        }
+        // 2) Personal coupons (e.g. WELCOME2-XXXXXX) — auto-applied as a fallback.
         api.get("/personal-coupons/me").then(({ data }) => {
             if (cancelled || !data || !data.length) return;
             const top = data[0];
@@ -235,6 +263,16 @@ export default function CheckoutPage() {
     };
 
     const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
+    // Preview the Diamond reward's effect on the total BEFORE placing the order, so the
+    // customer doesn't have to take it on faith. Free-item rewards already render their
+    // own line item (Rs. 0) elsewhere — this block handles the discount-type rewards.
+    let rewardDiscountPreview = 0;
+    if (reward && reward.reward_type === "discount_percent") {
+        rewardDiscountPreview = Math.round((total * Number(reward.reward_value || 0)) / 100);
+    } else if (reward && reward.reward_type === "discount_fixed") {
+        rewardDiscountPreview = Math.min(Number(reward.reward_value || 0), total);
+    }
+    const totalAfterReward = Math.max(0, total - rewardDiscountPreview);
     const enabledMethods = settings?.payment_methods || { cod: true };
 
     const submitOrder = async (e) => {
@@ -488,16 +526,26 @@ export default function CheckoutPage() {
 
                         <div className="border-t border-neutral-100 pt-4 space-y-1.5 text-sm">
                             <div className="flex justify-between"><span className="text-neutral-500">Subtotal</span><span>Rs. {subtotal}</span></div>
-                            {coupon && <div className="flex justify-between text-green-600 font-semibold"><span>Discount</span><span>− Rs. {coupon.discount.toFixed(0)}</span></div>}
+                            {coupon && <div className="flex justify-between text-green-600 font-semibold"><span>{coupon.personal ? "Personal coupon" : "Coupon"} discount</span><span>− Rs. {coupon.discount.toFixed(0)}</span></div>}
                             <div className="flex justify-between">
                                 <span className="text-neutral-500">Delivery {delivery.distance_km !== null && `(${delivery.distance_km}km)`}</span>
                                 <span data-testid="checkout-delivery-fee" className={delivery.fee === 0 ? "text-green-600 font-semibold" : ""}>
                                     {delivery.fee === 0 ? (delivery.distance_km !== null ? "Free" : "—") : `Rs. ${delivery.fee}`}
                                 </span>
                             </div>
+                            {rewardDiscountPreview > 0 && (
+                                <div data-testid="checkout-reward-discount" className="flex justify-between text-amber-700 font-semibold">
+                                    <span className="inline-flex items-center gap-1">
+                                        <Diamond className="w-3.5 h-3.5" fill="currentColor" />
+                                        Diamond discount
+                                        {reward.reward_type === "discount_percent" && ` (${reward.reward_value}%)`}
+                                    </span>
+                                    <span>− Rs. {rewardDiscountPreview.toFixed(0)}</span>
+                                </div>
+                            )}
                             <div className="flex justify-between pt-2 border-t border-neutral-100">
                                 <span className="font-display font-bold text-brand-ink">Total</span>
-                                <span data-testid="checkout-total" className="font-display font-black text-2xl text-brand-red">Rs. {total.toFixed(0)}</span>
+                                <span data-testid="checkout-total" className="font-display font-black text-2xl text-brand-red">Rs. {totalAfterReward.toFixed(0)}</span>
                             </div>
                         </div>
 

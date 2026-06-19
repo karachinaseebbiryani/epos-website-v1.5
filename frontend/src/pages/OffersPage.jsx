@@ -30,6 +30,18 @@ export default function OffersPage() {
         toast.success(`Copied: ${code}`);
     };
 
+    // Auto-stage the coupon for checkout when a signed-in customer taps it. This is the
+    // sensible flow you asked for — instead of just copying the code (which a guest could
+    // memorize and type in to bypass the gate), the code is saved in localStorage and
+    // automatically applied at /checkout. The backend ALSO refuses any coupon_code from
+    // an un-signed-in request, so neither path leaks discounts to guests.
+    const stageCouponForCheckout = (code) => {
+        if (!code) return;
+        try { localStorage.setItem("pending_coupon_code", code); } catch { /* */ }
+        try { window.dispatchEvent(new Event("pendingCouponChanged")); } catch { /* */ }
+        toast.success(`Coupon ${code} ready — it will apply at checkout.`);
+    };
+
     // When a guest taps the coupon code, open the sign-in gate first. We still allow
     // "Continue as guest" so they're never blocked from copying the public offer code.
     const handleOfferTap = (code) => {
@@ -38,7 +50,7 @@ export default function OffersPage() {
             setPendingCode(code);
             setGateOpen(true);
         } else {
-            copyCode(code);
+            stageCouponForCheckout(code);
         }
     };
 

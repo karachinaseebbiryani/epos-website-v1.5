@@ -24,6 +24,13 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-19 — Round 5: 5 more user-reported issues
+- **`frontend/src/components/Header.jsx`**: mobile top-right now ALWAYS shows two chips when signed in (yellow Diamond balance + black Profile button) and a red "Sign In" pill when not. Visible without opening the hamburger or scrolling.
+- **`frontend/src/pages/CheckoutPage.jsx`**: When a Diamond reward of type `discount_percent` or `discount_fixed` is selected, the order summary now previews the discount BEFORE the order is placed (line item "Diamond discount (10%): − Rs. X") and the displayed total `totalAfterReward` reflects it. Was previously only visible on the tracking page.
+- **`frontend/src/pages/CheckoutPage.jsx`** + **`frontend/src/pages/OffersPage.jsx`**: Tap-to-apply offer flow. When a signed-in customer taps a coupon code on Offers, the code is stored in `localStorage.pending_coupon_code` and the Checkout `useEffect` consumes + auto-applies it (highest priority, then falls back to personal coupons). Toast: "Coupon X auto-applied · saved Rs. Y". Eliminates the "I tapped the code but had to type it manually" confusion.
+- **`backend/server.py`**: Server-side gate — any order with a `coupon_code` from an unauthenticated request is rejected with 401 "Please sign in to use a coupon." Closes the guest-bypass by manual typing (the front-end popup alone wasn't enough).
+- **`frontend/src/pages/admin/AdminOrders.jsx`**: Added a prominent emerald-green **"MARK DELIVERED"** quick-action button on every non-terminal, non-rejected order card (with shadow + uppercase typography). Designed so any restaurant staff can press it without navigating a dropdown. Hides itself once the order reaches a terminal state.
+
 ### 2026-06-19 — Round 4: Second-order bonus + Guest gate
 - **`backend/server.py`**: new `personal_coupons` collection. On `PUT /online-orders/{id}/status` with `status=delivered`, if this is the customer's 1st-ever delivered order AND they don't already have a `second_order_bonus` coupon, mint one (`WELCOME2-<6 hex>`, Rs. 50 off, 30-day expiry, single-use, tied to `customer_id`).
 - **`backend/server.py`**: new `GET /api/personal-coupons/me` (auth required) returns active (unused + unexpired) personal coupons for the signed-in customer.
