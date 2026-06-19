@@ -458,6 +458,27 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     </button>
                 )}
 
+                {/* Rider handoff — once the order is "out for delivery" we have a rider_token.
+                    This copies a WhatsApp-ready link the manager can text to the rider. The
+                    rider opens it on their phone and gets a single-screen delivery view
+                    (navigate, call, mark delivered) — no admin login needed. */}
+                {o.rider_token && o.status !== "delivered" && o.status !== "cancelled" && o.status !== "rejected" && (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const link = `${window.location.origin}/rider/${o.id}?t=${o.rider_token}`;
+                            try { navigator.clipboard.writeText(link); } catch { /* */ }
+                            const wa = `https://wa.me/?text=${encodeURIComponent(`Karachi Naseeb delivery #${(o.id||'').slice(-6).toUpperCase()} — ${link}`)}`;
+                            window.open(wa, "_blank");
+                        }}
+                        data-testid={`order-rider-link-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-[#25D366] hover:bg-[#1ebe57] text-white rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors"
+                        title="Copies link + opens WhatsApp share"
+                    >
+                        Send rider link
+                    </button>
+                )}
+
                 {isAccepted && o.modified && !o.modification_pending && (
                     <button onClick={onModify} data-testid={`order-edit-again-${o.id}`} className="inline-flex items-center gap-2 bg-white border border-amber-300 text-amber-700 rounded-full px-4 py-2 text-xs font-semibold hover:bg-amber-50">
                         <Pencil className="w-3.5 h-3.5" /> Edit again

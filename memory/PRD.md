@@ -24,6 +24,30 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-19 — Round 7: Rider handoff view + Web Push notifications
+
+**Backend (`server.py`)**:
+- Added `pywebpush` dep. VAPID keypair auto-generated on first boot (persisted to `backend/vapid_keys.json` or env-overrideable via `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`).
+- New endpoints:
+  - `GET  /api/push/vapid-public-key` → publishes the public key for the client.
+  - `POST /api/push/subscribe` → upserts a `push_subscriptions` doc keyed by `endpoint` and tied to the signed-in customer.
+  - `POST /api/push/unsubscribe` → deletes a subscription by endpoint (called on logout).
+  - `GET  /api/rider/orders/{order_id}?token=...` → public, token-protected single-order view for delivery staff.
+  - `POST /api/rider/orders/{order_id}/delivered?token=...` → one-tap delivery confirmation that also fires a push to the customer.
+- `PUT /api/online-orders/{order_id}/status`:
+  - Auto-mints `rider_token` (via `secrets.token_urlsafe(16)`) when status transitions to `out_for_delivery`. Token persists for the life of the order so the link stays valid until delivery.
+  - Calls `_notify_customer_order_status` on every status change. Maps each non-terminal status to a friendly title + body and deep-links the customer to `/track/{order_id}`. Failed sends (404/410) auto-drop the subscription.
+
+**Frontend**:
+- New `public/sw.js` — minimal service worker: `push` event displays the OS notification; `notificationclick` focuses the existing tab or opens `/track/{id}`.
+- New `public/manifest.json` — turns the site into an installable PWA (Add to Home Screen) which is also a prerequisite for iOS Web Push support.
+- New `src/lib/push.js` — `ensurePushSubscription({silent})` and `unsubscribePush()` helpers. Caches the VAPID public key in localStorage. Idempotent: safe to call on every Layout mount.
+- `components/Layout.jsx` — calls `ensurePushSubscription({silent:true})` whenever a customer is signed in, so subscriptions refresh silently. Explicit prompt is triggered from `OrderSuccessPage` via a yellow "Enable order alerts" button (the natural opt-in moment).
+- New `src/pages/RiderViewPage.jsx` — mobile-first one-screen rider UI: customer name, status, drop address + GPS shared badge, blue "Navigate in Google Maps" button, tap-to-call phone, items list (free items in green), amount to collect, customer note, sticky bottom **MARK DELIVERED** button. Auto-polls every 5s.
+- `App.js` — registered `/rider/:orderId` route OUTSIDE the customer `Layout` so riders don't see the header / cart chrome.
+- `admin/AdminOrders.jsx` — added a green WhatsApp-styled "Send rider link" button on every non-terminal order with a `rider_token`. Copies link to clipboard AND opens WhatsApp share with the order number prefilled.
+- `OrderSuccessPage.jsx` — added "Enable order alerts" yellow chip next to Track Order CTA. Fires the OS permission prompt; hides itself once granted/denied.
+
 ### 2026-06-19 — Round 6: Variation discounts + Customer location update
 - **`backend/server.py` `/api/menu`**: For items with `discount_type` + `discount_value`, the discount is now applied to EACH variation's price too (Half/Medium/Full all get the % or fixed cut). Each variation in the response now carries `original_price` when discounted so the frontend can render the strikethrough. Root cause of the user's reported "discount badge shows but price doesn't change on variations item" — the variations were sent as raw, un-discounted prices.
 - **`frontend/src/pages/MenuPage.jsx` `PriceBlock`**: When item has variations AND any variation has `original_price > price`, shows "From Rs. {sale_min}" with strikethrough "Rs. {orig_min}". Was previously showing "From Rs. {min}" with no strikethrough for variations items.
