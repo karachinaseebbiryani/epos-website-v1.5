@@ -2,12 +2,22 @@
   "name": "Karachi Naseeb Biryani",
   "short_name": "Karachi Naseeb",
   "description": "Order authentic Karachi-style biryani, BBQ and Pakistani favourites — track live, earn Diamonds.",
-  "start_url": "/",
+  "start_url": "/?utm_source=pwa",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#FFFFFF",
   "theme_color": "#D92D20",
   "orientation": "portrait",
+  "categories": ["food", "lifestyle", "shopping"],
   "icons": [
-    { "src": "/favicon.ico", "sizes": "64x64 32x32 24x24 16x16", "type": "image/x-icon" }
+    { "src": "/api/public/icon", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/api/public/icon", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/api/public/icon", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/api/public/icon", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Order Now", "short_name": "Order", "url": "/menu", "description": "Browse the menu and place an order." },
+    { "name": "Track Orders", "short_name": "Track", "url": "/orders", "description": "See your recent orders and live tracking." },
+    { "name": "Offers", "short_name": "Offers", "url": "/offers", "description": "Today's deals and reward redemptions." }
   ]
 }

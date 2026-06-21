@@ -23,13 +23,18 @@ self.addEventListener("push", (event) => {
     const title = data.title || "Order update";
     const options = {
         body: data.body || "",
-        icon: data.icon || "/favicon.ico",
-        badge: data.badge || "/favicon.ico",
+        icon: data.icon || "/api/public/icon",
+        badge: data.badge || "/api/public/icon",
         data: { url: data.url || "/" },
         tag: data.tag || "order-update",
         renotify: true,
         vibrate: [120, 60, 120],
     };
+    // Large hero image — Android renders this big banner above the body text and
+    // macOS / iOS show it in the expanded card. Skipped silently on older browsers.
+    if (data.image) {
+        options.image = data.image;
+    }
     event.waitUntil(self.registration.showNotification(title, options));
 });
 

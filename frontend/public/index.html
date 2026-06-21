@@ -11,13 +11,75 @@
   gtag('config', 'G-5MKTW97QYT');
 </script>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#D92D20" />
     <link rel="manifest" href="/manifest.json" />
+
+    <!-- Favicon + apple-touch-icon are served from the backend so they auto-update
+         whenever the operator changes the restaurant logo in admin settings. -->
+    <link rel="icon" href="/api/public/icon" />
+    <link rel="shortcut icon" href="/api/public/icon" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/api/public/icon" />
+    <link rel="apple-touch-icon-precomposed" href="/api/public/icon" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Karachi Naseeb" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <title>Karachi Naseeb Biryani & Murg Pulao — Order Online in Lahore</title>
     <meta
         name="description"
-        content="Karachi Naseeb Biryani & Murg Pulao — order authentic Pakistani biryani, pulao, and BBQ online. Cash on Delivery available."
+        content="Karachi Naseeb Biryani & Murg Pulao — order authentic Pakistani biryani, pulao, BBQ and karahi online. Free delivery in Lahore. Cash on Delivery available. Earn Diamonds on every order."
     />
+    <meta name="keywords" content="karachi biryani lahore, naseeb biryani, murg pulao, BBQ delivery Lahore, Pakistani food online order, cash on delivery biryani" />
+    <link rel="canonical" href="https://karachinaseeb.com/" />
+
+    <!-- Open Graph — controls the preview when the link is shared on WhatsApp /
+         Facebook / Twitter. The og:image is served from /api/public/icon so it
+         always reflects the latest logo uploaded in admin settings. -->
+    <meta property="og:type" content="restaurant" />
+    <meta property="og:title" content="Karachi Naseeb Biryani & Murg Pulao" />
+    <meta property="og:description" content="Order authentic Karachi-style biryani, pulao and BBQ online — live tracking, free delivery, Cash on Delivery." />
+    <meta property="og:image" content="/api/public/icon" />
+    <meta property="og:image:alt" content="Karachi Naseeb Biryani logo" />
+    <meta property="og:site_name" content="Karachi Naseeb Biryani" />
+    <meta property="og:locale" content="en_PK" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Karachi Naseeb Biryani & Murg Pulao" />
+    <meta name="twitter:description" content="Order authentic Karachi-style biryani, pulao and BBQ online — live tracking, Cash on Delivery." />
+    <meta name="twitter:image" content="/api/public/icon" />
+
+    <!-- JSON-LD: Restaurant schema. Tells Google + ChatGPT what this business is
+         so the logo shows up on search results, knowledge panel and AI answers. -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "Restaurant",
+        "name": "Karachi Naseeb Biryani and Murg Pulao",
+        "image": "/api/public/icon",
+        "logo": "/api/public/icon",
+        "description": "Authentic Karachi-style biryani, murg pulao, BBQ and karahi delivered hot across Lahore.",
+        "servesCuisine": ["Pakistani", "Biryani", "BBQ", "Karahi"],
+        "priceRange": "Rs",
+        "telephone": "+92-300-4928411",
+        "email": "karachinaseebbiryani599@gmail.com",
+        "address": {
+            "@type": "PostalAddress",
+            "streetAddress": "68 Chatri Chowk, Punjab Small Industry, D Block",
+            "addressLocality": "Lahore",
+            "addressRegion": "Punjab",
+            "addressCountry": "PK"
+        },
+        "acceptsReservations": false,
+        "hasMenu": "/menu",
+        "potentialAction": {
+            "@type": "OrderAction",
+            "target": "/menu",
+            "deliveryMethod": ["http://purl.org/goodrelations/v1#DeliveryModeOwnFleet", "http://purl.org/goodrelations/v1#DeliveryModePickUp"]
+        }
+    }
+    </script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -25,8 +87,6 @@
         href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=Manrope:wght@300;400;500;600;700&display=swap"
         rel="stylesheet"
     />
-
-    <title>Karachi Naseeb Biryani & Murg Pulao — Order Online</title>
 
     <script>
         window.addEventListener(

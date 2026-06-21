@@ -24,6 +24,43 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-21 — Round 9: Push hardening + Image banners + Android 1-tap install + SEO
+
+**Push notification reliability**
+- `backend/server.py`:
+  - `_send_web_push()` now returns `(ok, error_message)` so the exact `WebPushException` text (malformed VAPID, expired endpoint, etc.) bubbles up to the admin UI instead of a silent "1 failed" counter.
+  - New `_vapid_key_health()` does a live `cryptography.serialization.load_pem_private_key()` round-trip on the configured key and reports parsable / parse_error / source.
+  - New `_generate_vapid_keys()` helper used by the regenerate endpoint.
+  - **`GET /api/admin/push/vapid/status`** — admin-only diagnostic returning `{public_key_set, private_key_set, public_key_preview, private_key_is_pem, private_key_has_newlines, source, parsable, parse_error}`.
+  - **`POST /api/admin/push/vapid/regenerate`** — rotates the VAPID keypair, persists to `vapid_keys.json`, wipes every `push_subscriptions` doc (the old subs were signed against the dead key), returns the new public + private key strings so the operator can paste them into hosting env vars.
+
+**Broadcast banner images**
+- **`POST /api/admin/notifications/upload-image`** (multipart) — JPG/PNG/WebP ≤2MB. Uses the existing object-storage helper (`_put_object`) with a dedicated namespace `karachi-naseeb/broadcast-banners/`. Returns absolute `image_url` built from `X-Forwarded-Host` + `X-Forwarded-Proto` so the push service (FCM / Mozilla / Apple) can actually reach it.
+- **`GET /api/public/broadcast-image/{path}`** — no-auth public fetch, hard-prefixes the allowed namespace so a craft request like `/karachi-naseeb/payments/foo.png` returns 404 (path traversal guard).
+- `_send_web_push()` now embeds `image` into the push payload; `sw.js` maps `data.image → options.image` for Android & macOS hero banners.
+- `AdminBroadcastIn` model gained `image: Optional[str]`. Broadcasts persist `image` in `notification_broadcasts` doc + history endpoint returns it.
+
+**Android 1-tap install**
+- `frontend/src/components/AndroidInstallPrompt.jsx` (new) — captures `beforeinstallprompt`, renders a floating bottom-right banner with an Install button that calls the saved `prompt()`. Hidden in standalone mode, after dismiss, or once `appinstalled` fires.
+- Wired into `components/Layout.jsx` alongside the existing iOS prompt.
+
+**SEO logo / favicon / Open Graph / JSON-LD**
+- **`GET /api/public/icon`** — streams the configured `restaurant_logo_url` (handles data: URLs, http(s):// proxying with 10s timeout, transparent-PNG fallback). Cache-Control 1h for real logos, 5min for the fallback.
+- **`GET /api/public/branding`** — returns `{name, logo_url, phone, whatsapp, email, address, opening_hours, lat, lng, social URLs}` from `online_settings` for SEO/SSR consumers.
+- `frontend/public/index.html` — added favicon + apple-touch-icon links (all pointing at `/api/public/icon`), Open Graph (`og:image`, `og:type=restaurant`, etc.), Twitter Card meta, and JSON-LD `@type=Restaurant` schema with address + cuisine + telephone.
+- `frontend/public/manifest.json` — proper 192/512 PNG icons (`any` + `maskable` purposes), `scope`, `categories`, and three home-screen shortcuts (Order Now → /menu, Track → /orders, Offers → /offers).
+
+**Admin Notifications UI rewrite**
+- `pages/admin/AdminNotifications.jsx`:
+  - VAPID health card (green/red) with one-click "Regenerate keys" button.
+  - File-picker banner upload (no URL paste required), with live preview + remove.
+  - Send-test / Send-to-all now surface `errors_sample[0]` in toast.error/warning when failures occur.
+  - History entries show banner thumbnails and a collapsible error-details panel when `failed>0`.
+  - After regenerate, a one-time reveal panel shows the new public/private keys with copy buttons (so the operator can paste them into env vars).
+
+**Testing**
+- `/app/backend/tests/test_iteration7_push.py` (17 tests, all PASS): VAPID status/regen, broadcast image upload (MIME + size + X-Forwarded-Host), public broadcast image (with path traversal guard), broadcast persistence of `image`, public branding/icon. Frontend smoke checks (admin UI, SEO tags, manifest, sw.js, AndroidInstallPrompt) all PASS.
+
 ### 2026-06-21 — Round 8: Admin Notifications UI + iOS A2HS
 
 **Admin Notifications broadcast (Marketing → Notifications)**
