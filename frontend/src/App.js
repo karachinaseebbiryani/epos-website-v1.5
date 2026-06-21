@@ -41,6 +41,7 @@ import AdminEvents from "./pages/admin/AdminEvents";
 import AdminSettings from "./pages/admin/AdminSettings";
 import LoyaltySettings from "./pages/admin/LoyaltySettings";
 import RewardsManagement from "./pages/admin/RewardsManagement";
+import AdminNotifications from "./pages/admin/AdminNotifications";
 import ReviewManagement from "./pages/admin/ReviewManagement";
 import AdminLayout from "./components/AdminLayout";
 
@@ -143,6 +144,7 @@ function App() {
                   <Route path="/admin/reviews" element={<ReviewManagement />} />
                   <Route path="/admin/loyalty-settings" element={<LoyaltySettings />} />
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
+                  <Route path="/admin/notifications" element={<AdminNotifications />} />
                   <Route path="/admin/settings" element={<AdminSettings />} />
 
                   {/* ----- POS Operations (preserved from OLD) ----- */}

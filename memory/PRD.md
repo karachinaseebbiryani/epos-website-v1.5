@@ -24,6 +24,25 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-21 — Round 8: Admin Notifications UI + iOS A2HS
+
+**Admin Notifications broadcast (Marketing → Notifications)**
+- `backend/server.py`: 3 new admin endpoints (auth via existing `get_current_user` + role==admin check):
+  - `POST /api/admin/notifications/broadcast` — accepts `{title, body, url, test_only}`. With `test_only=true`, sends only to subscriptions tied to the admin's email-linked customer doc (preview-on-your-phone before blasting). With `test_only=false`, fans out to every doc in `push_subscriptions`. Records each broadcast in `notification_broadcasts` (sent / failed / audience_size / sent_by / created_at).
+  - `GET  /api/admin/notifications/history` — last 50 broadcast logs.
+  - `GET  /api/admin/notifications/stats` — `{subscriber_count, last_broadcast}` summary card.
+- `frontend/src/pages/admin/AdminNotifications.jsx` (new) — Marketing-style composer: title (60 char limit), message (140 char limit with live counter), optional deep-link URL, "Send test (to me)" yellow button, "Send to all" red button with confirm dialog. Subscriber/history stat cards + recent-broadcast list with sent/failed counts and deep-link annotation.
+- `components/AdminLayout.jsx` — added `Bell` icon nav entry under Online section, between Rewards and Settings.
+- `App.js` — wired `/admin/notifications` route.
+- **VAPID keys are NOT regenerated** — the broadcast endpoint reuses `_send_web_push` and the existing global `VAPID_*` env vars. The production keys configured today stay valid.
+
+**iOS Add-to-Home-Screen + iOS PWA notification opt-in**
+- `frontend/src/components/IosInstallPrompt.jsx` (new):
+  - `<IosInstallPrompt />` — one-shot bottom-right teaching banner visible ONLY on iPhone / iPad Safari, NOT in standalone mode, NOT previously dismissed. Explains "Tap Share → Add to Home Screen". Dismiss state persisted in localStorage (`knb_a2hs_dismissed_v1`).
+  - `<IosEnableNotificationsCard />` — red gradient card with "Enable" button. Renders ONLY for iOS users running the site in standalone (PWA) mode whose push permission is not yet granted. Calls `ensurePushSubscription({silent:false})` from a real user-gesture (required by iOS) and toasts a clear success / "blocked, open iOS Settings" / "couldn't enable" outcome.
+- `components/Layout.jsx` — mounts `<IosInstallPrompt />` (only shows on iOS-Safari non-PWA).
+- `pages/ProfilePage.jsx` — mounts `<IosEnableNotificationsCard />` above the Diamond-balance card.
+
 ### 2026-06-19 — Round 7: Rider handoff view + Web Push notifications
 
 **Backend (`server.py`)**:

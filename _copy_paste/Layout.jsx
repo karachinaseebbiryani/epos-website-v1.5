@@ -6,6 +6,7 @@ import FloatingCart from "./FloatingCart";
 import FloatingWhatsApp from "./FloatingWhatsApp";
 import ClosedBanner from "./ClosedBanner";
 import ScrollToTop from "./ScrollToTop";
+import IosInstallPrompt from "./IosInstallPrompt";
 import { useAuth } from "../contexts/AuthContext";
 import { ensurePushSubscription } from "../lib/push";
 
@@ -29,6 +30,7 @@ export default function Layout() {
             <Footer />
             <FloatingCart />
             <FloatingWhatsApp />
+            <IosInstallPrompt />
         </div>
     );
 }

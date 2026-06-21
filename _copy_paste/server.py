@@ -3298,6 +3298,91 @@ async def push_vapid_public_key():
     return {"public_key": VAPID_PUBLIC_KEY}
 
 
+class AdminBroadcastIn(BaseModel):
+    title: str
+    body: str
+    url: Optional[str] = "/"
+    test_only: bool = False  # If True, only sends to the admin's own subscriptions
+
+
+@api_router.post("/admin/notifications/broadcast")
+async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    """Send a push notification to subscribed customers.
+
+    - `test_only=True` → send only to the calling admin's own subscriptions (so they
+      can preview before blasting everyone).
+    - Otherwise → fan out to every subscription in `push_subscriptions`.
+
+    Records every broadcast in `notification_broadcasts` for the admin history view."""
+    title = (body.title or "").strip()
+    notif_body = (body.body or "").strip()
+    if not title or not notif_body:
+        raise HTTPException(status_code=400, detail="Title and message are required.")
+    url = body.url or "/"
+    if body.test_only:
+        # Test to the admin's own customer-side subscriptions, if any. We look up by the
+        # admin's email-linked customer doc (most restaurant owners ALSO have a customer
+        # account on the same email so they can self-test the customer flow).
+        admin_email = (user.get("email") or "").lower().strip()
+        cust = await db.customers.find_one({"email": admin_email}) if admin_email else None
+        if not cust:
+            raise HTTPException(status_code=400, detail=f"No customer account found for {admin_email}. Create one and enable notifications on your phone to receive test pushes.")
+        subs = await db.push_subscriptions.find({"customer_id": str(cust["_id"])}).to_list(20)
+    else:
+        subs = await db.push_subscriptions.find({}).to_list(10000)
+    if not subs:
+        raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order.")
+    sent, failed = 0, 0
+    for s in subs:
+        ok = await _send_web_push(s, title, notif_body, url)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    # History row — useful for the admin to see what they've blasted out.
+    if not body.test_only:
+        try:
+            await db.notification_broadcasts.insert_one({
+                "title": title,
+                "body": notif_body,
+                "url": url,
+                "sent": sent,
+                "failed": failed,
+                "audience_size": len(subs),
+                "sent_by": user.get("email", ""),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"broadcast log insert failed: {e}")
+    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only}
+
+
+@api_router.get("/admin/notifications/history")
+async def admin_notification_history(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    docs = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(50).to_list(50)
+    return [{
+        "id": str(d.pop("_id")),
+        **d,
+    } for d in docs]
+
+
+@api_router.get("/admin/notifications/stats")
+async def admin_notification_stats(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    """Subscriber count + last broadcast summary, shown on the admin notifications page."""
+    sub_count = await db.push_subscriptions.count_documents({})
+    last = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(1).to_list(1)
+    return {"subscriber_count": sub_count, "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
+
+
 @api_router.get("/rider/orders/{order_id}")
 async def rider_get_order(order_id: str, token: str):
     """Token-protected, no-login rider view. The token is auto-generated on the order
