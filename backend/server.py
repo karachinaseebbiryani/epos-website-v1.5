@@ -84,6 +84,58 @@ if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
         logger_init_err = _e  # captured for later; logger may not exist yet
 
 
+def _generate_vapid_keys() -> tuple[str, str]:
+    """Generate a fresh VAPID keypair and return (public_key_url_b64, private_key_pem).
+    Used by the admin "Regenerate VAPID keys" button when production keys are malformed.
+    Caller is responsible for persisting + wiping stale push_subscriptions."""
+    from py_vapid import Vapid  # type: ignore
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
+    import base64 as _b64
+    _v = Vapid()
+    _v.generate_keys()
+    priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+    pub_raw = _v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode(), priv_pem
+
+
+def _vapid_key_health() -> dict:
+    """Verify the VAPID PEM private key can actually be parsed by `cryptography`.
+    Returns a structured payload the admin UI can render so the operator instantly
+    knows *why* push notifications are failing in prod (90% of the time: env var
+    pasted with stripped newlines)."""
+    info = {
+        "public_key_set": bool(VAPID_PUBLIC_KEY),
+        "private_key_set": bool(VAPID_PRIVATE_KEY),
+        "public_key_preview": (VAPID_PUBLIC_KEY[:14] + "…") if VAPID_PUBLIC_KEY else None,
+        "private_key_is_pem": bool(VAPID_PRIVATE_KEY and "BEGIN" in (VAPID_PRIVATE_KEY or "")),
+        "private_key_has_newlines": bool(VAPID_PRIVATE_KEY and "\n" in (VAPID_PRIVATE_KEY or "")),
+        "source": "env" if (os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY")) else "file",
+        "parsable": False,
+        "parse_error": None,
+    }
+    if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+        info["parse_error"] = "Public or private key missing"
+        return info
+    try:
+        priv = VAPID_PRIVATE_KEY
+        if priv and "BEGIN" in priv and "\n" not in priv:
+            priv = (
+                priv.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
+                    .replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
+            )
+            head, _, tail = priv.partition("-----BEGIN PRIVATE KEY-----\n")
+            mid_body, _, _ = tail.partition("\n-----END PRIVATE KEY-----")
+            mid_body = mid_body.replace(" ", "")
+            wrapped = "\n".join(mid_body[i : i + 64] for i in range(0, len(mid_body), 64))
+            priv = f"{head}-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----"
+        from cryptography.hazmat.primitives import serialization as _ser
+        _ser.load_pem_private_key(priv.encode(), password=None)
+        info["parsable"] = True
+    except Exception as e:
+        info["parse_error"] = f"{type(e).__name__}: {e}"
+    return info
+
+
 def _client_ip(request: Request) -> str:
     """Best-effort client IP. Trusts X-Forwarded-For when set by our edge (Fly proxy)."""
     xff = request.headers.get("x-forwarded-for", "")
@@ -3197,34 +3249,56 @@ class PushSubscriptionIn(BaseModel):
     keys: Dict[str, str]  # { p256dh, auth }
 
 
-async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str = "/") -> bool:
-    """Fire a single push notification. Returns True on success. Silently removes the
-    subscription document if the push service returns 404/410 (subscription expired)."""
+async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str = "/", image: Optional[str] = None) -> tuple[bool, Optional[str]]:
+    """Fire a single push notification. Returns (ok, error_message).
+
+    Returns the actual error string on failure so the admin broadcast UI can surface
+    *why* a send failed (mangled VAPID key, bad endpoint, etc.) instead of a silent
+    'failed' counter. Silently removes the subscription document if the push service
+    returns 404/410 (subscription expired)."""
     if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
-        return False
+        return False, "VAPID keys not configured on server."
     try:
         from pywebpush import webpush, WebPushException  # type: ignore
-        payload = json.dumps({"title": title, "body": body, "url": url, "icon": "/favicon.ico"})
+        # Auto-repair common env-var pasting issues:
+        # - PEM with all newlines stripped → restore them so cryptography can parse.
+        priv = VAPID_PRIVATE_KEY
+        if priv and "BEGIN" in priv and "\n" not in priv:
+            priv = (
+                priv.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
+                    .replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
+            )
+            # Restore the 64-char-line wrapping in the middle.
+            head, mid, tail = priv.partition("-----BEGIN PRIVATE KEY-----\n")
+            mid_body, end_marker, _ = tail.partition("\n-----END PRIVATE KEY-----")
+            mid_body = mid_body.replace(" ", "")
+            wrapped = "\n".join(mid_body[i : i + 64] for i in range(0, len(mid_body), 64))
+            priv = f"{head}-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----"
+        payload_dict = {"title": title, "body": body, "url": url, "icon": "/icon-192.png", "badge": "/icon-192.png"}
+        if image:
+            payload_dict["image"] = image
+        payload = json.dumps(payload_dict)
         webpush(
             subscription_info={"endpoint": subscription_doc["endpoint"], "keys": subscription_doc["keys"]},
             data=payload,
-            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_private_key=priv,
             vapid_claims={"sub": VAPID_EMAIL},
         )
-        return True
+        return True, None
     except WebPushException as e:  # type: ignore
-        # 404 = endpoint gone, 410 = subscription expired. Drop it from the DB.
         status = getattr(getattr(e, "response", None), "status_code", None)
         if status in (404, 410):
             try:
                 await db.push_subscriptions.delete_one({"_id": subscription_doc["_id"]})
             except Exception:
                 pass
-        logger.warning(f"Web push send failed: {e}")
-        return False
+        err = f"push service error: {e}"
+        logger.warning(err)
+        return False, err
     except Exception as e:
-        logger.warning(f"Web push send error: {e}")
-        return False
+        err = f"send error: {type(e).__name__}: {e}"
+        logger.warning(err)
+        return False, err
 
 
 async def _notify_customer_order_status(order_doc: dict, new_status: str):
@@ -3302,7 +3376,8 @@ class AdminBroadcastIn(BaseModel):
     title: str
     body: str
     url: Optional[str] = "/"
-    test_only: bool = False  # If True, only sends to the admin's own subscriptions
+    image: Optional[str] = None  # Large hero image URL shown on the notification (Android)
+    test_only: bool = False
 
 
 @api_router.post("/admin/notifications/broadcast")
@@ -3310,22 +3385,13 @@ async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request)
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-    """Send a push notification to subscribed customers.
-
-    - `test_only=True` → send only to the calling admin's own subscriptions (so they
-      can preview before blasting everyone).
-    - Otherwise → fan out to every subscription in `push_subscriptions`.
-
-    Records every broadcast in `notification_broadcasts` for the admin history view."""
     title = (body.title or "").strip()
     notif_body = (body.body or "").strip()
     if not title or not notif_body:
         raise HTTPException(status_code=400, detail="Title and message are required.")
     url = body.url or "/"
+    image = (body.image or "").strip() or None
     if body.test_only:
-        # Test to the admin's own customer-side subscriptions, if any. We look up by the
-        # admin's email-linked customer doc (most restaurant owners ALSO have a customer
-        # account on the same email so they can self-test the customer flow).
         admin_email = (user.get("email") or "").lower().strip()
         cust = await db.customers.find_one({"email": admin_email}) if admin_email else None
         if not cust:
@@ -3336,28 +3402,27 @@ async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request)
     if not subs:
         raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order.")
     sent, failed = 0, 0
+    errors: list[str] = []
     for s in subs:
-        ok = await _send_web_push(s, title, notif_body, url)
+        ok, err = await _send_web_push(s, title, notif_body, url, image=image)
         if ok:
             sent += 1
         else:
             failed += 1
-    # History row — useful for the admin to see what they've blasted out.
+            if err and len(errors) < 5:
+                errors.append(err)
     if not body.test_only:
         try:
             await db.notification_broadcasts.insert_one({
-                "title": title,
-                "body": notif_body,
-                "url": url,
-                "sent": sent,
-                "failed": failed,
-                "audience_size": len(subs),
+                "title": title, "body": notif_body, "url": url, "image": image,
+                "sent": sent, "failed": failed, "audience_size": len(subs),
+                "errors_sample": errors,
                 "sent_by": user.get("email", ""),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
             logger.warning(f"broadcast log insert failed: {e}")
-    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only}
+    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only, "errors_sample": errors}
 
 
 @api_router.get("/admin/notifications/history")
@@ -3381,6 +3446,192 @@ async def admin_notification_stats(request: Request):
     sub_count = await db.push_subscriptions.count_documents({})
     last = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(1).to_list(1)
     return {"subscriber_count": sub_count, "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
+
+
+@api_router.get("/admin/push/vapid/status")
+async def admin_vapid_status(request: Request):
+    """Diagnostic — shows whether the configured VAPID private key is actually parseable.
+    Operators paste env vars and accidentally strip the PEM newlines all the time;
+    this gives them a clear yes/no instead of a silent 'all pushes failed' counter."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return _vapid_key_health()
+
+
+@api_router.post("/admin/push/vapid/regenerate")
+async def admin_vapid_regenerate(request: Request):
+    """Rotate the VAPID keypair. Wipes every existing push_subscription because the old
+    keys are useless against the new pair — subscribers will re-register automatically
+    next time they open the site (push.js is idempotent).
+
+    Persists to /app/backend/vapid_keys.json so it survives backend restarts in dev.
+    In production, the operator must ALSO update VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
+    env vars on Fly.io (we return the new values so they can copy them)."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+    try:
+        new_pub, new_priv = _generate_vapid_keys()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Key generation failed: {e}")
+    VAPID_PUBLIC_KEY = new_pub
+    VAPID_PRIVATE_KEY = new_priv
+    try:
+        _VAPID_KEYS_PATH.write_text(json.dumps({"public_key": new_pub, "private_key": new_priv}))
+    except Exception as e:
+        logger.warning(f"VAPID keys not persisted to disk: {e}")
+    # Wipe stale subscriptions — they were signed against the old key and will all 410.
+    wiped = await db.push_subscriptions.delete_many({})
+    return {
+        "ok": True,
+        "public_key": new_pub,
+        "private_key": new_priv,
+        "subscriptions_wiped": wiped.deleted_count,
+        "next_step": "Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY env vars on your backend host so the keys survive redeploys.",
+    }
+
+
+# Broadcast image upload — admins drop a banner image (≤2MB) and we serve it back via a
+# *public* URL that the user's push service (Mozilla/FCM/Apple) can fetch. The "image"
+# field on a Web Push payload is rendered as a large hero on Android notifications and
+# in the action panel on macOS/iOS.
+@api_router.post("/admin/notifications/upload-image")
+async def admin_upload_broadcast_image(request: Request, file: UploadFile = File(...)):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    ctype = (file.content_type or "").lower()
+    if ctype not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=400, detail="Banner must be JPG, PNG or WebP")
+    data = await file.read()
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Banner must be 2MB or smaller")
+    ext = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "jpg")
+    storage_path = f"{APP_NAME}/broadcast-banners/{_uuid.uuid4().hex}.{ext}"
+    try:
+        result = _put_object(storage_path, data, ctype)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("broadcast banner upload failed")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:120]}")
+    await db.uploaded_files.insert_one({
+        "id": _uuid.uuid4().hex,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": ctype,
+        "size": result.get("size", len(data)),
+        "purpose": "broadcast_banner",
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_deleted": False,
+    })
+    # The push service (Mozilla / FCM / Apple) downloads this image from a public URL.
+    # `request.base_url` gives us the *internal* cluster hostname behind our proxy
+    # (Cloudflare / Fly), so we prefer X-Forwarded-Host + X-Forwarded-Proto when set —
+    # those reflect the externally reachable origin the push service can actually hit.
+    fwd_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    fwd_proto = request.headers.get("x-forwarded-proto") or ("https" if request.url.scheme == "https" else "http")
+    if fwd_host:
+        base = f"{fwd_proto}://{fwd_host}"
+    else:
+        base = str(request.base_url).rstrip("/")
+    public_url = f"{base}/api/public/broadcast-image/{result['path']}"
+    return {"ok": True, "image_url": public_url, "path": result["path"]}
+
+
+@api_router.get("/public/broadcast-image/{path:path}")
+async def public_broadcast_image(path: str):
+    """Public (no-auth) image fetch. Push services (FCM/Mozilla/Apple) need to pull
+    the banner from a publicly reachable URL — they don't carry user cookies."""
+    # Only serve files our admin uploaded as broadcast banners — never expose payment
+    # screenshots or other private uploads through this route.
+    if not path.startswith(f"{APP_NAME}/broadcast-banners/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        data, ctype = _get_object(path)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(
+        content=data,
+        media_type=ctype or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@api_router.get("/public/branding")
+async def public_branding():
+    """SEO + favicon endpoint. Returns the restaurant identity that other parts of the
+    app (index.html JSON-LD, manifest.json icons, Open Graph tags) should reflect.
+    Also used by the iOS install prompt to display the right logo."""
+    s = await get_online_settings_doc()
+    return {
+        "name": s.get("restaurant_name") or "Karachi Naseeb Biryani",
+        "logo_url": s.get("restaurant_logo_url") or "",
+        "phone": s.get("restaurant_phone") or "",
+        "whatsapp": s.get("restaurant_whatsapp") or "",
+        "email": s.get("restaurant_email") or "",
+        "address": s.get("restaurant_address") or "",
+        "opening_hours": s.get("opening_hours") or "",
+        "facebook_url": s.get("facebook_url") or "",
+        "instagram_url": s.get("instagram_url") or "",
+        "twitter_url": s.get("twitter_url") or "",
+        "google_maps_url": s.get("google_maps_url") or "",
+        "lat": s.get("restaurant_lat"),
+        "lng": s.get("restaurant_lng"),
+    }
+
+
+@api_router.get("/public/icon")
+async def public_icon():
+    """Streams the configured restaurant logo. Powers /favicon.ico, the apple-touch-icon
+    and the manifest.json icons so search engines + the OS shortcut all pick the right
+    logo without the operator having to upload three sizes manually.
+
+    Falls back to a 1x1 transparent PNG so browsers don't spam 404s when no logo is set."""
+    s = await get_online_settings_doc()
+    logo = (s.get("restaurant_logo_url") or "").strip()
+    if logo:
+        # Case 1: data: URL — decode and serve directly.
+        if logo.startswith("data:"):
+            try:
+                head, b64 = logo.split(",", 1)
+                ctype = head.split(";")[0].replace("data:", "") or "image/png"
+                import base64 as _b64x
+                return Response(
+                    content=_b64x.b64decode(b64),
+                    media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+            except Exception:
+                pass
+        # Case 2: external URL — proxy it so we control caching + same-origin.
+        if logo.startswith("http://") or logo.startswith("https://"):
+            try:
+                async with httpx.AsyncClient(timeout=10) as cx:
+                    r = await cx.get(logo)
+                if r.status_code == 200 and r.content:
+                    return Response(
+                        content=r.content,
+                        media_type=r.headers.get("content-type", "image/png"),
+                        headers={"Cache-Control": "public, max-age=3600"},
+                    )
+            except Exception:
+                pass
+    # Fallback — transparent 1x1 PNG so the browser caches *something* and stops
+    # hammering this endpoint. Operator hasn't uploaded a logo yet.
+    import base64 as _b64x
+    transparent_png = _b64x.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )
+    return Response(
+        content=transparent_png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @api_router.get("/rider/orders/{order_id}")
