@@ -29,6 +29,13 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 |---|---|---|
 | 1 | `/app/_copy_paste/server.py` ⭐ critical | `backend/server.py` |
 
+#### Frontend — public/ root (3 files)
+| # | From (Emergent) | To (your repo) |
+|---|---|---|
+| 1a | `/app/_copy_paste/sw.js` ⭐ critical | `frontend/public/sw.js` |
+| 1b | `/app/_copy_paste/manifest.json` ⭐ critical | `frontend/public/manifest.json` |
+| 1c | `/app/_copy_paste/index.html` ⭐ critical | `frontend/public/index.html` |
+
 #### Frontend — pages (10 files)
 | # | From (Emergent) | To (your repo) |
 |---|---|---|
@@ -42,15 +49,18 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 | 9 | `/app/_copy_paste/ProfilePage.jsx` | `frontend/src/pages/ProfilePage.jsx` |
 | 10 | `/app/_copy_paste/UnifiedLoginPage.jsx` | `frontend/src/pages/UnifiedLoginPage.jsx` |
 | 11 | `/app/_copy_paste/AdminOrders.jsx` | `frontend/src/pages/admin/AdminOrders.jsx` |
+| 11b | `/app/_copy_paste/AdminNotifications.jsx` ⭐ critical | `frontend/src/pages/admin/AdminNotifications.jsx` |
 
-#### Frontend — components (4 files)
+#### Frontend — components (5 files)
 | # | From (Emergent) | To (your repo) |
 |---|---|---|
 | 12 | `/app/_copy_paste/Header.jsx` | `frontend/src/components/Header.jsx` |
-| 13 | `/app/_copy_paste/Layout.jsx` | `frontend/src/components/Layout.jsx` |
+| 13 | `/app/_copy_paste/Layout.jsx` ⭐ critical | `frontend/src/components/Layout.jsx` |
 | 14 | 🆕 `/app/_copy_paste/ScrollToTop.jsx` NEW | `frontend/src/components/ScrollToTop.jsx` |
 | 15 | `/app/_copy_paste/ClosedBanner.jsx` | `frontend/src/components/ClosedBanner.jsx` |
 | 16 | 🆕 `/app/_copy_paste/GuestGateSheet.jsx` NEW | `frontend/src/components/GuestGateSheet.jsx` |
+| 16b | 🆕 `/app/_copy_paste/IosInstallPrompt.jsx` NEW | `frontend/src/components/IosInstallPrompt.jsx` |
+| 16c | 🆕 `/app/_copy_paste/AndroidInstallPrompt.jsx` NEW | `frontend/src/components/AndroidInstallPrompt.jsx` |
 
 #### Frontend — other (2 files)
 | # | From (Emergent) | To (your repo) |
@@ -62,7 +72,37 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 
 ---
 
-## ✅ Everything that's been fixed / added (Phase A through Round 4)
+## 🆕 Round 9 (June 21, 2026) — Push hardening + Banners + Auto-install + SEO
+
+Every fix below is **already in the latest `/app/_copy_paste/` files** — just re-copy them.
+
+### 🔔 Push notifications now report WHY they fail
+- Admin Notifications page shows a green/red **health badge** with the exact `parse_error` when keys are malformed.
+- One-tap **"Regenerate keys"** button rotates the VAPID keypair and prints the new public + private key with copy buttons. After regenerate, **set `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY` env vars on Fly.io** (otherwise the next redeploy will lose the new pair).
+- Broadcasts now include the *real* error text (first failure surfaced via toast).
+
+### 📸 Image banners on push notifications
+- Upload from device (JPG/PNG/WebP ≤2MB) — preview renders inline, X removes it.
+- Android shows the banner as a large hero above the body text. macOS/iOS show it in the expanded notification card. Older OSes silently skip it.
+
+### 📲 Android 1-tap install
+- New `AndroidInstallPrompt.jsx` captures Chrome's `beforeinstallprompt` event and shows a floating Install button — no more digging through the browser menu.
+- iOS users still see the existing `IosInstallPrompt` (Apple doesn't expose the same event).
+
+### 🌐 Logo in Google search results + browser tabs
+- `frontend/public/index.html` now has `<link rel="icon">`, `<link rel="apple-touch-icon">`, Open Graph (`og:image`), Twitter Card, and JSON-LD `@type=Restaurant` schema — all pointing at `/api/public/icon` so the favicon auto-updates whenever you change the restaurant logo in Admin → Online Store Settings.
+- `frontend/public/manifest.json` exposes 192/512 PNG icons + 3 home-screen shortcuts (Order Now / Track / Offers).
+- Backend serves `/api/public/icon` (proxies your configured logo) and `/api/public/branding` (name + address + social URLs for SSR/crawlers).
+
+### ⚠️ After deploying these files
+1. Open `https://yoursite/admin/notifications` and look at the green "Push keys healthy" badge.
+   - If it's red, click **Regenerate keys** → copy the new `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` → set them on Fly.io → redeploy.
+2. Send a "Send test (to me)" broadcast from your own subscribed phone to confirm.
+3. Ask Google to re-crawl your site at https://search.google.com/search-console — the logo will appear within a few days.
+
+---
+
+## ✅ Everything that's been fixed / added (Phase A through Round 9)
 
 Here's the full cumulative list so you know exactly what to test after deploy.
 
