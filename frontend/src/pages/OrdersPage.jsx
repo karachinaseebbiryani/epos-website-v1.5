@@ -5,6 +5,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
 import { toast } from "sonner";
 import { Star, RotateCcw, ChevronRight, Package, Clock, CheckCircle2, XCircle, Truck } from "lucide-react";
+import EnableNotificationsCard from "../components/EnableNotificationsCard";
 
 const STATUS_COLORS = {
     pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
@@ -119,6 +120,8 @@ export default function OrdersPage() {
                 <h1 className="font-display font-black text-3xl md:text-4xl text-brand-ink mt-2">My Orders</h1>
                 <p className="text-neutral-500 mt-1">Track and manage your orders</p>
             </div>
+
+            <EnableNotificationsCard />
 
             {/* Filter Tabs */}
             <div className="sticky top-16 md:top-20 z-10 bg-white/95 backdrop-blur-sm border-b border-neutral-100 -mx-4 px-4 md:-mx-8 md:px-8 mb-6">
