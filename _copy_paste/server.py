@@ -84,6 +84,52 @@ if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
         logger_init_err = _e  # captured for later; logger may not exist yet
 
 
+def _normalize_vapid_pem(priv: str) -> str:
+    """Best-effort repair of a VAPID private key string that came out of a deployment
+    env var. Handles every corruption I've seen in the wild:
+
+    1. Literal backslash-n (``\\n``, 2 chars) instead of real newlines — happens when
+       the user runs ``flyctl secrets set VAPID_PRIVATE_KEY="-----BEGIN...\\n..."`` in
+       a shell, OR pastes the key into a UI that escapes line breaks.
+    2. Wrapping single/double quotes copied with the value.
+    3. Leading / trailing whitespace.
+    4. PEM headers present but no internal newlines (the body is one long line glued
+       to the BEGIN / END markers) — rewrap to canonical 64-char lines.
+
+    Returns a PEM string that `cryptography.serialization.load_pem_private_key` can
+    actually parse. Idempotent: a clean PEM is returned unchanged."""
+    if not priv:
+        return priv
+    p = priv.strip()
+    # Strip wrapping quotes if the operator pasted ``"…"`` literally.
+    if len(p) >= 2 and ((p[0] == '"' and p[-1] == '"') or (p[0] == "'" and p[-1] == "'")):
+        p = p[1:-1].strip()
+    # Convert literal backslash-n / backslash-r sequences into real newlines/CR.
+    if "\\n" in p:
+        p = p.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\r")
+    # Drop any stray \r so the body is pure LF.
+    p = p.replace("\r", "")
+    # If PEM markers are present but there are no real newlines anywhere, rebuild
+    # the canonical block (header / 64-char-wrapped body / footer).
+    if "BEGIN" in p and "\n" not in p:
+        for begin, end in (
+            ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),
+            ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),
+        ):
+            if begin in p and end in p:
+                head, _, tail = p.partition(begin)
+                body, _, foot_tail = tail.partition(end)
+                body = "".join(body.split())  # strip ALL whitespace from the base64 body
+                wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+                p = f"{head}{begin}\n{wrapped}\n{end}{foot_tail}".strip()
+                break
+    # Make sure the PEM ends with a newline (cryptography is tolerant but pywebpush /
+    # py-vapid sometimes feed the string through openssl which is pickier).
+    if "BEGIN" in p and not p.endswith("\n"):
+        p = p + "\n"
+    return p
+
+
 def _generate_vapid_keys() -> tuple[str, str]:
     """Generate a fresh VAPID keypair and return (public_key_url_b64, private_key_pem).
     Used by the admin "Regenerate VAPID keys" button when production keys are malformed.
@@ -109,27 +155,20 @@ def _vapid_key_health() -> dict:
         "public_key_preview": (VAPID_PUBLIC_KEY[:14] + "…") if VAPID_PUBLIC_KEY else None,
         "private_key_is_pem": bool(VAPID_PRIVATE_KEY and "BEGIN" in (VAPID_PRIVATE_KEY or "")),
         "private_key_has_newlines": bool(VAPID_PRIVATE_KEY and "\n" in (VAPID_PRIVATE_KEY or "")),
+        "private_key_has_literal_backslash_n": bool(VAPID_PRIVATE_KEY and "\\n" in (VAPID_PRIVATE_KEY or "")),
         "source": "env" if (os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY")) else "file",
         "parsable": False,
         "parse_error": None,
+        "normalized": False,
     }
     if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
         info["parse_error"] = "Public or private key missing"
         return info
     try:
-        priv = VAPID_PRIVATE_KEY
-        if priv and "BEGIN" in priv and "\n" not in priv:
-            priv = (
-                priv.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
-                    .replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
-            )
-            head, _, tail = priv.partition("-----BEGIN PRIVATE KEY-----\n")
-            mid_body, _, _ = tail.partition("\n-----END PRIVATE KEY-----")
-            mid_body = mid_body.replace(" ", "")
-            wrapped = "\n".join(mid_body[i : i + 64] for i in range(0, len(mid_body), 64))
-            priv = f"{head}-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----"
+        normalized = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
+        info["normalized"] = normalized != VAPID_PRIVATE_KEY
         from cryptography.hazmat.primitives import serialization as _ser
-        _ser.load_pem_private_key(priv.encode(), password=None)
+        _ser.load_pem_private_key(normalized.encode(), password=None)
         info["parsable"] = True
     except Exception as e:
         info["parse_error"] = f"{type(e).__name__}: {e}"
@@ -3260,20 +3299,9 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         return False, "VAPID keys not configured on server."
     try:
         from pywebpush import webpush, WebPushException  # type: ignore
-        # Auto-repair common env-var pasting issues:
-        # - PEM with all newlines stripped → restore them so cryptography can parse.
-        priv = VAPID_PRIVATE_KEY
-        if priv and "BEGIN" in priv and "\n" not in priv:
-            priv = (
-                priv.replace("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----\n", 1)
-                    .replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----", 1)
-            )
-            # Restore the 64-char-line wrapping in the middle.
-            head, mid, tail = priv.partition("-----BEGIN PRIVATE KEY-----\n")
-            mid_body, end_marker, _ = tail.partition("\n-----END PRIVATE KEY-----")
-            mid_body = mid_body.replace(" ", "")
-            wrapped = "\n".join(mid_body[i : i + 64] for i in range(0, len(mid_body), 64))
-            priv = f"{head}-----BEGIN PRIVATE KEY-----\n{wrapped}\n-----END PRIVATE KEY-----"
+        # Auto-repair every common env-var corruption — literal backslash-n, wrapping
+        # quotes, missing newlines, etc. Idempotent on clean PEMs. See _normalize_vapid_pem.
+        priv = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
         payload_dict = {"title": title, "body": body, "url": url, "icon": "/icon-192.png", "badge": "/icon-192.png"}
         if image:
             payload_dict["image"] = image

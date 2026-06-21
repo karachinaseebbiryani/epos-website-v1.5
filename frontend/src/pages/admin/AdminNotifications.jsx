@@ -310,13 +310,20 @@ function VapidHealthCard({ vapid, onRegenerate, busy }) {
             </div>
             <div className="flex-1 min-w-0">
                 <div className={`font-display font-bold text-sm ${healthy ? "text-emerald-900" : "text-red-900"}`}>
-                    {healthy ? "Push keys healthy" : "Push keys NOT parseable"}
+                    {healthy
+                        ? (vapid.normalized ? "Push keys healthy (auto-repaired)" : "Push keys healthy")
+                        : "Push keys NOT parseable"}
                 </div>
                 <p className={`text-xs mt-0.5 ${healthy ? "text-emerald-800" : "text-red-800"}`}>
                     {healthy
-                        ? `Configured from ${vapid.source}. ${vapid.public_key_preview} · private key is PEM with newlines.`
+                        ? <>Source: <span className="font-mono">{vapid.source}</span> · {vapid.public_key_preview}{vapid.normalized ? " · server is auto-fixing your PEM at send-time. Tip: copy the PEM from /tmp/vapid_keys.json into your hosting env vars with real newlines to remove this warning." : ""}</>
                         : vapid.parse_error || "Private key can't be loaded by cryptography. Likely cause: env var pasted without newlines."}
                 </p>
+                {!healthy && vapid.private_key_has_literal_backslash_n && (
+                    <p className="text-[11px] text-red-700 mt-1 bg-red-100 rounded px-2 py-1">
+                        Detected: your VAPID_PRIVATE_KEY env var contains literal <code className="font-mono">\n</code> sequences instead of real newlines. Server will auto-repair on next broadcast.
+                    </p>
+                )}
             </div>
             <button
                 type="button"

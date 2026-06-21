@@ -72,6 +72,39 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 
 ---
 
+## 🆕 Round 11 (June 21, 2026) — VAPID PEM auto-repair (FIXES "ValueError: Could not deserialize key data")
+
+**The bug you reported**: `Send to All` failed with
+> send error: ValueError: Could not deserialize key data… ASN.1 parsing error: invalid length
+
+**The root cause**: Your `VAPID_PRIVATE_KEY` env var on Fly.io contained literal `\n` two-character sequences (backslash + n) instead of real newlines. The cryptography library found the PEM headers but the base64 body was polluted with those `\n` chars → garbage DER bytes.
+
+**The fix** (`backend/server.py` → new `_normalize_vapid_pem` function):
+- Auto-repairs **5 corruption patterns** at send-time:
+  1. Literal `\n` / `\r` sequences → real newlines.
+  2. PEM with all newlines stripped → re-wraps to 64-char lines.
+  3. Value wrapped in single or double quotes → strips them.
+  4. CRLF endings → LF.
+  5. Random leading/trailing whitespace.
+- Idempotent — clean PEMs pass through unchanged.
+- 11 pytest cases lock the behaviour (`backend/tests/test_vapid_pem_normalize.py`).
+
+**Admin UI** (`pages/admin/AdminNotifications.jsx`):
+- The health badge now reads **"Push keys healthy (auto-repaired)"** when corruption was detected and fixed automatically.
+- A dedicated red banner appears when literal backslash-n is detected, telling the operator exactly what's wrong.
+
+### ⚠️ After deploying this batch
+1. Open `/admin/notifications` — the badge should now show green even if your Fly.io env var is still corrupted (auto-repair kicks in).
+2. Send a test broadcast — it should deliver successfully.
+3. (Optional cleanup) Re-paste the PEM into Fly.io env vars *with real newlines* to remove the auto-repair warning. The easiest way: run `flyctl secrets set VAPID_PRIVATE_KEY="$(cat your-key.pem)"` (the `$(cat …)` preserves newlines correctly).
+
+### Files in this batch
+- `backend/server.py` ⭐ critical
+- `frontend/src/pages/admin/AdminNotifications.jsx` ⭐
+- `backend/tests/test_vapid_pem_normalize.py` 🆕 NEW (pytest only — optional)
+
+---
+
 ## 🆕 Round 10 (June 21, 2026) — Stale push recovery + Universal notif prompt + 14-day install cooldowns
 
 Fixes the 3 issues you reported after deploying iteration 7 with new VAPID keys on Fly.io.
