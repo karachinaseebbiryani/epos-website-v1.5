@@ -6,11 +6,18 @@ import api from "./api";
  * Idempotent: safe to call on every customer sign-in / page mount. The backend
  * upserts on `endpoint` so duplicate subscriptions don't pile up.
  *
+ * Stale-subscription handling:
+ *  - When the admin regenerates VAPID keys, the *server* wipes every push_subscriptions
+ *    doc but the *browser* still has the old PushSubscription cached. The old endpoint
+ *    is signed against the dead applicationServerKey and would never deliver — so we
+ *    detect that mismatch here, unsubscribe the stale sub, and create a fresh one.
+ *
  * Permission UX:
- *  - First call after sign-in: prompts the OS permission dialog.
- *  - If the user has previously denied: this is a no-op (we don't badger them).
- *  - If the user has granted: we subscribe silently on every load to keep the
- *    backend's subscription doc fresh (keys rotate every ~90 days on Android).
+ *  - First call after sign-in: silent — won't prompt the user.
+ *  - Explicit gesture (e.g. "Enable notifications" button) with `silent:false` fires
+ *    the OS permission dialog (must be a real user gesture or iOS swallows it).
+ *  - If the user has granted previously: we re-subscribe silently on every load to keep
+ *    the backend's subscription doc fresh (keys rotate every ~90 days on Android).
  */
 
 const VAPID_PUBKEY_CACHE_KEY = "knb_vapid_pub_v1";
@@ -24,6 +31,23 @@ function urlBase64ToUint8Array(base64String) {
     return out;
 }
 
+// Compare two URL-safe base64 strings ignoring padding. Browsers strip the "=" when
+// they expose applicationServerKey via subscription.options, so a direct === fails.
+function normalizeB64(s) {
+    return String(s || "").replace(/=+$/g, "").replace(/-/g, "+").replace(/_/g, "/");
+}
+
+function arrayBufferToUrlB64(buf) {
+    try {
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin).replace(/=+$/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    } catch {
+        return "";
+    }
+}
+
 export async function isPushSupported() {
     return (
         typeof window !== "undefined" &&
@@ -33,9 +57,17 @@ export async function isPushSupported() {
     );
 }
 
-async function getVapidPublicKey() {
-    const cached = localStorage.getItem(VAPID_PUBKEY_CACHE_KEY);
-    if (cached) return cached;
+/** Returns "granted" | "denied" | "default" | "unsupported". Cheap to call on every render. */
+export async function getPushStatus() {
+    if (!(await isPushSupported())) return "unsupported";
+    return Notification.permission;
+}
+
+async function getVapidPublicKey({ forceRefresh = false } = {}) {
+    if (!forceRefresh) {
+        const cached = localStorage.getItem(VAPID_PUBKEY_CACHE_KEY);
+        if (cached) return cached;
+    }
     const { data } = await api.get("/push/vapid-public-key");
     if (data?.public_key) {
         localStorage.setItem(VAPID_PUBKEY_CACHE_KEY, data.public_key);
@@ -67,19 +99,37 @@ export async function ensurePushSubscription({ silent = true } = {}) {
         catch { perm = Notification.permission; }
     }
     if (perm !== "granted") return perm; // "denied" or "default"
+
+    // Always re-fetch the current server VAPID public key so we can detect "the server
+    // regenerated its keys; this browser's cached sub is now useless" — and fix it.
+    let serverPubKey;
+    try {
+        serverPubKey = await getVapidPublicKey({ forceRefresh: true });
+    } catch {
+        return "error";
+    }
+
     try {
         const existing = await reg.pushManager.getSubscription();
         if (existing) {
-            // Re-send to backend so the subscription doc stays attached to the current
-            // signed-in customer (handles "logged in on this browser as user A, now as B").
-            const sub = existing.toJSON();
-            await api.post("/push/subscribe", { endpoint: sub.endpoint, keys: sub.keys }).catch(() => {});
-            return "subscribed";
+            // Compare the server key the existing subscription was signed against vs.
+            // what the server reports today. If they mismatch the sub is stale (admin
+            // rotated VAPID keys, or the cached key was wrong) — unsubscribe + redo.
+            const optsKey = existing.options?.applicationServerKey;
+            const existingKeyB64 = optsKey ? arrayBufferToUrlB64(optsKey) : "";
+            const stale = !existingKeyB64 || normalizeB64(existingKeyB64) !== normalizeB64(serverPubKey);
+            if (stale) {
+                try { await api.post("/push/unsubscribe", { endpoint: existing.endpoint }).catch(() => {}); } catch { /* ignore */ }
+                try { await existing.unsubscribe(); } catch { /* ignore */ }
+            } else {
+                const sub = existing.toJSON();
+                await api.post("/push/subscribe", { endpoint: sub.endpoint, keys: sub.keys }).catch(() => {});
+                return "subscribed";
+            }
         }
-        const pubKey = await getVapidPublicKey();
         const sub = await reg.pushManager.subscribe({
             userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(pubKey),
+            applicationServerKey: urlBase64ToUint8Array(serverPubKey),
         });
         const j = sub.toJSON();
         await api.post("/push/subscribe", { endpoint: j.endpoint, keys: j.keys });

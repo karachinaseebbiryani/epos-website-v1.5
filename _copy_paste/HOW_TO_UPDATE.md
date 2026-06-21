@@ -72,6 +72,49 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 
 ---
 
+## 🆕 Round 10 (June 21, 2026) — Stale push recovery + Universal notif prompt + 14-day install cooldowns
+
+Fixes the 3 issues you reported after deploying iteration 7 with new VAPID keys on Fly.io.
+
+### 🔁 Push subscriptions auto-heal after key rotation
+**Problem**: You regenerated VAPID keys → admin showed 0 subscribers → you signed in on your phone but still 0. The browser had cached the *old* PushSubscription object, and `push.js` was just re-posting it (uselessly) to the backend.
+
+**Fix in `frontend/src/lib/push.js`**:
+- On every sign-in, `ensurePushSubscription` now **force-refreshes** `/api/push/vapid-public-key` and compares it against the existing subscription's `applicationServerKey`.
+- If they don't match, the stale subscription is unsubscribed locally + on the backend, and a **fresh** subscription is created with the current key.
+- Result: any signed-in customer auto-recovers within seconds of opening the site after a key rotation.
+
+### 🔔 Universal "Enable notifications" card
+**Problem**: Only iOS users saw a "turn on alerts" card. Android users with permission denied/default saw nothing.
+
+**Fix — new `components/EnableNotificationsCard.jsx`** mounted on `/orders` and `/profile`:
+- **Default state** (never asked) → red card with **Enable** button → fires the OS permission dialog.
+- **Denied state** → instructions to unblock via the site lock icon.
+- **iOS not in standalone** → tells the user to Add to Home Screen first.
+- 3-day cooldown on dismiss (re-shows next week if they tap X).
+
+### 🔁 Install prompts re-show after 14 days
+**Problem**: New account on the same browser never saw the install prompt because the dismiss was permanent (`localStorage['…dismissed'] = '1'`).
+
+**Fix in `IosInstallPrompt.jsx` + `AndroidInstallPrompt.jsx`**:
+- Dismiss now stores a future timestamp (14 days out), not a permanent flag.
+- After 14 days the prompt re-appears.
+- Successful `appinstalled` event still permanently silences it (you can't install twice).
+- localStorage keys bumped to `…_until_v2` so existing permanent dismissers see the prompt next time.
+
+### ⚠️ After deploying these files
+Sign in on your phone — push.js's force-refresh will heal your subscription and `subscriber_count` will jump back to ≥1 within seconds. Then send a "Send test (to me)" broadcast to confirm delivery on iOS *and* Android.
+
+### Files in this batch
+- `frontend/src/lib/push.js` ⭐ critical
+- `frontend/src/components/EnableNotificationsCard.jsx` 🆕 NEW
+- `frontend/src/components/IosInstallPrompt.jsx` ⭐
+- `frontend/src/components/AndroidInstallPrompt.jsx` ⭐
+- `frontend/src/pages/OrdersPage.jsx` ⭐
+- `frontend/src/pages/ProfilePage.jsx` ⭐
+
+---
+
 ## 🆕 Round 9 (June 21, 2026) — Push hardening + Banners + Auto-install + SEO
 
 Every fix below is **already in the latest `/app/_copy_paste/` files** — just re-copy them.

@@ -1,13 +1,22 @@
 import { useEffect, useState } from "react";
 import { Download, X } from "lucide-react";
 
-const DISMISS_KEY = "knb_a2hs_android_dismissed_v1";
+const DISMISS_KEY = "knb_a2hs_android_dismissed_until_v2";
+const COOLDOWN_DAYS = 14;
 
 function isInStandaloneMode() {
     return (
         (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
         (typeof navigator !== "undefined" && navigator.standalone === true)
     );
+}
+function dismissedRecently() {
+    const until = parseInt(localStorage.getItem(DISMISS_KEY) || "0", 10);
+    return Number.isFinite(until) && Date.now() < until;
+}
+function markDismissed() {
+    const until = Date.now() + COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+    localStorage.setItem(DISMISS_KEY, String(until));
 }
 
 /**
@@ -31,7 +40,7 @@ export default function AndroidInstallPrompt() {
 
     useEffect(() => {
         if (isInStandaloneMode()) return;
-        if (localStorage.getItem(DISMISS_KEY) === "1") return;
+        if (dismissedRecently()) return;
         const handler = (e) => {
             e.preventDefault();
             setDeferred(e);
@@ -41,7 +50,7 @@ export default function AndroidInstallPrompt() {
         // Once installed (user accepted), hide forever.
         const installed = () => {
             setVisible(false);
-            localStorage.setItem(DISMISS_KEY, "1");
+            markDismissed();
         };
         window.addEventListener("appinstalled", installed);
         return () => {
@@ -57,7 +66,7 @@ export default function AndroidInstallPrompt() {
             deferred.prompt();
             const choice = await deferred.userChoice;
             if (choice?.outcome === "accepted") {
-                localStorage.setItem(DISMISS_KEY, "1");
+                markDismissed();
             }
         } catch {
             /* swallow — Chrome throws if prompt() is called twice */
@@ -68,7 +77,7 @@ export default function AndroidInstallPrompt() {
     };
 
     const dismiss = () => {
-        localStorage.setItem(DISMISS_KEY, "1");
+        markDismissed();
         setVisible(false);
     };
 

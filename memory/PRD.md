@@ -24,6 +24,18 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-21 — Round 10: Stale push auto-recovery + Universal notif prompt + 14-day install cooldowns
+
+Fixes user-reported regression after iteration 9 VAPID rotation.
+
+- **`frontend/src/lib/push.js`** rewritten: `ensurePushSubscription` now `forceRefresh`es `/api/push/vapid-public-key`, compares (`normalizeB64` + `arrayBufferToUrlB64`) against `existing.options.applicationServerKey`, and on mismatch calls `existing.unsubscribe()` + `/push/unsubscribe` + `pushManager.subscribe()` with the *new* key. The Layout's silent auto-resubscribe effect now auto-heals stale subs on every customer sign-in. Also exports `getPushStatus()` for the new EnableNotificationsCard.
+- **`components/EnableNotificationsCard.jsx`** (NEW, 182 lines): Universal "turn on alerts" prompt mounted on `/orders` and `/profile`. Three variants — `default` (Enable CTA), `denied` (browser settings instructions), `ios-install-required` (Share → Add to Home Screen). 3-day dismiss cooldown (DISMISS_COOLDOWN_DAYS=3).
+- **`components/IosInstallPrompt.jsx`** + **`components/AndroidInstallPrompt.jsx`**: Dismiss flag migrated from permanent `'1'` flag to timestamp-based 14-day cooldown (`dismissedRecently()` / `markDismissed()`). localStorage keys bumped to `_until_v2`.
+- **`pages/OrdersPage.jsx`**: imports + renders `<EnableNotificationsCard />` above filter tabs.
+- **`pages/ProfilePage.jsx`**: replaces `IosEnableNotificationsCard` with universal `EnableNotificationsCard`.
+
+**Testing**: `/app/backend/tests/test_iteration8_stale_push.py` (8 tests, all PASS): vapid-public-key returns value, admin vapid status healthy + requires auth, subscribe with customer auth, subscribe idempotent, unsubscribe accepts endpoint, unsubscribe unknown endpoint safe (never 500), subscribe requires auth. Frontend Playwright checks confirm both EnableNotificationsCard variants render, 3-day dismiss writes correct future timestamp, AdminNotifications regression clean.
+
 ### 2026-06-21 — Round 9: Push hardening + Image banners + Android 1-tap install + SEO
 
 **Push notification reliability**
