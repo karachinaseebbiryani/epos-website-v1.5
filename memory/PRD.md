@@ -24,6 +24,64 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-21 — Round 8: Admin Notifications UI + iOS A2HS
+
+**Admin Notifications broadcast (Marketing → Notifications)**
+- `backend/server.py`: 3 new admin endpoints (auth via existing `get_current_user` + role==admin check):
+  - `POST /api/admin/notifications/broadcast` — accepts `{title, body, url, test_only}`. With `test_only=true`, sends only to subscriptions tied to the admin's email-linked customer doc (preview-on-your-phone before blasting). With `test_only=false`, fans out to every doc in `push_subscriptions`. Records each broadcast in `notification_broadcasts` (sent / failed / audience_size / sent_by / created_at).
+  - `GET  /api/admin/notifications/history` — last 50 broadcast logs.
+  - `GET  /api/admin/notifications/stats` — `{subscriber_count, last_broadcast}` summary card.
+- `frontend/src/pages/admin/AdminNotifications.jsx` (new) — Marketing-style composer: title (60 char limit), message (140 char limit with live counter), optional deep-link URL, "Send test (to me)" yellow button, "Send to all" red button with confirm dialog. Subscriber/history stat cards + recent-broadcast list with sent/failed counts and deep-link annotation.
+- `components/AdminLayout.jsx` — added `Bell` icon nav entry under Online section, between Rewards and Settings.
+- `App.js` — wired `/admin/notifications` route.
+- **VAPID keys are NOT regenerated** — the broadcast endpoint reuses `_send_web_push` and the existing global `VAPID_*` env vars. The production keys configured today stay valid.
+
+**iOS Add-to-Home-Screen + iOS PWA notification opt-in**
+- `frontend/src/components/IosInstallPrompt.jsx` (new):
+  - `<IosInstallPrompt />` — one-shot bottom-right teaching banner visible ONLY on iPhone / iPad Safari, NOT in standalone mode, NOT previously dismissed. Explains "Tap Share → Add to Home Screen". Dismiss state persisted in localStorage (`knb_a2hs_dismissed_v1`).
+  - `<IosEnableNotificationsCard />` — red gradient card with "Enable" button. Renders ONLY for iOS users running the site in standalone (PWA) mode whose push permission is not yet granted. Calls `ensurePushSubscription({silent:false})` from a real user-gesture (required by iOS) and toasts a clear success / "blocked, open iOS Settings" / "couldn't enable" outcome.
+- `components/Layout.jsx` — mounts `<IosInstallPrompt />` (only shows on iOS-Safari non-PWA).
+- `pages/ProfilePage.jsx` — mounts `<IosEnableNotificationsCard />` above the Diamond-balance card.
+
+### 2026-06-19 — Round 7: Rider handoff view + Web Push notifications
+
+**Backend (`server.py`)**:
+- Added `pywebpush` dep. VAPID keypair auto-generated on first boot (persisted to `backend/vapid_keys.json` or env-overrideable via `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`).
+- New endpoints:
+  - `GET  /api/push/vapid-public-key` → publishes the public key for the client.
+  - `POST /api/push/subscribe` → upserts a `push_subscriptions` doc keyed by `endpoint` and tied to the signed-in customer.
+  - `POST /api/push/unsubscribe` → deletes a subscription by endpoint (called on logout).
+  - `GET  /api/rider/orders/{order_id}?token=...` → public, token-protected single-order view for delivery staff.
+  - `POST /api/rider/orders/{order_id}/delivered?token=...` → one-tap delivery confirmation that also fires a push to the customer.
+- `PUT /api/online-orders/{order_id}/status`:
+  - Auto-mints `rider_token` (via `secrets.token_urlsafe(16)`) when status transitions to `out_for_delivery`. Token persists for the life of the order so the link stays valid until delivery.
+  - Calls `_notify_customer_order_status` on every status change. Maps each non-terminal status to a friendly title + body and deep-links the customer to `/track/{order_id}`. Failed sends (404/410) auto-drop the subscription.
+
+**Frontend**:
+- New `public/sw.js` — minimal service worker: `push` event displays the OS notification; `notificationclick` focuses the existing tab or opens `/track/{id}`.
+- New `public/manifest.json` — turns the site into an installable PWA (Add to Home Screen) which is also a prerequisite for iOS Web Push support.
+- New `src/lib/push.js` — `ensurePushSubscription({silent})` and `unsubscribePush()` helpers. Caches the VAPID public key in localStorage. Idempotent: safe to call on every Layout mount.
+- `components/Layout.jsx` — calls `ensurePushSubscription({silent:true})` whenever a customer is signed in, so subscriptions refresh silently. Explicit prompt is triggered from `OrderSuccessPage` via a yellow "Enable order alerts" button (the natural opt-in moment).
+- New `src/pages/RiderViewPage.jsx` — mobile-first one-screen rider UI: customer name, status, drop address + GPS shared badge, blue "Navigate in Google Maps" button, tap-to-call phone, items list (free items in green), amount to collect, customer note, sticky bottom **MARK DELIVERED** button. Auto-polls every 5s.
+- `App.js` — registered `/rider/:orderId` route OUTSIDE the customer `Layout` so riders don't see the header / cart chrome.
+- `admin/AdminOrders.jsx` — added a green WhatsApp-styled "Send rider link" button on every non-terminal order with a `rider_token`. Copies link to clipboard AND opens WhatsApp share with the order number prefilled.
+- `OrderSuccessPage.jsx` — added "Enable order alerts" yellow chip next to Track Order CTA. Fires the OS permission prompt; hides itself once granted/denied.
+
+### 2026-06-19 — Round 6: Variation discounts + Customer location update
+- **`backend/server.py` `/api/menu`**: For items with `discount_type` + `discount_value`, the discount is now applied to EACH variation's price too (Half/Medium/Full all get the % or fixed cut). Each variation in the response now carries `original_price` when discounted so the frontend can render the strikethrough. Root cause of the user's reported "discount badge shows but price doesn't change on variations item" — the variations were sent as raw, un-discounted prices.
+- **`frontend/src/pages/MenuPage.jsx` `PriceBlock`**: When item has variations AND any variation has `original_price > price`, shows "From Rs. {sale_min}" with strikethrough "Rs. {orig_min}". Was previously showing "From Rs. {min}" with no strikethrough for variations items.
+- **`frontend/src/pages/MenuPage.jsx` `VariationPicker`**: Each size's row now shows the sale price + strikethrough original (e.g. `Half Rs. 182 ~~Rs. 200~~`).
+- **`backend/server.py`**: New `POST /api/online-orders/{order_id}/customer-location` endpoint. Customer-initiated. Verifies ownership for signed-in orders (rejects 403 if mismatch). Appends `{lat, lng, address, note, updated_at}` to `customer_location_history` array on the order. Updates `customer_lat`, `customer_lng`, `customer_address_updated` to the latest values.
+- **`frontend/src/pages/TrackingPage.jsx`**: Added "Share my live location" / "Update my location again" button (visible only while order is in a non-terminal status). Uses `navigator.geolocation.getCurrentPosition` and a best-effort OSM Nominatim reverse-geocode. Shows the customer's "Shared N times" confirmation. Also surfaces `customer_address_updated` as the displayed address when present.
+- **`frontend/src/pages/admin/AdminOrders.jsx`**: New blue panel "📍 Customer-shared location (N updates)" with a one-tap Google Maps deep link to the latest pin, plus a collapsible `<details>` of older updates. Each entry timestamped.
+
+### 2026-06-19 — Round 5: 5 more user-reported issues
+- **`frontend/src/components/Header.jsx`**: mobile top-right now ALWAYS shows two chips when signed in (yellow Diamond balance + black Profile button) and a red "Sign In" pill when not. Visible without opening the hamburger or scrolling.
+- **`frontend/src/pages/CheckoutPage.jsx`**: When a Diamond reward of type `discount_percent` or `discount_fixed` is selected, the order summary now previews the discount BEFORE the order is placed (line item "Diamond discount (10%): − Rs. X") and the displayed total `totalAfterReward` reflects it. Was previously only visible on the tracking page.
+- **`frontend/src/pages/CheckoutPage.jsx`** + **`frontend/src/pages/OffersPage.jsx`**: Tap-to-apply offer flow. When a signed-in customer taps a coupon code on Offers, the code is stored in `localStorage.pending_coupon_code` and the Checkout `useEffect` consumes + auto-applies it (highest priority, then falls back to personal coupons). Toast: "Coupon X auto-applied · saved Rs. Y". Eliminates the "I tapped the code but had to type it manually" confusion.
+- **`backend/server.py`**: Server-side gate — any order with a `coupon_code` from an unauthenticated request is rejected with 401 "Please sign in to use a coupon." Closes the guest-bypass by manual typing (the front-end popup alone wasn't enough).
+- **`frontend/src/pages/admin/AdminOrders.jsx`**: Added a prominent emerald-green **"MARK DELIVERED"** quick-action button on every non-terminal, non-rejected order card (with shadow + uppercase typography). Designed so any restaurant staff can press it without navigating a dropdown. Hides itself once the order reaches a terminal state.
+
 ### 2026-06-19 — Round 4: Second-order bonus + Guest gate
 - **`backend/server.py`**: new `personal_coupons` collection. On `PUT /online-orders/{id}/status` with `status=delivered`, if this is the customer's 1st-ever delivered order AND they don't already have a `second_order_bonus` coupon, mint one (`WELCOME2-<6 hex>`, Rs. 50 off, 30-day expiry, single-use, tied to `customer_id`).
 - **`backend/server.py`**: new `GET /api/personal-coupons/me` (auth required) returns active (unused + unexpired) personal coupons for the signed-in customer.

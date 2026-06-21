@@ -354,6 +354,45 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
             )}
 
             {o.notes && <div className="mt-2 text-xs bg-yellow-50 text-yellow-800 p-2 rounded">📝 {o.notes}</div>}
+
+            {/* Customer-shared GPS updates. Latest pinned at top with a Google Maps deep
+                link so the rider can navigate in one tap. Older entries collapsed into
+                "+ N more updates" so the order card doesn't blow up vertically. */}
+            {o.customer_location_history && o.customer_location_history.length > 0 && (
+                <div className="mt-2 text-xs bg-blue-50 border border-blue-200 text-blue-900 p-2 rounded space-y-1" data-testid={`order-location-history-${o.id}`}>
+                    <div className="font-bold uppercase tracking-wider text-[10px] text-blue-700">📍 Customer-shared location ({o.customer_location_history.length} update{o.customer_location_history.length > 1 ? "s" : ""})</div>
+                    {(() => {
+                        const latest = o.customer_location_history[o.customer_location_history.length - 1];
+                        return (
+                            <div>
+                                <a
+                                    href={`https://www.google.com/maps?q=${latest.lat},${latest.lng}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-semibold underline hover:text-blue-700"
+                                >Open in Google Maps →</a>
+                                {latest.address && <span className="block text-blue-800 mt-0.5">{latest.address}</span>}
+                                <span className="block text-[10px] text-blue-700/80 mt-0.5">{new Date(latest.updated_at).toLocaleString()}</span>
+                            </div>
+                        );
+                    })()}
+                    {o.customer_location_history.length > 1 && (
+                        <details className="cursor-pointer">
+                            <summary className="text-[10px] text-blue-700 hover:underline">+ {o.customer_location_history.length - 1} earlier update{o.customer_location_history.length - 1 > 1 ? "s" : ""}</summary>
+                            <ul className="mt-1 space-y-1 pl-2 border-l border-blue-200">
+                                {o.customer_location_history.slice(0, -1).reverse().map((e, idx) => (
+                                    <li key={idx}>
+                                        <a href={`https://www.google.com/maps?q=${e.lat},${e.lng}`} target="_blank" rel="noreferrer" className="underline">Map</a>
+                                        {e.address && <span> · {e.address}</span>}
+                                        <span className="block text-[10px] text-blue-700/70">{new Date(e.updated_at).toLocaleString()}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </details>
+                    )}
+                </div>
+            )}
+
             {isRejected && o.rejection_reason && (
                 <div data-testid={`order-rejection-${o.id}`} className="mt-2 text-xs bg-red-50 border border-red-200 text-red-800 p-2 rounded">
                     <strong>Rejected:</strong> {humanReason(o.rejection_reason)}
@@ -403,6 +442,41 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                             {STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
                         </select>
                     </div>
+                )}
+
+                {/* One-tap "Mark Delivered" — designed for staff who don't want to fiddle with
+                    a dropdown. Big, green, unmissable. Only shows on non-terminal orders so once
+                    delivered it disappears. Anyone on the floor can press it. */}
+                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "cancelled" && (
+                    <button
+                        onClick={() => onUpdateStatus("delivered")}
+                        disabled={busyId === o.id}
+                        data-testid={`order-mark-delivered-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-full px-5 py-2.5 text-sm font-black uppercase tracking-wider shadow-md shadow-emerald-600/30 transition-colors disabled:opacity-60"
+                    >
+                        <CheckCircle2 className="w-5 h-5" /> Mark Delivered
+                    </button>
+                )}
+
+                {/* Rider handoff — once the order is "out for delivery" we have a rider_token.
+                    This copies a WhatsApp-ready link the manager can text to the rider. The
+                    rider opens it on their phone and gets a single-screen delivery view
+                    (navigate, call, mark delivered) — no admin login needed. */}
+                {o.rider_token && o.status !== "delivered" && o.status !== "cancelled" && o.status !== "rejected" && (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            const link = `${window.location.origin}/rider/${o.id}?t=${o.rider_token}`;
+                            try { navigator.clipboard.writeText(link); } catch { /* */ }
+                            const wa = `https://wa.me/?text=${encodeURIComponent(`Karachi Naseeb delivery #${(o.id||'').slice(-6).toUpperCase()} — ${link}`)}`;
+                            window.open(wa, "_blank");
+                        }}
+                        data-testid={`order-rider-link-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-[#25D366] hover:bg-[#1ebe57] text-white rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors"
+                        title="Copies link + opens WhatsApp share"
+                    >
+                        Send rider link
+                    </button>
                 )}
 
                 {isAccepted && o.modified && !o.modification_pending && (

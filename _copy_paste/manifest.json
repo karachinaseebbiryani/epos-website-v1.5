@@ -1,0 +1,13 @@
+{
+  "name": "Karachi Naseeb Biryani",
+  "short_name": "Karachi Naseeb",
+  "description": "Order authentic Karachi-style biryani, BBQ and Pakistani favourites — track live, earn Diamonds.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFFFFF",
+  "theme_color": "#D92D20",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/favicon.ico", "sizes": "64x64 32x32 24x24 16x16", "type": "image/x-icon" }
+  ]
+}

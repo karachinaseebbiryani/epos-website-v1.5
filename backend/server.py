@@ -8,7 +8,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Upload
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, bcrypt, jwt, secrets
+import os, logging, bcrypt, jwt, secrets, json
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -47,6 +47,42 @@ LOGIN_WINDOW_SEC = int(os.environ.get("LOGIN_WINDOW_SEC", "300"))  # 5 min
 LOGIN_LOCKOUT_SEC = int(os.environ.get("LOGIN_LOCKOUT_SEC", "900"))  # 15 min
 _login_attempts: "dict[str, deque]" = defaultdict(deque)
 _login_lockouts: "dict[str, float]" = {}
+
+# --- Web Push (browser notification) configuration ---
+# VAPID keys identify the application server to the push service. They're auto-generated
+# on first boot (persisted to /app/backend/vapid_keys.json) so this works zero-config in
+# dev. In production, set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY env vars to keep the same
+# pair across redeploys — otherwise every redeploy invalidates all existing subscriptions.
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:karachinaseebbiryani@gmail.com")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+_VAPID_KEYS_PATH = Path(__file__).parent / "vapid_keys.json"
+if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+    try:
+        if _VAPID_KEYS_PATH.exists():
+            _kj = json.loads(_VAPID_KEYS_PATH.read_text())
+            VAPID_PUBLIC_KEY = _kj.get("public_key")
+            VAPID_PRIVATE_KEY = _kj.get("private_key")
+        if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+            from py_vapid import Vapid  # type: ignore
+            _v = Vapid()
+            _v.generate_keys()
+            # py-vapid v1.9 exposes the raw PEMs via private_pem()/public_pem(), but the
+            # web push libs expect URL-safe base64 (the "applicationServerKey" format).
+            # `_v.public_key.public_bytes_raw()` returns 65 bytes (uncompressed P-256).
+            from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
+            import base64 as _b64
+            priv_der = _v.private_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+            # Save in the form pywebpush expects (PEM for private; URL-safe-b64 for public).
+            priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+            pub_raw = _v.public_key.public_bytes(Encoding.X962, __import__("cryptography").hazmat.primitives.serialization.PublicFormat.UncompressedPoint)
+            VAPID_PRIVATE_KEY = priv_pem
+            VAPID_PUBLIC_KEY = _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
+            _VAPID_KEYS_PATH.write_text(json.dumps({"public_key": VAPID_PUBLIC_KEY, "private_key": VAPID_PRIVATE_KEY}))
+            _ = priv_der  # silence unused
+    except Exception as _e:
+        logger_init_err = _e  # captured for later; logger may not exist yet
+
 
 def _client_ip(request: Request) -> str:
     """Best-effort client IP. Trusts X-Forwarded-For when set by our edge (Fly proxy)."""
@@ -2493,6 +2529,24 @@ async def get_public_menu():
             sale_price = round(max(0, base_price * (1 - d_val / 100.0)), 2)
         elif d_type == "fixed" and d_val > 0:
             sale_price = round(max(0, base_price - d_val), 2)
+        # Apply the item-level discount to each variation's price as well so the
+        # Half/Medium/Full prices reflect the discount. Without this, the "9% OFF"
+        # badge on a variations-item is a lie — the customer pays the un-discounted
+        # variation price. We attach `original_price` to each variation too so the
+        # frontend can strike through it like the main price.
+        raw_variations = i.get("variations", []) or []
+        variations_out = []
+        for v in raw_variations:
+            v_base = float(v.get("price", 0) or 0)
+            v_sale = v_base
+            if d_type == "percentage" and d_val > 0:
+                v_sale = round(max(0, v_base * (1 - d_val / 100.0)), 2)
+            elif d_type == "fixed" and d_val > 0:
+                v_sale = round(max(0, v_base - d_val), 2)
+            v_out = {"name": v.get("name", ""), "price": v_sale}
+            if v_sale < v_base:
+                v_out["original_price"] = v_base
+            variations_out.append(v_out)
         item_list.append({
             "id": str(i["_id"]),
             "name": i["name"],
@@ -2508,7 +2562,7 @@ async def get_public_menu():
             "description": i.get("description", ""),
             "is_popular": i.get("is_popular", False),
             "is_bestseller": i.get("is_bestseller", False),
-            "variations": i.get("variations", []),
+            "variations": variations_out,
         })
     return {"categories": cat_list, "items": item_list}
 
@@ -2552,6 +2606,13 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     personal_coupon_id = None
     if order.coupon_code:
         code_normalized = order.coupon_code.upper().strip()
+        # Sign-in gate at the API layer. Without this a guest could just memorize the
+        # coupon code shown on the public offers page and type it manually, completely
+        # bypassing the front-end sign-in popup. Requiring an authenticated customer here
+        # ALSO means the per-customer abuse limits below are enforceable by customer_id
+        # instead of the easily-spoofable phone number alone.
+        if not cust:
+            raise HTTPException(status_code=401, detail="Please sign in to use a coupon. Offers and discounts are linked to your account.")
         # 1) Personal customer coupons (e.g. WELCOME2-XXXXXX issued on first-order delivery)
         #    take priority over public offers. They are single-use, owned by a specific
         #    customer, and have an expiry. We must verify ownership server-side — never
@@ -2860,8 +2921,25 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     update_fields = {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}
     if body.status == "accepted":
         update_fields["accepted_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Auto-mint a rider token the moment the order leaves the kitchen. The token is what
+    # makes the no-login /rider/{order_id}?t=... link safe — only someone with this token
+    # can mark the order delivered.
+    if body.status == "out_for_delivery" and not order.get("rider_token"):
+        update_fields["rider_token"] = secrets.token_urlsafe(16)
     
     res = await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+
+    # Push notification to the customer's devices for every meaningful status flip.
+    # Done before the Diamond award block so the customer's phone buzzes immediately,
+    # even if the diamond credit logic below takes a beat.
+    if body.status != old_status:
+        try:
+            refreshed_for_push = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+            if refreshed_for_push:
+                await _notify_customer_order_status(refreshed_for_push, body.status)
+        except Exception as e:
+            logger.warning(f"order-status push notify failed for {order_id}: {e}")
     
     # Award Diamonds when order is delivered (only once)
     if body.status == "delivered" and old_status != "delivered":
@@ -3105,6 +3183,291 @@ class OrderOperationsUpdate(BaseModel):
     prep_time_min: Optional[int] = None  # 1..240. Defaults to 30 if never set.
     delivery_fee_override: Optional[float] = None  # 0 = free delivery. None = clear override.
     free_delivery: Optional[bool] = None  # True = force delivery fee to 0.
+
+
+class CustomerLocationUpdate(BaseModel):
+    lat: float
+    lng: float
+    address: Optional[str] = None
+    note: Optional[str] = None
+
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str
+    keys: Dict[str, str]  # { p256dh, auth }
+
+
+async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str = "/") -> bool:
+    """Fire a single push notification. Returns True on success. Silently removes the
+    subscription document if the push service returns 404/410 (subscription expired)."""
+    if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+        return False
+    try:
+        from pywebpush import webpush, WebPushException  # type: ignore
+        payload = json.dumps({"title": title, "body": body, "url": url, "icon": "/favicon.ico"})
+        webpush(
+            subscription_info={"endpoint": subscription_doc["endpoint"], "keys": subscription_doc["keys"]},
+            data=payload,
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": VAPID_EMAIL},
+        )
+        return True
+    except WebPushException as e:  # type: ignore
+        # 404 = endpoint gone, 410 = subscription expired. Drop it from the DB.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (404, 410):
+            try:
+                await db.push_subscriptions.delete_one({"_id": subscription_doc["_id"]})
+            except Exception:
+                pass
+        logger.warning(f"Web push send failed: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Web push send error: {e}")
+        return False
+
+
+async def _notify_customer_order_status(order_doc: dict, new_status: str):
+    """Fan out a web push notification to every device the order's customer subscribed
+    from. Best-effort — failures are logged, never raised. Guests (no customer_id)
+    fall back to notifying any subscription that was keyed to the same phone (if the
+    customer ever signed in later)."""
+    titles = {
+        "accepted": "Order accepted",
+        "preparing": "Your order is being prepared",
+        "ready": "Order ready for pickup / delivery",
+        "out_for_delivery": "Your order is on the way",
+        "delivered": "Order delivered — enjoy!",
+        "rejected": "Order rejected",
+        "cancelled": "Order cancelled",
+    }
+    if new_status not in titles:
+        return
+    customer_id = order_doc.get("customer_id")
+    if not customer_id:
+        return
+    receipt = str(order_doc.get("_id", ""))[-6:].upper()
+    title = titles[new_status]
+    body = f"Order #{receipt} — tap to view live status."
+    url = f"/track/{order_doc.get('_id')}"
+    try:
+        subs = await db.push_subscriptions.find({"customer_id": str(customer_id)}).to_list(20)
+        for s in subs:
+            await _send_web_push(s, title, body, url)
+    except Exception as e:
+        logger.warning(f"_notify_customer_order_status failed: {e}")
+
+
+@api_router.post("/push/subscribe")
+async def push_subscribe(body: PushSubscriptionIn, request: Request):
+    """Register the caller's browser push subscription so we can notify them when their
+    order status changes. Requires a signed-in customer — guests don't get push (we have
+    no stable identity for them across devices)."""
+    cust = await get_optional_customer(request)
+    if not cust:
+        raise HTTPException(status_code=401, detail="Sign in to enable order notifications.")
+    if not body.endpoint or not body.keys.get("p256dh") or not body.keys.get("auth"):
+        raise HTTPException(status_code=400, detail="Invalid subscription payload.")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.push_subscriptions.update_one(
+        {"endpoint": body.endpoint},
+        {"$set": {
+            "endpoint": body.endpoint,
+            "keys": body.keys,
+            "customer_id": str(cust["_id"]),
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api_router.post("/push/unsubscribe")
+async def push_unsubscribe(body: dict, request: Request):
+    endpoint = (body or {}).get("endpoint")
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="endpoint required")
+    await db.push_subscriptions.delete_one({"endpoint": endpoint})
+    return {"ok": True}
+
+
+@api_router.get("/push/vapid-public-key")
+async def push_vapid_public_key():
+    if not VAPID_PUBLIC_KEY:
+        raise HTTPException(status_code=503, detail="Push notifications not configured on this server.")
+    return {"public_key": VAPID_PUBLIC_KEY}
+
+
+class AdminBroadcastIn(BaseModel):
+    title: str
+    body: str
+    url: Optional[str] = "/"
+    test_only: bool = False  # If True, only sends to the admin's own subscriptions
+
+
+@api_router.post("/admin/notifications/broadcast")
+async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    """Send a push notification to subscribed customers.
+
+    - `test_only=True` → send only to the calling admin's own subscriptions (so they
+      can preview before blasting everyone).
+    - Otherwise → fan out to every subscription in `push_subscriptions`.
+
+    Records every broadcast in `notification_broadcasts` for the admin history view."""
+    title = (body.title or "").strip()
+    notif_body = (body.body or "").strip()
+    if not title or not notif_body:
+        raise HTTPException(status_code=400, detail="Title and message are required.")
+    url = body.url or "/"
+    if body.test_only:
+        # Test to the admin's own customer-side subscriptions, if any. We look up by the
+        # admin's email-linked customer doc (most restaurant owners ALSO have a customer
+        # account on the same email so they can self-test the customer flow).
+        admin_email = (user.get("email") or "").lower().strip()
+        cust = await db.customers.find_one({"email": admin_email}) if admin_email else None
+        if not cust:
+            raise HTTPException(status_code=400, detail=f"No customer account found for {admin_email}. Create one and enable notifications on your phone to receive test pushes.")
+        subs = await db.push_subscriptions.find({"customer_id": str(cust["_id"])}).to_list(20)
+    else:
+        subs = await db.push_subscriptions.find({}).to_list(10000)
+    if not subs:
+        raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order.")
+    sent, failed = 0, 0
+    for s in subs:
+        ok = await _send_web_push(s, title, notif_body, url)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    # History row — useful for the admin to see what they've blasted out.
+    if not body.test_only:
+        try:
+            await db.notification_broadcasts.insert_one({
+                "title": title,
+                "body": notif_body,
+                "url": url,
+                "sent": sent,
+                "failed": failed,
+                "audience_size": len(subs),
+                "sent_by": user.get("email", ""),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"broadcast log insert failed: {e}")
+    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only}
+
+
+@api_router.get("/admin/notifications/history")
+async def admin_notification_history(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    docs = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(50).to_list(50)
+    return [{
+        "id": str(d.pop("_id")),
+        **d,
+    } for d in docs]
+
+
+@api_router.get("/admin/notifications/stats")
+async def admin_notification_stats(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    """Subscriber count + last broadcast summary, shown on the admin notifications page."""
+    sub_count = await db.push_subscriptions.count_documents({})
+    last = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(1).to_list(1)
+    return {"subscriber_count": sub_count, "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
+
+
+@api_router.get("/rider/orders/{order_id}")
+async def rider_get_order(order_id: str, token: str):
+    """Token-protected, no-login rider view. The token is auto-generated on the order
+    when it transitions to `out_for_delivery` (or when an admin assigns a rider). The
+    rider opens a WhatsApp link like /rider/<order_id>?t=<token> on their phone — no
+    sign-in needed, but the token is unguessable so randoms can't peek at orders."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.get("rider_token") or token != order.get("rider_token"):
+        raise HTTPException(status_code=403, detail="Invalid or expired rider link.")
+    return _serialize_online_order(order)
+
+
+@api_router.post("/rider/orders/{order_id}/delivered")
+async def rider_mark_delivered(order_id: str, token: str, request: Request):
+    """One-tap "Mark Delivered" for the rider. Same token check as the GET above."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.get("rider_token") or token != order.get("rider_token"):
+        raise HTTPException(status_code=403, detail="Invalid or expired rider link.")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"Order already {order.get('status')}.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "delivered", "delivered_at": now_iso, "updated_at": now_iso, "delivered_by_rider": True}},
+    )
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    try:
+        await _notify_customer_order_status(refreshed, "delivered")
+    except Exception as e:
+        logger.warning(f"rider deliver push notify failed: {e}")
+    return _serialize_online_order(refreshed)
+
+
+@api_router.post("/online-orders/{order_id}/customer-location")
+async def update_customer_location(order_id: str, body: CustomerLocationUpdate, request: Request):
+    """Customer-initiated location update from the tracking page. Lets the customer
+    re-share their GPS coords (e.g. after they moved, the rider got lost, or the
+    initial pin was wrong). We append every update to `customer_location_history`
+    so the restaurant can see the trail and reach the customer at the latest spot."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"This order is already {order.get('status')} — location updates are no longer accepted.")
+    cust = await get_optional_customer(request)
+    # If the order belongs to a signed-in customer, verify ownership before letting
+    # someone update its location. Guest orders are protected by the order_id (which
+    # is unguessable enough to act as a token).
+    if order.get("customer_id"):
+        if not cust or str(cust["_id"]) != str(order.get("customer_id")):
+            raise HTTPException(status_code=403, detail="You don't have permission to update this order's location.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry = {
+        "lat": float(body.lat),
+        "lng": float(body.lng),
+        "address": (body.address or "").strip() or None,
+        "note": (body.note or "").strip() or None,
+        "updated_at": now_iso,
+    }
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {
+            "$push": {"customer_location_history": entry},
+            "$set": {
+                "customer_lat": entry["lat"],
+                "customer_lng": entry["lng"],
+                "customer_address_updated": entry["address"] or order.get("customer_address_updated"),
+                "updated_at": now_iso,
+            },
+        },
+    )
+    return {"ok": True, "history_count": len((order.get("customer_location_history") or [])) + 1, "last_entry": entry}
 
 
 @api_router.put("/online-orders/{order_id}/operations")
