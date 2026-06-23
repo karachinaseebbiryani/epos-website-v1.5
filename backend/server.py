@@ -3302,7 +3302,7 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         # Auto-repair every common env-var corruption — literal backslash-n, wrapping
         # quotes, missing newlines, etc. Idempotent on clean PEMs. See _normalize_vapid_pem.
         priv = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
-        payload_dict = {"title": title, "body": body, "url": url, "icon": "/icon-192.png", "badge": "/icon-192.png"}
+        payload_dict = {"title": title, "body": body, "url": url, "icon": "/api/public/icon", "badge": "/api/public/icon"}
         if image:
             payload_dict["image"] = image
         payload = json.dumps(payload_dict)

@@ -6,6 +6,7 @@ import { useCart } from "../contexts/CartContext";
 import { toast } from "sonner";
 import { Star, RotateCcw, ChevronRight, Package, Clock, CheckCircle2, XCircle, Truck } from "lucide-react";
 import EnableNotificationsCard from "../components/EnableNotificationsCard";
+import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
 const STATUS_COLORS = {
     pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
@@ -122,6 +123,7 @@ export default function OrdersPage() {
             </div>
 
             <EnableNotificationsCard />
+            <IosEnableNotificationsCard />
 
             {/* Filter Tabs */}
             <div className="sticky top-16 md:top-20 z-10 bg-white/95 backdrop-blur-sm border-b border-neutral-100 -mx-4 px-4 md:-mx-8 md:px-8 mb-6">
