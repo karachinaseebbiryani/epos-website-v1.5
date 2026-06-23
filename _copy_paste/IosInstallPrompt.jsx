@@ -3,7 +3,8 @@ import { X, Share, Bell } from "lucide-react";
 import { ensurePushSubscription, isPushSupported } from "../lib/push";
 import { toast } from "sonner";
 
-const DISMISS_KEY_A2HS = "knb_a2hs_dismissed_v1";
+const DISMISS_KEY_A2HS = "knb_a2hs_dismissed_until_v2";
+const A2HS_COOLDOWN_DAYS = 14;
 
 function isIos() {
     const ua = navigator.userAgent || "";
@@ -16,6 +17,15 @@ function isInStandaloneMode() {
         (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
         (typeof navigator !== "undefined" && navigator.standalone === true)
     );
+}
+
+function dismissedRecently() {
+    const until = parseInt(localStorage.getItem(DISMISS_KEY_A2HS) || "0", 10);
+    return Number.isFinite(until) && Date.now() < until;
+}
+function markDismissed() {
+    const until = Date.now() + A2HS_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+    localStorage.setItem(DISMISS_KEY_A2HS, String(until));
 }
 
 /**
@@ -37,7 +47,7 @@ export default function IosInstallPrompt() {
     useEffect(() => {
         if (!isIos()) return;
         if (isInStandaloneMode()) return;
-        if (localStorage.getItem(DISMISS_KEY_A2HS) === "1") return;
+        if (dismissedRecently()) return;
         // Small delay so the banner doesn't slam in on first paint.
         const t = setTimeout(() => setVisible(true), 1500);
         return () => clearTimeout(t);
@@ -51,7 +61,7 @@ export default function IosInstallPrompt() {
         >
             <button
                 type="button"
-                onClick={() => { localStorage.setItem(DISMISS_KEY_A2HS, "1"); setVisible(false); }}
+                onClick={() => { markDismissed(); setVisible(false); }}
                 aria-label="Dismiss"
                 data-testid="ios-install-dismiss"
                 className="absolute top-2 right-2 w-7 h-7 rounded-full hover:bg-white/10 inline-flex items-center justify-center"

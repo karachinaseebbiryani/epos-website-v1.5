@@ -72,6 +72,82 @@ If the file is marked **🆕 NEW** below, your repo doesn't have it yet — just
 
 ---
 
+## 🆕 Round 11 (June 21, 2026) — VAPID PEM auto-repair (FIXES "ValueError: Could not deserialize key data")
+
+**The bug you reported**: `Send to All` failed with
+> send error: ValueError: Could not deserialize key data… ASN.1 parsing error: invalid length
+
+**The root cause**: Your `VAPID_PRIVATE_KEY` env var on Fly.io contained literal `\n` two-character sequences (backslash + n) instead of real newlines. The cryptography library found the PEM headers but the base64 body was polluted with those `\n` chars → garbage DER bytes.
+
+**The fix** (`backend/server.py` → new `_normalize_vapid_pem` function):
+- Auto-repairs **5 corruption patterns** at send-time:
+  1. Literal `\n` / `\r` sequences → real newlines.
+  2. PEM with all newlines stripped → re-wraps to 64-char lines.
+  3. Value wrapped in single or double quotes → strips them.
+  4. CRLF endings → LF.
+  5. Random leading/trailing whitespace.
+- Idempotent — clean PEMs pass through unchanged.
+- 11 pytest cases lock the behaviour (`backend/tests/test_vapid_pem_normalize.py`).
+
+**Admin UI** (`pages/admin/AdminNotifications.jsx`):
+- The health badge now reads **"Push keys healthy (auto-repaired)"** when corruption was detected and fixed automatically.
+- A dedicated red banner appears when literal backslash-n is detected, telling the operator exactly what's wrong.
+
+### ⚠️ After deploying this batch
+1. Open `/admin/notifications` — the badge should now show green even if your Fly.io env var is still corrupted (auto-repair kicks in).
+2. Send a test broadcast — it should deliver successfully.
+3. (Optional cleanup) Re-paste the PEM into Fly.io env vars *with real newlines* to remove the auto-repair warning. The easiest way: run `flyctl secrets set VAPID_PRIVATE_KEY="$(cat your-key.pem)"` (the `$(cat …)` preserves newlines correctly).
+
+### Files in this batch
+- `backend/server.py` ⭐ critical
+- `frontend/src/pages/admin/AdminNotifications.jsx` ⭐
+- `backend/tests/test_vapid_pem_normalize.py` 🆕 NEW (pytest only — optional)
+
+---
+
+## 🆕 Round 10 (June 21, 2026) — Stale push recovery + Universal notif prompt + 14-day install cooldowns
+
+Fixes the 3 issues you reported after deploying iteration 7 with new VAPID keys on Fly.io.
+
+### 🔁 Push subscriptions auto-heal after key rotation
+**Problem**: You regenerated VAPID keys → admin showed 0 subscribers → you signed in on your phone but still 0. The browser had cached the *old* PushSubscription object, and `push.js` was just re-posting it (uselessly) to the backend.
+
+**Fix in `frontend/src/lib/push.js`**:
+- On every sign-in, `ensurePushSubscription` now **force-refreshes** `/api/push/vapid-public-key` and compares it against the existing subscription's `applicationServerKey`.
+- If they don't match, the stale subscription is unsubscribed locally + on the backend, and a **fresh** subscription is created with the current key.
+- Result: any signed-in customer auto-recovers within seconds of opening the site after a key rotation.
+
+### 🔔 Universal "Enable notifications" card
+**Problem**: Only iOS users saw a "turn on alerts" card. Android users with permission denied/default saw nothing.
+
+**Fix — new `components/EnableNotificationsCard.jsx`** mounted on `/orders` and `/profile`:
+- **Default state** (never asked) → red card with **Enable** button → fires the OS permission dialog.
+- **Denied state** → instructions to unblock via the site lock icon.
+- **iOS not in standalone** → tells the user to Add to Home Screen first.
+- 3-day cooldown on dismiss (re-shows next week if they tap X).
+
+### 🔁 Install prompts re-show after 14 days
+**Problem**: New account on the same browser never saw the install prompt because the dismiss was permanent (`localStorage['…dismissed'] = '1'`).
+
+**Fix in `IosInstallPrompt.jsx` + `AndroidInstallPrompt.jsx`**:
+- Dismiss now stores a future timestamp (14 days out), not a permanent flag.
+- After 14 days the prompt re-appears.
+- Successful `appinstalled` event still permanently silences it (you can't install twice).
+- localStorage keys bumped to `…_until_v2` so existing permanent dismissers see the prompt next time.
+
+### ⚠️ After deploying these files
+Sign in on your phone — push.js's force-refresh will heal your subscription and `subscriber_count` will jump back to ≥1 within seconds. Then send a "Send test (to me)" broadcast to confirm delivery on iOS *and* Android.
+
+### Files in this batch
+- `frontend/src/lib/push.js` ⭐ critical
+- `frontend/src/components/EnableNotificationsCard.jsx` 🆕 NEW
+- `frontend/src/components/IosInstallPrompt.jsx` ⭐
+- `frontend/src/components/AndroidInstallPrompt.jsx` ⭐
+- `frontend/src/pages/OrdersPage.jsx` ⭐
+- `frontend/src/pages/ProfilePage.jsx` ⭐
+
+---
+
 ## 🆕 Round 9 (June 21, 2026) — Push hardening + Banners + Auto-install + SEO
 
 Every fix below is **already in the latest `/app/_copy_paste/` files** — just re-copy them.

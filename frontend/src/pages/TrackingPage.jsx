@@ -4,6 +4,8 @@ import axios from "axios";
 import { API } from "../lib/api";
 import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation } from "lucide-react";
 import { toast } from "sonner";
+import EnableNotificationsCard from "../components/EnableNotificationsCard";
+import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
 const STEPS = [
     { key: "pending", label: "Order Placed", icon: Package },
@@ -108,6 +110,8 @@ export default function TrackingPage() {
 
     return (
         <div className="max-w-3xl mx-auto px-4 md:px-8 py-10 md:py-16" data-testid="tracking-page">
+            <EnableNotificationsCard />
+            <IosEnableNotificationsCard />
             <div className="text-center mb-8">
                 <span className="inline-block text-brand-red text-xs uppercase tracking-[0.2em] font-bold mb-2">Live Tracking</span>
                 <h1 className="font-display font-black text-3xl md:text-5xl text-brand-ink">Order #{order.receipt_no}</h1>

@@ -5,6 +5,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
 import { toast } from "sonner";
 import { Star, RotateCcw, ChevronRight, Package, Diamond, Tag } from "lucide-react";
+import EnableNotificationsCard from "../components/EnableNotificationsCard";
 import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
 const STATUS_COLORS = {
@@ -129,6 +130,7 @@ export default function ProfilePage() {
             {/* iOS PWA users (Add-to-Home-Screen done) get a dedicated "Enable Notifications"
                 button here because iOS requires the permission dialog to be triggered
                 from a direct user gesture inside the installed PWA. */}
+            <EnableNotificationsCard />
             <IosEnableNotificationsCard />
 
             {/* Diamond balance — visible immediately on profile so the customer always knows where

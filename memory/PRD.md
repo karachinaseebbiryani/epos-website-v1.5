@@ -24,6 +24,33 @@ Unified restaurant platform (online ordering + POS + admin). User submitted a 12
 
 ## Implementation Log
 
+### 2026-06-21 — Round 11: VAPID PEM auto-repair
+
+**Bug**: User's Fly.io env var `VAPID_PRIVATE_KEY` contained literal `\n` (2-char) sequences instead of real newlines. Broadcasts failed with `ValueError: Could not deserialize key data… ASN.1 parsing error: invalid length`.
+
+**Fix** (`backend/server.py`):
+- New `_normalize_vapid_pem(pem: str) -> str` repairs 5 corruption patterns: literal backslash-n, no newlines, wrapping quotes (single+double), CRLF endings, leading/trailing whitespace. Idempotent.
+- Replaces the inline normalization in `_send_web_push` and `_vapid_key_health`.
+- Adds `private_key_has_literal_backslash_n` + `normalized` fields to the health diagnostic.
+
+**UI** (`pages/admin/AdminNotifications.jsx`):
+- Health badge now distinguishes "Push keys healthy" vs "Push keys healthy (auto-repaired)" so the operator knows their env var has corruption that's being patched at runtime.
+- Red sub-banner appears when literal backslash-n is detected, with an explanation.
+
+**Testing**: `backend/tests/test_vapid_pem_normalize.py` (11 tests, all PASS): literal-backslash-n, no-newlines, quote-wrapped (single+double), combined corruption, CRLF, whitespace, clean-PEM-unchanged, double-normalize-stable, empty, None-safe.
+
+### 2026-06-21 — Round 10: Stale push auto-recovery + Universal notif prompt + 14-day install cooldowns
+
+Fixes user-reported regression after iteration 9 VAPID rotation.
+
+- **`frontend/src/lib/push.js`** rewritten: `ensurePushSubscription` now `forceRefresh`es `/api/push/vapid-public-key`, compares (`normalizeB64` + `arrayBufferToUrlB64`) against `existing.options.applicationServerKey`, and on mismatch calls `existing.unsubscribe()` + `/push/unsubscribe` + `pushManager.subscribe()` with the *new* key. The Layout's silent auto-resubscribe effect now auto-heals stale subs on every customer sign-in. Also exports `getPushStatus()` for the new EnableNotificationsCard.
+- **`components/EnableNotificationsCard.jsx`** (NEW, 182 lines): Universal "turn on alerts" prompt mounted on `/orders` and `/profile`. Three variants — `default` (Enable CTA), `denied` (browser settings instructions), `ios-install-required` (Share → Add to Home Screen). 3-day dismiss cooldown (DISMISS_COOLDOWN_DAYS=3).
+- **`components/IosInstallPrompt.jsx`** + **`components/AndroidInstallPrompt.jsx`**: Dismiss flag migrated from permanent `'1'` flag to timestamp-based 14-day cooldown (`dismissedRecently()` / `markDismissed()`). localStorage keys bumped to `_until_v2`.
+- **`pages/OrdersPage.jsx`**: imports + renders `<EnableNotificationsCard />` above filter tabs.
+- **`pages/ProfilePage.jsx`**: replaces `IosEnableNotificationsCard` with universal `EnableNotificationsCard`.
+
+**Testing**: `/app/backend/tests/test_iteration8_stale_push.py` (8 tests, all PASS): vapid-public-key returns value, admin vapid status healthy + requires auth, subscribe with customer auth, subscribe idempotent, unsubscribe accepts endpoint, unsubscribe unknown endpoint safe (never 500), subscribe requires auth. Frontend Playwright checks confirm both EnableNotificationsCard variants render, 3-day dismiss writes correct future timestamp, AdminNotifications regression clean.
+
 ### 2026-06-21 — Round 9: Push hardening + Image banners + Android 1-tap install + SEO
 
 **Push notification reliability**
