@@ -3,7 +3,7 @@ import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { GoogleOAuthProvider } from "@react-oauth/google";
-import { SpeedInsights } from "@vercel/speed-insights/react";
+import { Analytics } from "@vercel/analytics/react";
 import { AuthProvider } from "./contexts/AuthContext";
 import { CartProvider } from "./contexts/CartContext";
 import { StaffAuthProvider, useStaffAuth } from "./contexts/StaffAuthContext";
@@ -168,9 +168,14 @@ function App() {
   );
   // Wrap in GoogleOAuthProvider only when a client id is configured. The provider must be a
   // single root so the Google client loads once and is shared across login/register pages.
-  return googleClientId
-    ? <GoogleOAuthProvider clientId={googleClientId}>{Inner}</GoogleOAuthProvider>
-    : Inner;
+  return (
+    <>
+      {googleClientId
+        ? <GoogleOAuthProvider clientId={googleClientId}>{Inner}</GoogleOAuthProvider>
+        : Inner}
+      <Analytics />
+    </>
+  );
 }
 
 export default App;
