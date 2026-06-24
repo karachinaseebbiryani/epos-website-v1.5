@@ -289,7 +289,7 @@ Currently TWO templates:
 - Backend on `0.0.0.0:8001` (supervisor-managed)
 - Frontend on `0.0.0.0:3000` (CRA dev server, supervisor-managed)
 - MongoDB local at `mongodb://localhost:27017` / `DB_NAME=test_database`
-- Public preview URL: `https://order-management-139.preview.emergentagent.com`
+- Public preview URL: `https://alert-delivery-2.preview.emergentagent.com`
 - Kubernetes ingress routes `/api/*` → backend, everything else → frontend
 - `REACT_APP_BACKEND_URL` is the public preview URL (used by frontend at runtime)
 - DO NOT change ports/URLs/keys in `.env` — protected by platform contract
