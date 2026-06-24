@@ -118,6 +118,7 @@ function BrandingCard({ currentLogo, onSaved }) {
 }
 
 const ALL_PERMS = [
+  // --- POS Operations ---
   { key: "dashboard", label: "Dashboard" },
   { key: "pos", label: "POS / Sales" },
   { key: "menu", label: "Menu Management" },
@@ -131,6 +132,13 @@ const ALL_PERMS = [
   { key: "reprint_invoices", label: "Reprint Invoices" },
   { key: "refunds", label: "Refunds" },
   { key: "settings", label: "Settings" },
+  // --- Online Store (each toggleable independently) ---
+  { key: "online_dashboard", label: "Online — Dashboard" },
+  { key: "online_orders", label: "Online — Orders" },
+  { key: "online_menu", label: "Online — Menu & Categories" },
+  { key: "online_offers", label: "Online — Offers" },
+  { key: "online_events", label: "Online — Events" },
+  { key: "online_settings", label: "Online — Settings / Reviews / Loyalty" },
 ];
 
 export default function SettingsPage() {
@@ -141,7 +149,7 @@ export default function SettingsPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [userDialog, setUserDialog] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
-  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "cashier", permissions: ["pos", "reports_x"] });
+  const [userForm, setUserForm] = useState({ name: "", email: "", password: "", role: "cashier", permissions: ["pos"] });
   const [deleteUserConfirm, setDeleteUserConfirm] = useState({ open: false, id: "", name: "" });
   const [settingsForm, setSettingsForm] = useState({ tax_rate: "8", online_tax_rate: "0", foodpanda1_tax_rate: "0", foodpanda2_tax_rate: "0", currency: "Rs", restaurant_name: "", restaurant_address: "", restaurant_phone: "", restaurant_email: "" });
   // Email config
@@ -540,7 +548,7 @@ export default function SettingsPage() {
     });
   };
 
-  const openCreateUser = () => { setEditingUser(null); setUserForm({ name: "", email: "", password: "", role: "cashier", permissions: ["pos", "reports_x"] }); setUserDialog(true); };
+  const openCreateUser = () => { setEditingUser(null); setUserForm({ name: "", email: "", password: "", role: "cashier", permissions: ["pos"] }); setUserDialog(true); };
   const openEditUser = (u) => { setEditingUser(u); setUserForm({ name: u.name, email: u.email, password: "", role: u.role, permissions: u.permissions || [] }); setUserDialog(true); };
 
   const saveUser = async () => {
@@ -1260,7 +1268,7 @@ export default function SettingsPage() {
 
       {/* User Dialog with Permission Checkboxes */}
       <Dialog open={userDialog} onOpenChange={setUserDialog}>
-        <DialogContent className="border-[#E5E2DC] max-w-lg">
+        <DialogContent className="border-[#E5E2DC] max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle style={{ fontFamily: "Manrope" }}>{editingUser ? "Edit User" : "Add New User"}</DialogTitle><DialogDescription>{editingUser ? "Update details and permissions" : "Create a new user"}</DialogDescription></DialogHeader>
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
@@ -1272,7 +1280,10 @@ export default function SettingsPage() {
             <div className="space-y-2">
               <Label className="text-sm font-semibold">Permissions</Label>
               <p className="text-xs" style={{ color: "#5C5F5C" }}>Select which sections this user can access</p>
-              <div className="grid grid-cols-2 gap-2">
+              {/* Bounded, scrollable list — with 19 permission rows the dialog body would
+                  otherwise overflow the viewport (especially on mobile / short laptop screens)
+                  and push the Save button below the fold. */}
+              <div className="grid grid-cols-2 gap-2 max-h-[45vh] overflow-y-auto pr-1 -mr-1">
                 {ALL_PERMS.map((p) => (
                   <label key={p.key} className="flex items-center gap-2 p-2 rounded-lg border border-[#E5E2DC] cursor-pointer hover:bg-[#F9F8F6]" data-testid={`perm-${p.key}`}>
                     <Checkbox checked={userForm.permissions.includes(p.key)} onCheckedChange={() => togglePerm(p.key)} />

@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 8 — stale push-subscription auto-recovery + universal EnableNotificationsCard + 14-day install-prompt cooldowns. Backend 8/8 PASS. Frontend UI checks all PASS: enable-notifs-default renders on /orders when Notification.permission='default', enable-notifs-denied renders on /profile when permission='denied', dismiss writes a future-timestamp (NOT '1') to knb_notifs_card_dismissed_until_v1 with delta = 3.00 days exactly, card hides on reload while cooldown is active. Install-prompt v2 keys present (knb_a2hs_dismissed_until_v2 + knb_a2hs_android_dismissed_until_v2). AdminNotifications page renders all iteration-7 testids without regression (admin-vapid-health green 'Push keys healthy', admin-vapid-regenerate, admin-notif-banner-upload, admin-notif-title/body/broadcast). Code review confirms: push.js does forceRefresh on /push/vapid-public-key, normalizes b64 and compares existing.options.applicationServerKey vs server key, calls existing.unsubscribe() + fresh subscribe() on mismatch; Layout.jsx still calls ensurePushSubscription({silent:true}) on user sign-in; silent path bails returning 'default' before any prompt.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tests_executed": [
+    {"name": "TestVapidPublic::test_public_key_returns_value", "result": "PASS"},
+    {"name": "TestVapidAdminHealth::test_status_healthy", "result": "PASS"},
+    {"name": "TestVapidAdminHealth::test_status_requires_auth", "result": "PASS"},
+    {"name": "TestSubscribeUnsubscribe::test_subscribe_accepts_payload", "result": "PASS", "details": "with customer Bearer token; endpoint correctly requires auth (401 anonymous)"},
+    {"name": "TestSubscribeUnsubscribe::test_subscribe_idempotent", "result": "PASS"},
+    {"name": "TestSubscribeUnsubscribe::test_unsubscribe_accepts_endpoint", "result": "PASS"},
+    {"name": "TestSubscribeUnsubscribe::test_unsubscribe_unknown_endpoint_safe", "result": "PASS", "details": "returns 200/204/404 — never 500"},
+    {"name": "TestSubscribeUnsubscribe::test_subscribe_requires_auth", "result": "PASS"},
+    {"name": "Frontend: /orders shows enable-notifs-default when perm='default'", "result": "PASS"},
+    {"name": "Frontend: /profile shows enable-notifs-denied when perm='denied'", "result": "PASS"},
+    {"name": "Frontend: dismiss writes future timestamp = now + 3.00 days (not '1')", "result": "PASS"},
+    {"name": "Frontend: card stays hidden after reload while cooldown active", "result": "PASS"},
+    {"name": "Frontend: AdminNotifications regression — all iteration-7 testids present", "result": "PASS"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_stale_push.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "push.js stale-detection logic is correct: getVapidPublicKey({forceRefresh:true}) re-fetches /push/vapid-public-key on every ensurePushSubscription call. arrayBufferToUrlB64() converts existing.options.applicationServerKey (a Uint8Array exposed by Chrome/Firefox via PushSubscriptionOptions) to URL-safe b64, normalizeB64() strips trailing '=' and converts +/ to -_ so the comparison is canonical. On mismatch it unsubscribes locally + posts /push/unsubscribe (best-effort) + creates a fresh subscription. The same path is invoked by Layout.jsx silent effect, so any signed-in customer with a stale sub auto-heals on the next page load. This is the correct fix for the 'admin shows 0 subscribers after VAPID rotation' bug.",
+    "Layout.jsx silent path: ensurePushSubscription({silent:true}) correctly bails returning 'default' before calling Notification.requestPermission() when perm==='default' (push.js:97 — `perm === 'default' && !silent`). No accidental prompt on every sign-in. Good.",
+    "EnableNotificationsCard: 3 variants wired to the spec — 'ios-install-required' for iOS-non-PWA (incl. iOS Safari <16.4 where isPushSupported returns false), 'denied' for explicit denial, 'default' for the can-prompt case. All variants render the 'X' dismiss with data-testid `{variant}-dismiss`. Verified by playwright that both default and denied variants render with correct testids.",
+    "Dismiss cooldown: DISMISS_COOLDOWN_DAYS=3 → playwright measured delta = 3.00 days exactly. localStorage key knb_notifs_card_dismissed_until_v1 stores a future ms timestamp (verified 1782315688022 > Date.now()), NOT the legacy permanent '1' flag. After cooldown expires (parseInt < Date.now()), card re-shows.",
+    "IosInstallPrompt: DISMISS_KEY_A2HS = 'knb_a2hs_dismissed_until_v2' + A2HS_COOLDOWN_DAYS=14, dismissedRecently() compares parseInt(stored) > Date.now(). markDismissed() writes Date.now() + 14*86400000. Old v1 key naturally orphaned which is correct — operator wants users who previously dismissed forever to see the prompt again.",
+    "AndroidInstallPrompt: identical v2 pattern with DISMISS_KEY='knb_a2hs_android_dismissed_until_v2' + COOLDOWN_DAYS=14. Also calls markDismissed() inside the appinstalled handler so a successful install permanently records 'just dismissed' (which is fine — re-installing isn't a user flow).",
+    "OrdersPage imports EnableNotificationsCard from '../components/EnableNotificationsCard' (line 8) and renders <EnableNotificationsCard /> at line 124 — above the filter tabs as specified. ProfilePage replaced IosEnableNotificationsCard with EnableNotificationsCard (line 8 + line 132). Note: IosEnableNotificationsCard is still exported from IosInstallPrompt.jsx but no longer imported anywhere — dead code, safe to delete in a future cleanup.",
+    "Minor (non-blocking): in EnableNotificationsCard the iOS-Safari <16.4 branch (isPushSupported() === false) uses isIos() but doesn't AND with `!isInStandaloneMode()` symmetrically in the visibility line — the readDismissTs() check is correct, but if an iOS user managed to be standalone AND have isPushSupported() return false (e.g. inside an iOS 15 PWA — rare), the card would still render. Cosmetic edge case, not a real-world risk."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration8_stale_push.py (new, 8 tests covering vapid-public-key forceRefresh source, vapid status health, subscribe with customer auth, idempotent subscribe, unsubscribe known/unknown endpoint, anonymous subscribe gating)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (UI smoke + regression)"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123. Fresh customer registered each run via /api/customer/register with email TEST_iter8_<ts>@example.com / testpass123.",
+  "seed_data_creation": "Per test run: 1 fresh customer + 1 fake PushSubscription doc on FAKE_ENDPOINT (https://fcm.googleapis.com/fcm/send/TEST_iter8_stale_recovery_001). Test test_unsubscribe_accepts_endpoint cleans up the fake sub.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "iteration_8 covers the stale-VAPID-rotation auto-recovery fix. To verify the actual stale-recovery loop end-to-end in headless Chromium you would need to mock pushManager.getSubscription() to return a fake sub with options.applicationServerKey of a *different* keypair than what /api/push/vapid-public-key reports, then call ensurePushSubscription and assert pushManager.subscribe() was invoked with the new key. We didn't attempt that in playwright because the real browser PushManager refuses to subscribe without a valid VAPID server (no FCM creds in preview). Code-path is verified by static review — the comparison arrayBufferToUrlB64(existing.options.applicationServerKey) !== normalizeB64(serverPubKey) drives unsubscribe + resubscribe. For the user's real-world test: log in on their phone after deploying the new bundle; the silent Layout effect should bring subscriber_count to >=1 within seconds. The 8 backend tests can be re-run safely — they don't touch real subscribers (only the synthetic FAKE_ENDPOINT) and do NOT regenerate VAPID keys."
+}

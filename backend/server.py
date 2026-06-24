@@ -6,11 +6,13 @@ load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, bcrypt, jwt
+import os, logging, bcrypt, jwt, secrets, json
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict, deque
 from bson import ObjectId
 import smtplib, ssl, asyncio
 from email.message import EmailMessage
@@ -29,6 +31,225 @@ JWT_ALGORITHM = "HS256"
 # Defaults preserve existing same-origin behavior (lax / not-secure).
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax")
+
+# --- Security constants ---
+# Maximum accepted password length. bcrypt only uses the first 72 bytes, but accepting
+# unbounded passwords lets an attacker DoS the server with multi-MB payloads (each must be
+# JSON-parsed and bcrypt-checked). 128 chars is well above any realistic user password.
+MAX_PASSWORD_LEN = 128
+# How long after order creation a guest can still submit/replace a bank-payment reference
+# or upload a payment screenshot. Beyond this window the action is rejected to prevent
+# tampering / payment hijacking on long-lived orders.
+PAYMENT_SUBMIT_WINDOW_SEC = int(os.environ.get("PAYMENT_SUBMIT_WINDOW_SEC", "86400"))  # 24h
+# Login brute-force throttling. In-memory; per (ip,email) key. Resets on backend restart.
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "10"))
+LOGIN_WINDOW_SEC = int(os.environ.get("LOGIN_WINDOW_SEC", "300"))  # 5 min
+LOGIN_LOCKOUT_SEC = int(os.environ.get("LOGIN_LOCKOUT_SEC", "900"))  # 15 min
+_login_attempts: "dict[str, deque]" = defaultdict(deque)
+_login_lockouts: "dict[str, float]" = {}
+
+# --- Web Push (browser notification) configuration ---
+# VAPID keys are stored in MongoDB (app_config collection) so they survive every redeploy
+# without any manual env var management. Env vars still override when set (dev/CI use).
+# Migration path: on first boot the old vapid_keys.json is read and saved to MongoDB,
+# after which the file is no longer needed.
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:karachinaseebbiryani@gmail.com")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+_VAPID_KEYS_PATH = Path(__file__).parent / "vapid_keys.json"
+# Module-level sync fallback: load from file so the key is available before startup().
+# MongoDB load (async) happens in startup() and overwrites these if a DB record exists.
+if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+    try:
+        if _VAPID_KEYS_PATH.exists():
+            _kj = json.loads(_VAPID_KEYS_PATH.read_text())
+            VAPID_PUBLIC_KEY = _kj.get("public_key")
+            VAPID_PRIVATE_KEY = _kj.get("private_key")
+    except Exception as _e:
+        logger_init_err = _e  # captured for later; logger may not exist yet
+
+
+async def _load_vapid_keys_from_db() -> bool:
+    """Load VAPID keys from MongoDB app_config. Returns True if keys were found."""
+    global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+    try:
+        doc = await db.app_config.find_one({"key": "vapid_keys"})
+        if doc and doc.get("public_key") and doc.get("private_key"):
+            VAPID_PUBLIC_KEY = doc["public_key"]
+            VAPID_PRIVATE_KEY = doc["private_key"]
+            return True
+    except Exception as e:
+        logger.warning(f"Could not load VAPID keys from MongoDB: {e}")
+    return False
+
+
+async def _save_vapid_keys_to_db(pub: str, priv: str) -> None:
+    """Persist VAPID keys to MongoDB so they survive redeploys."""
+    try:
+        await db.app_config.update_one(
+            {"key": "vapid_keys"},
+            {"$set": {"key": "vapid_keys", "public_key": pub, "private_key": priv,
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"Could not save VAPID keys to MongoDB: {e}")
+
+
+def _generate_vapid_keypair_raw() -> tuple:
+    """Generate a fresh VAPID keypair. Returns (public_key_url_b64, private_key_pem)."""
+    from py_vapid import Vapid  # type: ignore
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
+    import base64 as _b64
+    _v = Vapid()
+    _v.generate_keys()
+    priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+    pub_raw = _v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode(), priv_pem
+
+
+def _normalize_vapid_pem(priv: str) -> str:
+    """Best-effort repair of a VAPID private key string that came out of a deployment
+    env var. Handles every corruption I've seen in the wild:
+
+    1. Literal backslash-n (``\\n``, 2 chars) instead of real newlines — happens when
+       the user runs ``flyctl secrets set VAPID_PRIVATE_KEY="-----BEGIN...\\n..."`` in
+       a shell, OR pastes the key into a UI that escapes line breaks.
+    2. Wrapping single/double quotes copied with the value.
+    3. Leading / trailing whitespace.
+    4. PEM headers present but no internal newlines (the body is one long line glued
+       to the BEGIN / END markers) — rewrap to canonical 64-char lines.
+
+    Returns a PEM string that `cryptography.serialization.load_pem_private_key` can
+    actually parse. Idempotent: a clean PEM is returned unchanged."""
+    if not priv:
+        return priv
+    p = priv.strip()
+    # Strip wrapping quotes if the operator pasted ``"…"`` literally.
+    if len(p) >= 2 and ((p[0] == '"' and p[-1] == '"') or (p[0] == "'" and p[-1] == "'")):
+        p = p[1:-1].strip()
+    # Convert literal backslash-n / backslash-r sequences into real newlines/CR.
+    if "\\n" in p:
+        p = p.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\r")
+    # Drop any stray \r so the body is pure LF.
+    p = p.replace("\r", "")
+    # If PEM markers are present but there are no real newlines anywhere, rebuild
+    # the canonical block (header / 64-char-wrapped body / footer).
+    if "BEGIN" in p and "\n" not in p:
+        for begin, end in (
+            ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),
+            ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),
+        ):
+            if begin in p and end in p:
+                head, _, tail = p.partition(begin)
+                body, _, foot_tail = tail.partition(end)
+                body = "".join(body.split())  # strip ALL whitespace from the base64 body
+                wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+                p = f"{head}{begin}\n{wrapped}\n{end}{foot_tail}".strip()
+                break
+    # pywebpush 2.x requires SEC1 format (BEGIN EC PRIVATE KEY) not PKCS8
+    # (BEGIN PRIVATE KEY). Convert if needed — the underlying key material is identical.
+    if "BEGIN PRIVATE KEY" in p and "BEGIN EC PRIVATE KEY" not in p:
+        try:
+            from cryptography.hazmat.primitives.serialization import (
+                load_pem_private_key, Encoding, PrivateFormat, NoEncryption)
+            _key = load_pem_private_key(p.encode(), password=None)
+            p = _key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL,
+                                   NoEncryption()).decode()
+        except Exception:
+            pass  # leave as-is if conversion fails; let pywebpush surface the real error
+    # Make sure the PEM ends with a newline (cryptography is tolerant but pywebpush /
+    # py-vapid sometimes feed the string through openssl which is pickier).
+    if "BEGIN" in p and not p.endswith("\n"):
+        p = p + "\n"
+    return p
+
+
+def _generate_vapid_keys() -> tuple[str, str]:
+    """Generate a fresh VAPID keypair and return (public_key_url_b64, private_key_pem).
+    Used by the admin "Regenerate VAPID keys" button when production keys are malformed.
+    Caller is responsible for persisting + wiping stale push_subscriptions."""
+    from py_vapid import Vapid  # type: ignore
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
+    import base64 as _b64
+    _v = Vapid()
+    _v.generate_keys()
+    priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+    pub_raw = _v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode(), priv_pem
+
+
+def _vapid_key_health() -> dict:
+    """Verify the VAPID PEM private key can actually be parsed by `cryptography`.
+    Returns a structured payload the admin UI can render so the operator instantly
+    knows *why* push notifications are failing in prod (90% of the time: env var
+    pasted with stripped newlines)."""
+    info = {
+        "public_key_set": bool(VAPID_PUBLIC_KEY),
+        "private_key_set": bool(VAPID_PRIVATE_KEY),
+        "public_key_preview": (VAPID_PUBLIC_KEY[:14] + "…") if VAPID_PUBLIC_KEY else None,
+        "private_key_is_pem": bool(VAPID_PRIVATE_KEY and "BEGIN" in (VAPID_PRIVATE_KEY or "")),
+        "private_key_has_newlines": bool(VAPID_PRIVATE_KEY and "\n" in (VAPID_PRIVATE_KEY or "")),
+        "private_key_has_literal_backslash_n": bool(VAPID_PRIVATE_KEY and "\\n" in (VAPID_PRIVATE_KEY or "")),
+        "source": "env" if (os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY")) else "file",
+        "parsable": False,
+        "parse_error": None,
+        "normalized": False,
+    }
+    if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+        info["parse_error"] = "Public or private key missing"
+        return info
+    try:
+        normalized = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
+        info["normalized"] = normalized != VAPID_PRIVATE_KEY
+        from cryptography.hazmat.primitives import serialization as _ser
+        _ser.load_pem_private_key(normalized.encode(), password=None)
+        info["parsable"] = True
+    except Exception as e:
+        info["parse_error"] = f"{type(e).__name__}: {e}"
+    return info
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP. Trusts X-Forwarded-For when set by our edge (Fly proxy)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+def _login_throttle_check(ip: str, email: str):
+    """Raise 429 if the (ip,email) pair is currently locked out."""
+    key = f"{ip}|{(email or '').lower().strip()}"
+    now = datetime.now(timezone.utc).timestamp()
+    locked_until = _login_lockouts.get(key)
+    if locked_until and now < locked_until:
+        retry = int(locked_until - now)
+        raise HTTPException(status_code=429, detail=f"Too many failed attempts. Try again in {retry}s.")
+
+def _login_record_failure(ip: str, email: str):
+    key = f"{ip}|{(email or '').lower().strip()}"
+    now = datetime.now(timezone.utc).timestamp()
+    dq = _login_attempts[key]
+    dq.append(now)
+    # Evict attempts older than the rolling window
+    while dq and (now - dq[0]) > LOGIN_WINDOW_SEC:
+        dq.popleft()
+    if len(dq) >= LOGIN_MAX_ATTEMPTS:
+        _login_lockouts[key] = now + LOGIN_LOCKOUT_SEC
+        dq.clear()
+
+def _login_record_success(ip: str, email: str):
+    key = f"{ip}|{(email or '').lower().strip()}"
+    _login_attempts.pop(key, None)
+    _login_lockouts.pop(key, None)
+
+def _validate_password_length(pw: str):
+    """Reject absurdly long passwords (bcrypt only uses first 72 bytes anyway).
+    Prevents long-password DoS amplification on register / login."""
+    if pw is None:
+        raise HTTPException(status_code=400, detail="Password is required")
+    if len(pw) > MAX_PASSWORD_LEN or len(pw.encode("utf-8", errors="ignore")) > MAX_PASSWORD_LEN * 4:
+        raise HTTPException(status_code=400, detail=f"Password too long (max {MAX_PASSWORD_LEN} chars)")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -294,25 +515,34 @@ class LoyaltyAdjustRequest(BaseModel):
 
 # --- Auth ---
 @api_router.post("/auth/login")
-async def login(req: LoginRequest, response: Response):
+async def login(req: LoginRequest, request: Request, response: Response):
     email = req.email.lower().strip()
+    ip = _client_ip(request)
+    _login_throttle_check(ip, email)
+    _validate_password_length(req.password)
     user = await db.users.find_one({"email": email})
-    if not user: raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not verify_password(req.password, user["password_hash"]): raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user:
+        _login_record_failure(ip, email)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(req.password, user["password_hash"]):
+        _login_record_failure(ip, email)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    _login_record_success(ip, email)
     uid = str(user["_id"])
     at = create_access_token(uid, email, user.get("role", "cashier"))
     rt = create_refresh_token(uid)
     response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
     response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
-    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": uid, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms, "token": at}
 
 @api_router.post("/auth/register")
 async def register(req: RegisterRequest, response: Response):
     email = req.email.lower().strip()
+    _validate_password_length(req.password)
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already registered")
     hashed = hash_password(req.password)
-    perms = ["pos", "reports_x"]
+    perms = ["pos"]
     doc = {"email": email, "password_hash": hashed, "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.users.insert_one(doc)
     uid = str(result.inserted_id)
@@ -325,7 +555,7 @@ async def register(req: RegisterRequest, response: Response):
 @api_router.get("/auth/me")
 async def get_me(request: Request):
     user = await get_current_user(request)
-    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos", "reports_x"])
+    perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": user["_id"], "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms}
 
 @api_router.post("/auth/logout")
@@ -340,7 +570,7 @@ async def list_users(request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     users = await db.users.find({}, {"password_hash": 0}).to_list(500)
-    return [{"id": str(u["_id"]), "email": u["email"], "name": u.get("name", ""), "role": u.get("role", "cashier"), "permissions": u.get("permissions", ADMIN_PERMISSIONS if u.get("role") == "admin" else ["pos", "reports_x"]), "created_at": u.get("created_at", "")} for u in users]
+    return [{"id": str(u["_id"]), "email": u["email"], "name": u.get("name", ""), "role": u.get("role", "cashier"), "permissions": u.get("permissions", ADMIN_PERMISSIONS if u.get("role") == "admin" else ["pos"]), "created_at": u.get("created_at", "")} for u in users]
 
 @api_router.post("/users")
 async def create_user(req: UserCreate, request: Request):
@@ -348,7 +578,7 @@ async def create_user(req: UserCreate, request: Request):
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     email = req.email.lower().strip()
     if await db.users.find_one({"email": email}): raise HTTPException(status_code=400, detail="Email already exists")
-    perms = req.permissions if req.permissions else (ADMIN_PERMISSIONS if req.role == "admin" else ["pos", "reports_x"])
+    perms = req.permissions if req.permissions else (ADMIN_PERMISSIONS if req.role == "admin" else ["pos"])
     doc = {"email": email, "password_hash": hash_password(req.password), "name": req.name, "role": req.role, "permissions": perms, "created_at": datetime.now(timezone.utc).isoformat()}
     result = await db.users.insert_one(doc)
     return {"id": str(result.inserted_id), "email": email, "name": req.name, "role": req.role, "permissions": perms}
@@ -1969,6 +2199,26 @@ async def startup():
         await db.z_reports.create_index([("date", -1)])
     except Exception as e:
         logger.warning(f"Index creation skipped: {e}")
+    # Load VAPID keys from MongoDB (primary persistent store).
+    # Falls back to: env vars (already loaded at module level) → vapid_keys.json → auto-generate.
+    # This means keys survive every redeploy with zero manual intervention.
+    if not os.environ.get("VAPID_PUBLIC_KEY"):  # env vars take priority; skip DB load if set
+        db_has_keys = await _load_vapid_keys_from_db()
+        if not db_has_keys:
+            # Nothing in DB yet — migrate from file if present, otherwise auto-generate.
+            global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+            if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+                try:
+                    new_pub, new_priv = _generate_vapid_keypair_raw()
+                    VAPID_PUBLIC_KEY = new_pub
+                    VAPID_PRIVATE_KEY = new_priv
+                    logger.info("VAPID keys auto-generated on first boot.")
+                except Exception as e:
+                    logger.error(f"VAPID key generation failed: {e}")
+            # Save whatever we have (migrated from file or newly generated) into MongoDB.
+            if VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY:
+                await _save_vapid_keys_to_db(VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY)
+                logger.info("VAPID keys saved to MongoDB — will survive all future redeploys.")
     await seed_admin()
     await cleanup_old_data()
     # Start the scheduler
@@ -2085,6 +2335,7 @@ class OfferCreate(BaseModel):
     image_url: Optional[str] = ""
     active: bool = True
     min_order_amount: Optional[float] = 0  # V2: minimum cart subtotal required to apply this offer
+    one_time_per_customer: bool = False  # If true, each customer (or phone for guests) can use this coupon at most once
 
 class OfferUpdate(BaseModel):
     title: Optional[str] = None
@@ -2095,6 +2346,7 @@ class OfferUpdate(BaseModel):
     image_url: Optional[str] = None
     active: Optional[bool] = None
     min_order_amount: Optional[float] = None
+    one_time_per_customer: Optional[bool] = None
 
 class EventBookingCreate(BaseModel):
     name: str
@@ -2148,6 +2400,7 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
         raise HTTPException(status_code=400, detail="Invalid email")
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    _validate_password_length(req.password)
     if await db.customers.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
     doc = {
@@ -2164,11 +2417,16 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
     return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token}
 
 @api_router.post("/customer/login")
-async def customer_login(req: CustomerLoginRequest, response: Response):
+async def customer_login(req: CustomerLoginRequest, request: Request, response: Response):
     email = req.email.lower().strip()
+    ip = _client_ip(request)
+    _login_throttle_check(ip, email)
+    _validate_password_length(req.password)
     cust = await db.customers.find_one({"email": email})
     if not cust or not verify_password(req.password, cust["password_hash"]):
+        _login_record_failure(ip, email)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    _login_record_success(ip, email)
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
@@ -2417,6 +2675,24 @@ async def get_public_menu():
             sale_price = round(max(0, base_price * (1 - d_val / 100.0)), 2)
         elif d_type == "fixed" and d_val > 0:
             sale_price = round(max(0, base_price - d_val), 2)
+        # Apply the item-level discount to each variation's price as well so the
+        # Half/Medium/Full prices reflect the discount. Without this, the "9% OFF"
+        # badge on a variations-item is a lie — the customer pays the un-discounted
+        # variation price. We attach `original_price` to each variation too so the
+        # frontend can strike through it like the main price.
+        raw_variations = i.get("variations", []) or []
+        variations_out = []
+        for v in raw_variations:
+            v_base = float(v.get("price", 0) or 0)
+            v_sale = v_base
+            if d_type == "percentage" and d_val > 0:
+                v_sale = round(max(0, v_base * (1 - d_val / 100.0)), 2)
+            elif d_type == "fixed" and d_val > 0:
+                v_sale = round(max(0, v_base - d_val), 2)
+            v_out = {"name": v.get("name", ""), "price": v_sale}
+            if v_sale < v_base:
+                v_out["original_price"] = v_base
+            variations_out.append(v_out)
         item_list.append({
             "id": str(i["_id"]),
             "name": i["name"],
@@ -2432,7 +2708,7 @@ async def get_public_menu():
             "description": i.get("description", ""),
             "is_popular": i.get("is_popular", False),
             "is_bestseller": i.get("is_bestseller", False),
-            "variations": i.get("variations", []),
+            "variations": variations_out,
         })
     return {"categories": cat_list, "items": item_list}
 
@@ -2473,18 +2749,63 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # Coupon validation
     discount_amount = 0.0
     coupon_used = None
+    personal_coupon_id = None
     if order.coupon_code:
-        offer = await db.offers.find_one({"coupon_code": order.coupon_code.upper().strip(), "active": True})
-        if offer:
-            # V2: enforce minimum order amount on offers
-            min_amount = float(offer.get("min_order_amount", 0) or 0)
-            if min_amount > 0 and float(order.total_price or 0) < min_amount:
-                raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
-            if offer.get("discount_percent"):
-                discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
-            elif offer.get("discount_amount"):
-                discount_amount = float(offer["discount_amount"])
-            coupon_used = offer["coupon_code"]
+        code_normalized = order.coupon_code.upper().strip()
+        # Sign-in gate at the API layer. Without this a guest could just memorize the
+        # coupon code shown on the public offers page and type it manually, completely
+        # bypassing the front-end sign-in popup. Requiring an authenticated customer here
+        # ALSO means the per-customer abuse limits below are enforceable by customer_id
+        # instead of the easily-spoofable phone number alone.
+        if not cust:
+            raise HTTPException(status_code=401, detail="Please sign in to use a coupon. Offers and discounts are linked to your account.")
+        # 1) Personal customer coupons (e.g. WELCOME2-XXXXXX issued on first-order delivery)
+        #    take priority over public offers. They are single-use, owned by a specific
+        #    customer, and have an expiry. We must verify ownership server-side — never
+        #    trust the client.
+        personal = await db.personal_coupons.find_one({"code": code_normalized})
+        if personal:
+            if personal.get("used"):
+                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has already been used.")
+            try:
+                expires = datetime.fromisoformat(personal.get("expires_at", "").replace("Z", "+00:00"))
+            except Exception:
+                expires = None
+            if expires and expires < datetime.now(timezone.utc):
+                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has expired.")
+            if not cust or str(cust["_id"]) != str(personal.get("customer_id")):
+                raise HTTPException(status_code=400, detail="This coupon belongs to a different account. Please sign in with the correct account.")
+            if personal.get("discount_percent"):
+                discount_amount = round(order.total_price * float(personal["discount_percent"]) / 100, 2)
+            else:
+                discount_amount = float(personal.get("discount_amount", 0))
+            coupon_used = code_normalized
+            personal_coupon_id = personal["_id"]
+        else:
+            offer = await db.offers.find_one({"coupon_code": code_normalized, "active": True})
+            if offer:
+                # V2: enforce minimum order amount on offers
+                min_amount = float(offer.get("min_order_amount", 0) or 0)
+                if min_amount > 0 and float(order.total_price or 0) < min_amount:
+                    raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
+                # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
+                # should only fire once per signed-in customer (matched by id) and once
+                # per phone number for guests. Without this, a single customer can apply
+                # WELCOME100 repeatedly on every order — straight-up revenue leak.
+                if offer.get("one_time_per_customer"):
+                    used_filter = {"coupon_code": offer["coupon_code"]}
+                    if cust:
+                        used_filter["customer_id"] = str(cust["_id"])
+                    else:
+                        used_filter["phone"] = order.phone
+                    already_used = await db.online_orders.find_one(used_filter)
+                    if already_used:
+                        raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
+                if offer.get("discount_percent"):
+                    discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
+                elif offer.get("discount_amount"):
+                    discount_amount = float(offer["discount_amount"])
+                coupon_used = offer["coupon_code"]
     # Delivery fee calculation (server-side, ignores any frontend value)
     delivery_fee = 0.0
     distance_km = None
@@ -2532,9 +2853,24 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                     elif reward_type == "discount_fixed":
                         reward_discount = min(float(reward_value), final_total)
                     elif reward_type == "free_item":
-                        # Free item handled by adding to order items with 0 price
-                        # For now, just track the reward
-                        pass
+                        # Resolve the free menu item and append it to the order so it shows up
+                        # on both the customer's order summary AND the restaurant's order
+                        # ticket. Price is 0 (it's free) and the name is tagged so the kitchen
+                        # immediately spots it as a Diamond freebie (no charge collected).
+                        try:
+                            free_item_doc = await db.menu_items.find_one({"_id": ObjectId(str(reward_value))})
+                        except Exception:
+                            free_item_doc = None
+                        if free_item_doc:
+                            free_line = OnlineOrderItem(
+                                item_id=str(free_item_doc["_id"]),
+                                name=f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
+                                price=0.0,
+                                quantity=1,
+                            )
+                            order.items.append(free_line)
+                        else:
+                            logger.warning(f"free_item reward {reward.get('_id')} references missing menu item {reward_value}")
                     
                     # Update final total
                     final_total = max(0, final_total - reward_discount)
@@ -2615,6 +2951,16 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     result = await db.online_orders.insert_one(doc)
     doc["_id"] = result.inserted_id
     order_id = str(result.inserted_id)
+
+    # Mark personal coupon as used so it can't be redeemed twice.
+    if personal_coupon_id:
+        try:
+            await db.personal_coupons.update_one(
+                {"_id": personal_coupon_id},
+                {"$set": {"used": True, "used_on_order_id": order_id, "used_at": now.isoformat()}},
+            )
+        except Exception as e:
+            logger.error(f"Failed to mark personal coupon {personal_coupon_id} as used: {e}")
     
     # Log loyalty transaction for spending only (earning happens at delivery)
     if cust and diamonds_spent > 0 and reward_applied:
@@ -2650,6 +2996,29 @@ async def get_my_orders(request: Request):
     cust = await get_current_customer(request)
     orders = await db.online_orders.find({"customer_id": cust["_id"]}).sort("created_at", -1).to_list(200)
     return [_serialize_online_order(o) for o in orders]
+
+
+@api_router.get("/personal-coupons/me")
+async def get_my_personal_coupons(request: Request):
+    """List the signed-in customer's active (unused + unexpired) personal coupons.
+    Used to surface the second-order bonus and any future per-customer perks on
+    Profile / Rewards screens and to auto-apply at checkout."""
+    cust = await get_current_customer(request)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    coupons = await db.personal_coupons.find({
+        "customer_id": str(cust["_id"]),
+        "used": False,
+        "expires_at": {"$gt": now_iso},
+    }).sort("created_at", -1).to_list(50)
+    return [{
+        "id": str(c["_id"]),
+        "code": c["code"],
+        "discount_amount": float(c.get("discount_amount", 0)),
+        "discount_percent": float(c.get("discount_percent", 0)),
+        "source": c.get("source", ""),
+        "expires_at": c.get("expires_at"),
+        "created_at": c.get("created_at"),
+    } for c in coupons]
 
 @api_router.get("/online-orders")
 async def list_online_orders(request: Request, status: Optional[str] = None):
@@ -2698,8 +3067,25 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     update_fields = {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}
     if body.status == "accepted":
         update_fields["accepted_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Auto-mint a rider token the moment the order leaves the kitchen. The token is what
+    # makes the no-login /rider/{order_id}?t=... link safe — only someone with this token
+    # can mark the order delivered.
+    if body.status == "out_for_delivery" and not order.get("rider_token"):
+        update_fields["rider_token"] = secrets.token_urlsafe(16)
     
     res = await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+
+    # Push notification to the customer's devices for every meaningful status flip.
+    # Done before the Diamond award block so the customer's phone buzzes immediately,
+    # even if the diamond credit logic below takes a beat.
+    if body.status != old_status:
+        try:
+            refreshed_for_push = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+            if refreshed_for_push:
+                await _notify_customer_order_status(refreshed_for_push, body.status)
+        except Exception as e:
+            logger.warning(f"order-status push notify failed for {order_id}: {e}")
     
     # Award Diamonds when order is delivered (only once)
     if body.status == "delivered" and old_status != "delivered":
@@ -2752,6 +3138,38 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
                         logger.warning(f"Diamond credit found 0 matching customer for order {order_id} (customer_id={customer_id!r})")
             except Exception as e:
                 logger.error(f"Failed to award Diamonds for order {order_id}: {e}")
+
+        # === Second-order bonus trigger ===
+        # If this delivery makes the customer's 1st-EVER delivered order, mint them a
+        # personal one-time coupon worth Rs. 50 off for their 2nd order. Single-use,
+        # 30-day expiry, auto-applied at checkout when present. Tracked in its own
+        # collection so it never collides with the public offers table.
+        if customer_id:
+            try:
+                cust_id_str = str(customer_id)
+                delivered_count = await db.online_orders.count_documents({"customer_id": customer_id, "status": "delivered"})
+                # delivered_count INCLUDES this order (we just set status=delivered above).
+                already_has = await db.personal_coupons.find_one({"customer_id": cust_id_str, "source": "second_order_bonus"})
+                if delivered_count == 1 and not already_has:
+                    code = f"WELCOME2-{secrets.token_hex(3).upper()}"
+                    while await db.personal_coupons.find_one({"code": code}):
+                        code = f"WELCOME2-{secrets.token_hex(3).upper()}"
+                    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+                    await db.personal_coupons.insert_one({
+                        "code": code,
+                        "customer_id": cust_id_str,
+                        "discount_amount": 50,
+                        "discount_percent": 0,
+                        "source": "second_order_bonus",
+                        "issued_for_order_id": order_id,
+                        "used": False,
+                        "used_on_order_id": None,
+                        "expires_at": expires_at.isoformat(),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    logger.info(f"Issued second-order bonus coupon {code} to customer {cust_id_str}")
+            except Exception as e:
+                logger.error(f"Failed to issue second-order bonus for order {order_id}: {e}")
     
     # WhatsApp status update
     try:
@@ -2911,6 +3329,480 @@ class OrderOperationsUpdate(BaseModel):
     prep_time_min: Optional[int] = None  # 1..240. Defaults to 30 if never set.
     delivery_fee_override: Optional[float] = None  # 0 = free delivery. None = clear override.
     free_delivery: Optional[bool] = None  # True = force delivery fee to 0.
+
+
+class CustomerLocationUpdate(BaseModel):
+    lat: float
+    lng: float
+    address: Optional[str] = None
+    note: Optional[str] = None
+
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str
+    keys: Dict[str, str]  # { p256dh, auth }
+
+
+async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str = "/", image: Optional[str] = None) -> tuple[bool, Optional[str]]:
+    """Fire a single push notification. Returns (ok, error_message).
+
+    Returns the actual error string on failure so the admin broadcast UI can surface
+    *why* a send failed (mangled VAPID key, bad endpoint, etc.) instead of a silent
+    'failed' counter. Silently removes the subscription document if the push service
+    returns 404/410 (subscription expired)."""
+    if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+        return False, "VAPID keys not configured on server."
+    try:
+        from pywebpush import webpush, WebPushException  # type: ignore
+        # Auto-repair every common env-var corruption — literal backslash-n, wrapping
+        # quotes, missing newlines, etc. Idempotent on clean PEMs. See _normalize_vapid_pem.
+        priv = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
+        payload_dict = {"title": title, "body": body, "url": url, "icon": "/api/public/icon", "badge": "/api/public/icon"}
+        if image:
+            payload_dict["image"] = image
+        payload = json.dumps(payload_dict)
+        webpush(
+            subscription_info={"endpoint": subscription_doc["endpoint"], "keys": subscription_doc["keys"]},
+            data=payload,
+            vapid_private_key=priv,
+            vapid_claims={"sub": VAPID_EMAIL},
+        )
+        return True, None
+    except WebPushException as e:  # type: ignore
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (404, 410):
+            try:
+                await db.push_subscriptions.delete_one({"_id": subscription_doc["_id"]})
+            except Exception:
+                pass
+        err = f"push service error: {e}"
+        logger.warning(err)
+        return False, err
+    except Exception as e:
+        err = f"send error: {type(e).__name__}: {e}"
+        logger.warning(err)
+        return False, err
+
+
+async def _notify_customer_order_status(order_doc: dict, new_status: str):
+    """Fan out a web push notification to every device the order's customer subscribed
+    from. Best-effort — failures are logged, never raised. Guests (no customer_id)
+    fall back to notifying any subscription that was keyed to the same phone (if the
+    customer ever signed in later)."""
+    titles = {
+        "accepted": "Order accepted",
+        "preparing": "Your order is being prepared",
+        "ready": "Order ready for pickup / delivery",
+        "out_for_delivery": "Your order is on the way",
+        "delivered": "Order delivered — enjoy!",
+        "rejected": "Order rejected",
+        "cancelled": "Order cancelled",
+    }
+    if new_status not in titles:
+        return
+    customer_id = order_doc.get("customer_id")
+    if not customer_id:
+        return
+    receipt = str(order_doc.get("_id", ""))[-6:].upper()
+    title = titles[new_status]
+    body = f"Order #{receipt} — tap to view live status."
+    url = f"/track/{order_doc.get('_id')}"
+    try:
+        subs = await db.push_subscriptions.find({"customer_id": str(customer_id)}).to_list(20)
+        for s in subs:
+            await _send_web_push(s, title, body, url)
+    except Exception as e:
+        logger.warning(f"_notify_customer_order_status failed: {e}")
+
+
+@api_router.post("/push/subscribe")
+async def push_subscribe(body: PushSubscriptionIn, request: Request):
+    """Register the caller's browser push subscription so we can notify them when their
+    order status changes. Requires a signed-in customer — guests don't get push (we have
+    no stable identity for them across devices)."""
+    cust = await get_optional_customer(request)
+    if not cust:
+        raise HTTPException(status_code=401, detail="Sign in to enable order notifications.")
+    if not body.endpoint or not body.keys.get("p256dh") or not body.keys.get("auth"):
+        raise HTTPException(status_code=400, detail="Invalid subscription payload.")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.push_subscriptions.update_one(
+        {"endpoint": body.endpoint},
+        {"$set": {
+            "endpoint": body.endpoint,
+            "keys": body.keys,
+            "customer_id": str(cust["_id"]),
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api_router.post("/push/unsubscribe")
+async def push_unsubscribe(body: dict, request: Request):
+    endpoint = (body or {}).get("endpoint")
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="endpoint required")
+    await db.push_subscriptions.delete_one({"endpoint": endpoint})
+    return {"ok": True}
+
+
+@api_router.get("/push/vapid-public-key")
+async def push_vapid_public_key():
+    if not VAPID_PUBLIC_KEY:
+        raise HTTPException(status_code=503, detail="Push notifications not configured on this server.")
+    return {"public_key": VAPID_PUBLIC_KEY}
+
+
+class AdminBroadcastIn(BaseModel):
+    title: str
+    body: str
+    url: Optional[str] = "/"
+    image: Optional[str] = None  # Large hero image URL shown on the notification (Android)
+    test_only: bool = False
+
+
+@api_router.post("/admin/notifications/broadcast")
+async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    title = (body.title or "").strip()
+    notif_body = (body.body or "").strip()
+    if not title or not notif_body:
+        raise HTTPException(status_code=400, detail="Title and message are required.")
+    url = body.url or "/"
+    image = (body.image or "").strip() or None
+    if body.test_only:
+        admin_email = (user.get("email") or "").lower().strip()
+        cust = await db.customers.find_one({"email": admin_email}) if admin_email else None
+        if not cust:
+            raise HTTPException(status_code=400, detail=f"No customer account found for {admin_email}. Create one and enable notifications on your phone to receive test pushes.")
+        subs = await db.push_subscriptions.find({"customer_id": str(cust["_id"])}).to_list(20)
+    else:
+        subs = await db.push_subscriptions.find({}).to_list(10000)
+    if not subs:
+        raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order.")
+    sent, failed = 0, 0
+    errors: list[str] = []
+    for s in subs:
+        ok, err = await _send_web_push(s, title, notif_body, url, image=image)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+            if err and len(errors) < 5:
+                errors.append(err)
+    if not body.test_only:
+        try:
+            await db.notification_broadcasts.insert_one({
+                "title": title, "body": notif_body, "url": url, "image": image,
+                "sent": sent, "failed": failed, "audience_size": len(subs),
+                "errors_sample": errors,
+                "sent_by": user.get("email", ""),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"broadcast log insert failed: {e}")
+    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only, "errors_sample": errors}
+
+
+@api_router.get("/admin/notifications/history")
+async def admin_notification_history(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    docs = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(50).to_list(50)
+    return [{
+        "id": str(d.pop("_id")),
+        **d,
+    } for d in docs]
+
+
+@api_router.get("/admin/notifications/stats")
+async def admin_notification_stats(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    """Subscriber count + last broadcast summary, shown on the admin notifications page."""
+    sub_count = await db.push_subscriptions.count_documents({})
+    last = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(1).to_list(1)
+    return {"subscriber_count": sub_count, "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
+
+
+@api_router.get("/admin/push/vapid/status")
+async def admin_vapid_status(request: Request):
+    """Diagnostic — shows whether the configured VAPID private key is actually parseable.
+    Operators paste env vars and accidentally strip the PEM newlines all the time;
+    this gives them a clear yes/no instead of a silent 'all pushes failed' counter."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return _vapid_key_health()
+
+
+@api_router.post("/admin/push/vapid/regenerate")
+async def admin_vapid_regenerate(request: Request):
+    """Rotate the VAPID keypair. Wipes every existing push_subscription because the old
+    keys are useless against the new pair — subscribers will re-register automatically
+    next time they open the site (push.js is idempotent).
+
+    Persists new keys to MongoDB so they survive redeploys — no env var update needed."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+    try:
+        new_pub, new_priv = _generate_vapid_keypair_raw()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Key generation failed: {e}")
+    VAPID_PUBLIC_KEY = new_pub
+    VAPID_PRIVATE_KEY = new_priv
+    # Save to MongoDB — survives every redeploy without any manual env var changes.
+    await _save_vapid_keys_to_db(new_pub, new_priv)
+    # Also write to file as a local backup (best-effort, not critical).
+    try:
+        _VAPID_KEYS_PATH.write_text(json.dumps({"public_key": new_pub, "private_key": new_priv}))
+    except Exception as e:
+        logger.warning(f"VAPID keys not persisted to disk (non-critical, DB is source of truth): {e}")
+    # Wipe stale subscriptions — they were signed against the old key and will all 410.
+    wiped = await db.push_subscriptions.delete_many({})
+    return {
+        "ok": True,
+        "public_key": new_pub,
+        "private_key": new_priv,
+        "subscriptions_wiped": wiped.deleted_count,
+        "next_step": "Keys saved to MongoDB — no env var update needed. Subscribers will re-register automatically on their next visit.",
+    }
+
+
+# Broadcast image upload — admins drop a banner image (≤2MB) and we serve it back via a
+# *public* URL that the user's push service (Mozilla/FCM/Apple) can fetch. The "image"
+# field on a Web Push payload is rendered as a large hero on Android notifications and
+# in the action panel on macOS/iOS.
+@api_router.post("/admin/notifications/upload-image")
+async def admin_upload_broadcast_image(request: Request, file: UploadFile = File(...)):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    ctype = (file.content_type or "").lower()
+    if ctype not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=400, detail="Banner must be JPG, PNG or WebP")
+    data = await file.read()
+    if len(data) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Banner must be 2MB or smaller")
+    ext = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "jpg")
+    storage_path = f"{APP_NAME}/broadcast-banners/{_uuid.uuid4().hex}.{ext}"
+    try:
+        result = _put_object(storage_path, data, ctype)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("broadcast banner upload failed")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:120]}")
+    await db.uploaded_files.insert_one({
+        "id": _uuid.uuid4().hex,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": ctype,
+        "size": result.get("size", len(data)),
+        "purpose": "broadcast_banner",
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_deleted": False,
+    })
+    # The push service (Mozilla / FCM / Apple) downloads this image from a public URL.
+    # `request.base_url` gives us the *internal* cluster hostname behind our proxy
+    # (Cloudflare / Fly), so we prefer X-Forwarded-Host + X-Forwarded-Proto when set —
+    # those reflect the externally reachable origin the push service can actually hit.
+    fwd_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    fwd_proto = request.headers.get("x-forwarded-proto") or ("https" if request.url.scheme == "https" else "http")
+    if fwd_host:
+        base = f"{fwd_proto}://{fwd_host}"
+    else:
+        base = str(request.base_url).rstrip("/")
+    public_url = f"{base}/api/public/broadcast-image/{result['path']}"
+    return {"ok": True, "image_url": public_url, "path": result["path"]}
+
+
+@api_router.get("/public/broadcast-image/{path:path}")
+async def public_broadcast_image(path: str):
+    """Public (no-auth) image fetch. Push services (FCM/Mozilla/Apple) need to pull
+    the banner from a publicly reachable URL — they don't carry user cookies."""
+    # Only serve files our admin uploaded as broadcast banners — never expose payment
+    # screenshots or other private uploads through this route.
+    if not path.startswith(f"{APP_NAME}/broadcast-banners/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        data, ctype = _get_object(path)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(
+        content=data,
+        media_type=ctype or "image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@api_router.get("/public/branding")
+async def public_branding():
+    """SEO + favicon endpoint. Returns the restaurant identity that other parts of the
+    app (index.html JSON-LD, manifest.json icons, Open Graph tags) should reflect.
+    Also used by the iOS install prompt to display the right logo."""
+    s = await get_online_settings_doc()
+    return {
+        "name": s.get("restaurant_name") or "Karachi Naseeb Biryani",
+        "logo_url": s.get("restaurant_logo_url") or "",
+        "phone": s.get("restaurant_phone") or "",
+        "whatsapp": s.get("restaurant_whatsapp") or "",
+        "email": s.get("restaurant_email") or "",
+        "address": s.get("restaurant_address") or "",
+        "opening_hours": s.get("opening_hours") or "",
+        "facebook_url": s.get("facebook_url") or "",
+        "instagram_url": s.get("instagram_url") or "",
+        "twitter_url": s.get("twitter_url") or "",
+        "google_maps_url": s.get("google_maps_url") or "",
+        "lat": s.get("restaurant_lat"),
+        "lng": s.get("restaurant_lng"),
+    }
+
+
+@api_router.get("/public/icon")
+async def public_icon():
+    """Streams the configured restaurant logo. Powers /favicon.ico, the apple-touch-icon
+    and the manifest.json icons so search engines + the OS shortcut all pick the right
+    logo without the operator having to upload three sizes manually.
+
+    Falls back to a 1x1 transparent PNG so browsers don't spam 404s when no logo is set."""
+    s = await get_online_settings_doc()
+    logo = (s.get("restaurant_logo_url") or "").strip()
+    if logo:
+        # Case 1: data: URL — decode and serve directly.
+        if logo.startswith("data:"):
+            try:
+                head, b64 = logo.split(",", 1)
+                ctype = head.split(";")[0].replace("data:", "") or "image/png"
+                import base64 as _b64x
+                return Response(
+                    content=_b64x.b64decode(b64),
+                    media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+            except Exception:
+                pass
+        # Case 2: external URL — proxy it so we control caching + same-origin.
+        if logo.startswith("http://") or logo.startswith("https://"):
+            try:
+                async with httpx.AsyncClient(timeout=10) as cx:
+                    r = await cx.get(logo)
+                if r.status_code == 200 and r.content:
+                    return Response(
+                        content=r.content,
+                        media_type=r.headers.get("content-type", "image/png"),
+                        headers={"Cache-Control": "public, max-age=3600"},
+                    )
+            except Exception:
+                pass
+    # Fallback — transparent 1x1 PNG so the browser caches *something* and stops
+    # hammering this endpoint. Operator hasn't uploaded a logo yet.
+    import base64 as _b64x
+    transparent_png = _b64x.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )
+    return Response(
+        content=transparent_png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@api_router.get("/rider/orders/{order_id}")
+async def rider_get_order(order_id: str, token: str):
+    """Token-protected, no-login rider view. The token is auto-generated on the order
+    when it transitions to `out_for_delivery` (or when an admin assigns a rider). The
+    rider opens a WhatsApp link like /rider/<order_id>?t=<token> on their phone — no
+    sign-in needed, but the token is unguessable so randoms can't peek at orders."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.get("rider_token") or token != order.get("rider_token"):
+        raise HTTPException(status_code=403, detail="Invalid or expired rider link.")
+    return _serialize_online_order(order)
+
+
+@api_router.post("/rider/orders/{order_id}/delivered")
+async def rider_mark_delivered(order_id: str, token: str, request: Request):
+    """One-tap "Mark Delivered" for the rider. Same token check as the GET above."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order.get("rider_token") or token != order.get("rider_token"):
+        raise HTTPException(status_code=403, detail="Invalid or expired rider link.")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"Order already {order.get('status')}.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "delivered", "delivered_at": now_iso, "updated_at": now_iso, "delivered_by_rider": True}},
+    )
+    refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    try:
+        await _notify_customer_order_status(refreshed, "delivered")
+    except Exception as e:
+        logger.warning(f"rider deliver push notify failed: {e}")
+    return _serialize_online_order(refreshed)
+
+
+@api_router.post("/online-orders/{order_id}/customer-location")
+async def update_customer_location(order_id: str, body: CustomerLocationUpdate, request: Request):
+    """Customer-initiated location update from the tracking page. Lets the customer
+    re-share their GPS coords (e.g. after they moved, the rider got lost, or the
+    initial pin was wrong). We append every update to `customer_location_history`
+    so the restaurant can see the trail and reach the customer at the latest spot."""
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") in {"delivered", "cancelled", "rejected"}:
+        raise HTTPException(status_code=400, detail=f"This order is already {order.get('status')} — location updates are no longer accepted.")
+    cust = await get_optional_customer(request)
+    # If the order belongs to a signed-in customer, verify ownership before letting
+    # someone update its location. Guest orders are protected by the order_id (which
+    # is unguessable enough to act as a token).
+    if order.get("customer_id"):
+        if not cust or str(cust["_id"]) != str(order.get("customer_id")):
+            raise HTTPException(status_code=403, detail="You don't have permission to update this order's location.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry = {
+        "lat": float(body.lat),
+        "lng": float(body.lng),
+        "address": (body.address or "").strip() or None,
+        "note": (body.note or "").strip() or None,
+        "updated_at": now_iso,
+    }
+    await db.online_orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {
+            "$push": {"customer_location_history": entry},
+            "$set": {
+                "customer_lat": entry["lat"],
+                "customer_lng": entry["lng"],
+                "customer_address_updated": entry["address"] or order.get("customer_address_updated"),
+                "updated_at": now_iso,
+            },
+        },
+    )
+    return {"ok": True, "history_count": len((order.get("customer_location_history") or [])) + 1, "last_entry": entry}
 
 
 @api_router.put("/online-orders/{order_id}/operations")
@@ -3201,6 +4093,7 @@ async def list_offers(active_only: bool = True):
         "image_url": o.get("image_url", ""),
         "active": o.get("active", True),
         "min_order_amount": float(o.get("min_order_amount", 0) or 0),
+        "one_time_per_customer": bool(o.get("one_time_per_customer", False)),
         "created_at": o.get("created_at", ""),
     } for o in offers]
 
@@ -3218,6 +4111,7 @@ async def create_offer(offer: OfferCreate, request: Request):
         "image_url": offer.image_url or "",
         "active": offer.active,
         "min_order_amount": float(offer.min_order_amount or 0),
+        "one_time_per_customer": bool(offer.one_time_per_customer),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.offers.insert_one(doc)
@@ -3318,9 +4212,9 @@ SAMPLE_MENU_DATA = {
 }
 
 SAMPLE_OFFERS = [
-    {"title": "Family Feast — 15% OFF", "description": "Get 15% off on orders above Rs. 1500. Use code FAMILY15.", "discount_percent": 15, "discount_amount": 0, "coupon_code": "FAMILY15", "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
-    {"title": "First Order — Rs. 100 OFF", "description": "Welcome offer! Flat Rs. 100 off on your first order. Code: WELCOME100.", "discount_percent": 0, "discount_amount": 100, "coupon_code": "WELCOME100", "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "active": True},
-    {"title": "Weekend BBQ Bonanza", "description": "Free Raita + Salad with any BBQ Platter on weekends.", "discount_percent": 0, "discount_amount": 0, "coupon_code": "", "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True},
+    {"title": "Family Feast — 15% OFF", "description": "Get 15% off on orders above Rs. 1500. Use code FAMILY15.", "discount_percent": 15, "discount_amount": 0, "coupon_code": "FAMILY15", "image_url": "https://images.unsplash.com/photo-1631515243349-e0cb75fb8d3a?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True, "one_time_per_customer": False},
+    {"title": "First Order — Rs. 100 OFF", "description": "Welcome offer! Flat Rs. 100 off on your first order. Code: WELCOME100.", "discount_percent": 0, "discount_amount": 100, "coupon_code": "WELCOME100", "image_url": "https://images.pexels.com/photos/23830980/pexels-photo-23830980.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940", "active": True, "one_time_per_customer": True},
+    {"title": "Weekend BBQ Bonanza", "description": "Free Raita + Salad with any BBQ Platter on weekends.", "discount_percent": 0, "discount_amount": 0, "coupon_code": "", "image_url": "https://images.unsplash.com/photo-1555939594-58d7cb561ad1?crop=entropy&cs=srgb&fm=jpg&q=85", "active": True, "one_time_per_customer": False},
 ]
 
 async def seed_online_data():
@@ -3353,12 +4247,26 @@ async def seed_online_data():
         for o in SAMPLE_OFFERS:
             await db.offers.insert_one({**o, "created_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Seeded {len(SAMPLE_OFFERS)} offers")
+    # Backfill: any pre-existing offer whose code starts with WELCOME or FIRST is treated
+    # as one-time-per-customer by default. Without this, the WELCOME100 code in production
+    # could be reused indefinitely by the same customer — straight revenue leak.
+    await db.offers.update_many(
+        {
+            "$or": [{"coupon_code": {"$regex": "^WELCOME", "$options": "i"}}, {"coupon_code": {"$regex": "^FIRST", "$options": "i"}}],
+            "one_time_per_customer": {"$exists": False},
+        },
+        {"$set": {"one_time_per_customer": True}},
+    )
     # Indexes
     try:
         await db.customers.create_index("email", unique=True)
         await db.online_orders.create_index([("created_at", -1)])
         await db.online_orders.create_index("customer_id")
         await db.online_orders.create_index("status")
+        await db.online_orders.create_index([("coupon_code", 1), ("customer_id", 1)])
+        await db.online_orders.create_index([("coupon_code", 1), ("phone", 1)])
+        await db.personal_coupons.create_index("code", unique=True)
+        await db.personal_coupons.create_index([("customer_id", 1), ("used", 1)])
         await db.reviews.create_index([("created_at", -1)])
         await db.offers.create_index("coupon_code")
     except Exception as e:
@@ -3399,9 +4307,9 @@ DEFAULT_ONLINE_SETTINGS = {
     "bank_account_number": "0123456789012",
     "bank_name": "Meezan Bank",
     "iban": "PK00MEZN0000000000000000",
-    "easypaisa_number": "03004928411",
+    "easypaisa_number": "03014117048",
     "easypaisa_account_title": "Karachi Naseeb",
-    "jazzcash_number": "03004928411",
+    "jazzcash_number": "03014117048",
     "jazzcash_account_title": "Karachi Naseeb",
     # Business hours — Mon..Sun. closed=true blocks ordering for that day.
     # "open"/"close" are HH:MM strings in the configured timezone.
@@ -3431,17 +4339,52 @@ async def get_online_settings_doc():
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _parse_hhmm(value: str, default_minutes: int) -> int:
-    """Parse 'HH:MM' string into minutes since midnight. Returns default_minutes on parse failure."""
+    """Parse a time string into minutes since midnight.
+
+    Accepts:
+      - 24-hour: "13:00", "9:30", "23", "13"
+      - 12-hour: "1:00 PM", "01:00 pm", "1 PM", "11pm", "12:30 AM"
+    Returns default_minutes on parse failure.
+    """
     try:
-        parts = (value or "").split(":")
-        h = int(parts[0]); m = int(parts[1]) if len(parts) > 1 else 0
-        return max(0, min(24 * 60, h * 60 + m))
+        if value is None:
+            return default_minutes
+        s = str(value).strip().lower()
+        if not s:
+            return default_minutes
+        ampm = None
+        if s.endswith("am") or s.endswith("pm"):
+            ampm = s[-2:]
+            s = s[:-2].strip()
+        parts = s.replace(".", ":").split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 and parts[1] != "" else 0
+        if ampm == "am":
+            if h == 12:
+                h = 0
+        elif ampm == "pm":
+            if h < 12:
+                h += 12
+        total = h * 60 + m
+        return max(0, min(24 * 60, total))
     except Exception:
         return default_minutes
 
+
+def _fmt_12h(minutes: int) -> str:
+    """Format minutes-since-midnight as a 12-hour string like '1:00 PM'."""
+    minutes = max(0, min(24 * 60 - 1, int(minutes)))
+    h, m = divmod(minutes, 60)
+    suffix = "AM" if h < 12 else "PM"
+    hh = h % 12
+    if hh == 0:
+        hh = 12
+    return f"{hh}:{m:02d} {suffix}"
+
 def compute_business_hours_status(settings: dict) -> dict:
     """Return current open/closed status using the configured weekly_schedule + timezone.
-    Falls back to "always open" when business_hours_enabled is False."""
+    Falls back to "always open" when business_hours_enabled is False.
+    Supports overnight wrap (e.g. open 22:00 close 02:00) when close <= open."""
     enabled = settings.get("business_hours_enabled", True)
     tz_name = settings.get("business_hours_timezone", "Asia/Karachi") or "Asia/Karachi"
     schedule = settings.get("weekly_schedule") or DEFAULT_ONLINE_SETTINGS["weekly_schedule"]
@@ -3467,15 +4410,33 @@ def compute_business_hours_status(settings: dict) -> dict:
     is_open = False
     next_close_at = None
     next_open_at = None
-    if not today.get("closed", False):
-        open_min = _parse_hhmm(today.get("open", "10:00"), 10 * 60)
-        close_min = _parse_hhmm(today.get("close", "23:00"), 23 * 60)
-        # Same-day open/close window (no overnight wrap supported in this MVP)
-        if open_min <= current_minutes < close_min:
-            is_open = True
-            next_close_at = today.get("close", "23:00")
-        elif current_minutes < open_min:
-            next_open_at = today.get("open", "10:00")
+    # Check yesterday's window for overnight-wrap (e.g. open 22:00, close 02:00)
+    yesterday_key = DAY_KEYS[(now_local.weekday() - 1) % 7]
+    y = schedule.get(yesterday_key) or {}
+    if not y.get("closed", False):
+        y_open = _parse_hhmm(y.get("open"), 10 * 60)
+        y_close = _parse_hhmm(y.get("close"), 23 * 60)
+        if y_close <= y_open:  # wrapped overnight
+            if current_minutes < y_close:
+                is_open = True
+                next_close_at = y.get("close")
+    if not is_open and not today.get("closed", False):
+        open_min = _parse_hhmm(today.get("open"), 10 * 60)
+        close_min = _parse_hhmm(today.get("close"), 23 * 60)
+        if close_min > open_min:
+            # Same-day window
+            if open_min <= current_minutes < close_min:
+                is_open = True
+                next_close_at = today.get("close", "23:00")
+            elif current_minutes < open_min:
+                next_open_at = today.get("open", "10:00")
+        elif close_min <= open_min:
+            # Overnight window starting today (close is tomorrow)
+            if current_minutes >= open_min:
+                is_open = True
+                next_close_at = today.get("close", "23:00")
+            elif current_minutes < open_min:
+                next_open_at = today.get("open", "10:00")
     if not is_open and next_open_at is None:
         # Look ahead up to 7 days for the next open day
         for offset in range(1, 8):
@@ -3484,18 +4445,28 @@ def compute_business_hours_status(settings: dict) -> dict:
             if d.get("closed", False):
                 continue
             next_dt = (now_local + timedelta(days=offset)).replace(hour=0, minute=0, second=0, microsecond=0)
-            open_min = _parse_hhmm(d.get("open", "10:00"), 10 * 60)
+            open_min = _parse_hhmm(d.get("open"), 10 * 60)
             next_dt = next_dt + timedelta(minutes=open_min)
             next_open_at = next_dt.isoformat()
             break
+    # Derive a friendly 12-hour display for next_open_at when it's a simple HH:MM
+    next_open_display = None
+    if next_open_at and ":" in str(next_open_at) and "T" not in str(next_open_at):
+        next_open_display = _fmt_12h(_parse_hhmm(next_open_at, 0))
+    next_close_display = None
+    if next_close_at:
+        next_close_display = _fmt_12h(_parse_hhmm(next_close_at, 0))
     return {
         "is_open": is_open,
         "enabled": True,
         "timezone": tz_name,
         "today": {"day": today_key, **today},
         "now": now_local.strftime("%H:%M"),
+        "now_display": _fmt_12h(current_minutes),
         "next_open_at": next_open_at,
+        "next_open_display": next_open_display,
         "next_close_at": next_close_at,
+        "next_close_display": next_close_display,
         "weekly_schedule": schedule,
     }
 
@@ -3768,12 +4739,28 @@ async def submit_bank_payment(order_id: str, req: BankPaymentReference):
         raise HTTPException(status_code=404, detail="Order not found")
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    # Hardening: this endpoint is unauthenticated by design (guest checkout), but we
+    # must not let an attacker overwrite payment details on an already-verified order
+    # or on a stale order they don't own. Reject if payment is already settled or if
+    # the submission window has elapsed.
+    if order.get("payment_status") in {"paid", "refunded", "failed"}:
+        raise HTTPException(status_code=400, detail="Payment can no longer be modified for this order")
+    if not _order_within_payment_window(order):
+        raise HTTPException(status_code=400, detail="Payment submission window has expired for this order")
+    # Lightweight input length caps so an attacker can't stuff arbitrary blobs into the DB.
+    txn_id = (req.transaction_id or "").strip()[:128]
+    payer = (req.payer_name or "").strip()[:128]
+    via = (req.payment_via or "bank").strip().lower()
+    if via not in {"bank", "easypaisa", "jazzcash"}:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
+    if not txn_id:
+        raise HTTPException(status_code=400, detail="Transaction reference is required")
     await db.online_orders.update_one(
         {"_id": ObjectId(order_id)},
         {"$set": {
-            "payment_method": req.payment_via,
-            "payment_reference": req.transaction_id,
-            "payer_name": req.payer_name or "",
+            "payment_method": via,
+            "payment_reference": txn_id,
+            "payer_name": payer,
             "payment_status": "pending_verification",
             "payment_submitted_at": datetime.now(timezone.utc).isoformat(),
         }},
@@ -3918,11 +4905,28 @@ async def _startup_storage():
     _init_obj_storage()
 
 ALLOWED_UPLOAD_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
+ALLOWED_UPLOAD_EXTS = {"jpg", "jpeg", "png", "webp", "pdf"}
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+def _order_within_payment_window(order: dict) -> bool:
+    """A guest can only attach a payment reference / screenshot for PAYMENT_SUBMIT_WINDOW_SEC
+    after the order was created. Past that window the order is treated as immutable from
+    the guest side (admin can still update via authenticated endpoints)."""
+    try:
+        created = datetime.fromisoformat(str(order.get("created_at", "")).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    elapsed = (datetime.now(timezone.utc) - created).total_seconds()
+    return 0 <= elapsed <= PAYMENT_SUBMIT_WINDOW_SEC
 
 @api_router.post("/online-orders/{order_id}/payment-screenshot")
 async def upload_payment_screenshot(order_id: str, file: UploadFile = File(...)):
-    """Customer uploads payment proof screenshot/PDF for bank/easypaisa/jazzcash."""
+    """Customer uploads payment proof screenshot/PDF for bank/easypaisa/jazzcash.
+    Allowed only within PAYMENT_SUBMIT_WINDOW_SEC after order creation and only while
+    payment is still 'pending' / 'pending_verification' — prevents an attacker from
+    overwriting screenshots on paid or stale orders."""
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception as e:
@@ -3930,17 +4934,31 @@ async def upload_payment_screenshot(order_id: str, file: UploadFile = File(...))
         raise HTTPException(status_code=404, detail="Order not found")
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+    if order.get("payment_status") in {"paid", "refunded", "failed"}:
+        raise HTTPException(status_code=400, detail="Payment screenshot can no longer be submitted for this order")
+    if not _order_within_payment_window(order):
+        raise HTTPException(status_code=400, detail="Payment submission window has expired for this order")
+
     ctype = (file.content_type or "").lower()
     if ctype not in ALLOWED_UPLOAD_MIMES:
         raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: JPG, PNG, WebP, PDF")
-    
+
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large (max 5MB)")
-    
-    ext = (file.filename or "file").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
-    storage_path = f"{APP_NAME}/payments/{order_id}/{_uuid.uuid4().hex}.{ext}"
+
+    # Whitelist the extension. Never trust the raw filename — it can contain path
+    # separators, NUL bytes, or unicode tricks that would let the storage_path escape
+    # the upload jail (e.g. "x.jpg/../../etc/passwd").
+    raw_filename = file.filename or ""
+    raw_ext = raw_filename.rsplit(".", 1)[-1].lower() if "." in raw_filename else ""
+    # strip everything except a-z0-9
+    safe_ext = "".join(ch for ch in raw_ext if ch.isalnum())[:5]
+    if safe_ext not in ALLOWED_UPLOAD_EXTS:
+        # Fall back from content-type
+        safe_ext = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+                    "image/webp": "webp", "application/pdf": "pdf"}.get(ctype, "bin")
+    storage_path = f"{APP_NAME}/payments/{order_id}/{_uuid.uuid4().hex}.{safe_ext}"
     
     try:
         result = _put_object(storage_path, data, ctype)
@@ -4091,13 +5109,47 @@ async def public_restaurant_info():
 
 
 @api_router.get("/track/{order_id}")
-async def public_track_order(order_id: str):
+async def public_track_order(order_id: str, request: Request):
+    """Public tracking endpoint reachable via order receipt link / WhatsApp.
+    Customer PII (full phone, full address) is masked here to limit exposure when
+    the order id is shared/forwarded. The authenticated /api/online-orders/{id}
+    endpoint still returns the full record to the order owner and to admins."""
     try:
         o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
         raise HTTPException(status_code=404, detail="Order not found")
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # If the caller IS authenticated (admin OR the order owner) skip masking so
+    # existing flows that rely on the full address (driver app, admin tracking) keep working.
+    show_full = False
+    try:
+        user = await get_current_user(request)
+        if user.get("role") == "admin":
+            show_full = True
+    except HTTPException:
+        pass
+    if not show_full:
+        try:
+            cust = await get_current_customer(request)
+            if cust and o.get("customer_id") and str(o.get("customer_id")) == str(cust.get("_id")):
+                show_full = True
+        except HTTPException:
+            pass
+
+    def _mask_phone(p: str) -> str:
+        p = str(p or "")
+        if len(p) <= 4:
+            return "***"
+        return "*" * (len(p) - 4) + p[-4:]
+
+    def _mask_address(a: str) -> str:
+        a = str(a or "")
+        if len(a) <= 18:
+            return a[:6] + ("…" if len(a) > 6 else "")
+        return a[:18] + "…"
+
     return {
         "id": str(o["_id"]),
         "receipt_no": str(o["_id"])[-6:].upper(),
@@ -4109,9 +5161,9 @@ async def public_track_order(order_id: str):
         "delivery_fee": o.get("delivery_fee", 0),
         "delivery_fee_overridden": bool(o.get("delivery_fee_overridden", False)),
         "discount_amount": o.get("discount_amount", 0),
-        "customer_name": o.get("customer_name", ""),
-        "phone": o.get("phone", ""),
-        "address": o.get("address", ""),
+        "customer_name": o.get("customer_name", "") if show_full else (str(o.get("customer_name", "") or "").split(" ")[0] or "Customer"),
+        "phone": o.get("phone", "") if show_full else _mask_phone(o.get("phone", "")),
+        "address": o.get("address", "") if show_full else _mask_address(o.get("address", "")),
         "created_at": o.get("created_at", ""),
         "updated_at": o.get("updated_at", ""),
         "modified": bool(o.get("modified", False)),
@@ -4494,17 +5546,69 @@ async def get_my_loyalty_transactions(request: Request, limit: int = 50):
 async def get_available_rewards(request: Request):
     # Public or authenticated - shows active rewards
     rewards = await db.loyalty_rewards.find({"is_active": True}).to_list(500)
-    return [{
-        "id": str(r.pop("_id")),
-        **{k: v for k, v in r.items() if k not in ["created_by", "updated_by"]}
-    } for r in rewards]
+    out = []
+    for r in rewards:
+        rid = str(r.pop("_id"))
+        item = {"id": rid, **{k: v for k, v in r.items() if k not in ["created_by", "updated_by"]}}
+        # Enrich free_item rewards with the linked menu item's name + image so the
+        # frontend can render a proper "FREE — <item name>" line in the cart / checkout
+        # summary instead of just the reward title. (Customers complained they couldn't
+        # tell which item they'd get until the order was placed.)
+        if item.get("reward_type") == "free_item" and item.get("reward_value"):
+            try:
+                mi = await db.menu_items.find_one({"_id": ObjectId(str(item["reward_value"]))}, {"name": 1, "image_url": 1, "price": 1})
+                if mi:
+                    item["free_item_name"] = mi.get("name", "")
+                    item["free_item_image"] = mi.get("image_url", "")
+                    item["free_item_value"] = float(mi.get("price", 0) or 0)
+            except Exception:
+                pass
+        out.append(item)
+    return out
 
 # =============================================================================
 # END LOYALTY SYSTEM
 # =============================================================================
 
 app.include_router(api_router)
-app.add_middleware(CORSMiddleware, allow_origins=os.environ.get("CORS_ORIGINS", "*").split(','), allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+# CORS hardening: in production set CORS_ORIGINS to an explicit comma-separated list
+# (e.g. "https://karachinaseeb.com,https://www.karachinaseeb.com"). If the env var is
+# missing we DEFAULT TO CLOSED instead of "*" so a misconfigured production deploy fails
+# safe rather than silently accepting cross-origin requests from anywhere.
+_cors_origins_raw = os.environ.get("CORS_ORIGINS", "")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(',') if o.strip()] if _cors_origins_raw else []
+_cors_allow_credentials = bool(_cors_origins) and ("*" not in _cors_origins)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Adds baseline HTTP security headers to every response. The headers picked here are
+    OWASP-recommended and safe defaults for an API + SPA stack — they do not break the
+    POS or the online ordering frontend. Strict-Transport-Security is only meaningful
+    when served over HTTPS (Fly.io edge already enforces force_https=true)."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        # Don't override headers already set by an upstream proxy.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(self), microphone=(self), camera=()")
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+@app.get("/api/health")
+async def health():
+    """Deploy verification: confirms which code version is running."""
+    return {"status": "ok", "version": "1.4.2-cors-credentials", "cors_credentials_enabled": _cors_allow_credentials}
 
 # --- Serve built frontend (production / local Windows install) ---
 # When `frontend/build` exists, serve it from the backend at "/".
@@ -4518,6 +5622,7 @@ try:
     if _frontend_build.exists() and (_frontend_build / "index.html").exists():
         # Static assets (JS/CSS/images)
         app.mount("/static", StaticFiles(directory=str(_frontend_build / "static")), name="static")
+        _build_real = os.path.realpath(str(_frontend_build))
 
         @app.get("/{full_path:path}")
         async def spa_fallback(full_path: str):
@@ -4525,9 +5630,18 @@ try:
             # Anything else returns index.html so React Router can take over.
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="API route not found")
+            # Reject any path that contains traversal sequences or NUL bytes outright.
+            if ".." in full_path.split("/") or "\x00" in full_path:
+                return FileResponse(str(_frontend_build / "index.html"))
             asset = _frontend_build / full_path
-            if asset.is_file():
-                return FileResponse(str(asset))
+            # Resolve symlinks and verify the resolved file is still inside the build dir
+            # to prevent reading arbitrary files via crafted full_path values.
+            try:
+                asset_real = os.path.realpath(str(asset))
+            except Exception:
+                asset_real = ""
+            if asset_real and (asset_real == _build_real or asset_real.startswith(_build_real + os.sep)) and os.path.isfile(asset_real):
+                return FileResponse(asset_real)
             return FileResponse(str(_frontend_build / "index.html"))
         logger.info(f"Serving built frontend from: {_frontend_build}")
 except Exception as e:

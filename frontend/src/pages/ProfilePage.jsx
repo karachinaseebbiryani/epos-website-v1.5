@@ -4,7 +4,9 @@ import api, { formatApiError } from "../lib/api";
 import { useAuth } from "../contexts/AuthContext";
 import { useCart } from "../contexts/CartContext";
 import { toast } from "sonner";
-import { Star, RotateCcw, ChevronRight, Package } from "lucide-react";
+import { Star, RotateCcw, ChevronRight, Package, Diamond, Tag } from "lucide-react";
+import EnableNotificationsCard from "../components/EnableNotificationsCard";
+import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
 const STATUS_COLORS = {
     pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
@@ -25,15 +27,59 @@ export default function ProfilePage() {
     const { items: cartItems, addItem } = useCart();
     const navigate = useNavigate();
     const [orders, setOrders] = useState([]);
+    const [diamondBalance, setDiamondBalance] = useState(0);
+    const [personalCoupons, setPersonalCoupons] = useState([]);
     const [reviewOrder, setReviewOrder] = useState(null);
     const [reviewForm, setReviewForm] = useState({ rating: 5, comment: "" });
     const [submitting, setSubmitting] = useState(false);
 
     useEffect(() => {
         if (user === null) navigate("/login");
-        if (user) loadOrders();
+        if (user) {
+            loadOrders();
+            loadBalance();
+            loadPersonalCoupons();
+        }
         // eslint-disable-next-line
     }, [user]);
+
+    // Keep the Diamond balance + order statuses fresh on this page. Without this, after the
+    // restaurant marks an order as Delivered, the Profile screen still showed the OLD diamond
+    // total until the customer hard-refreshed — even though the Rewards page updated. This
+    // listens to focus + the diamondsUpdated event and lightly polls every 30s.
+    useEffect(() => {
+        if (!user) return;
+        const refresh = () => { loadBalance(); loadOrders(); loadPersonalCoupons(); };
+        window.addEventListener("focus", refresh);
+        window.addEventListener("diamondsUpdated", refresh);
+        const t = setInterval(refresh, 30000);
+        return () => {
+            window.removeEventListener("focus", refresh);
+            window.removeEventListener("diamondsUpdated", refresh);
+            clearInterval(t);
+        };
+        // eslint-disable-next-line
+    }, [user]);
+
+    const loadBalance = async () => {
+        try {
+            const { data } = await api.get("/loyalty/balance");
+            setDiamondBalance(data.diamond_balance || 0);
+        } catch (err) { /* silent */ }
+    };
+
+    const loadPersonalCoupons = async () => {
+        try {
+            const { data } = await api.get("/personal-coupons/me");
+            setPersonalCoupons(data || []);
+        } catch (err) { /* silent */ }
+    };
+
+    const copyCoupon = (code) => {
+        if (!code) return;
+        try { navigator.clipboard.writeText(code); toast.success(`Copied: ${code}`); }
+        catch { toast.success(`Code: ${code}`); }
+    };
 
     const loadOrders = async () => {
         try {
@@ -80,6 +126,58 @@ export default function ProfilePage() {
                 <button onClick={() => { logout(); navigate("/"); }} data-testid="profile-logout"
                     className="text-sm text-neutral-500 hover:text-brand-red font-semibold">Sign Out</button>
             </div>
+
+            {/* iOS PWA users (Add-to-Home-Screen done) get a dedicated "Enable Notifications"
+                button here because iOS requires the permission dialog to be triggered
+                from a direct user gesture inside the installed PWA. */}
+            <EnableNotificationsCard />
+            <IosEnableNotificationsCard />
+
+            {/* Diamond balance — visible immediately on profile so the customer always knows where
+                they stand. Auto-refreshes when an order is marked Delivered (see effect above). */}
+            <Link
+                to="/rewards"
+                data-testid="profile-diamond-balance"
+                className="inline-flex items-center gap-3 mb-8 px-5 py-4 bg-gradient-to-br from-brand-yellow to-amber-300 rounded-2xl hover:shadow-lg transition-shadow"
+            >
+                <Diamond className="w-8 h-8 text-brand-ink" fill="currentColor" />
+                <div>
+                    <p className="text-[10px] uppercase tracking-[0.18em] font-bold text-brand-ink/70">Diamond Balance</p>
+                    <p className="font-display font-black text-2xl text-brand-ink leading-tight">{diamondBalance} <span className="text-sm font-bold">Diamonds</span></p>
+                </div>
+                <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-2" />
+            </Link>
+
+            {/* Personal coupons — surface the customer's unique single-use codes (e.g. the
+                second-order bonus). They're auto-applied at checkout, but we show them
+                here too so the customer feels rewarded and remembers they have a perk. */}
+            {personalCoupons.length > 0 && (
+                <div className="mb-8 p-5 bg-gradient-to-br from-brand-red to-brand-red-dark text-white rounded-2xl" data-testid="profile-personal-coupons">
+                    <div className="flex items-center gap-2 mb-1">
+                        <Tag className="w-4 h-4" />
+                        <span className="text-[11px] uppercase tracking-[0.2em] font-bold">Just for you</span>
+                    </div>
+                    <h2 className="font-display font-black text-lg">Your personal codes</h2>
+                    <p className="text-sm text-white/85 mt-1">Auto-applied at checkout. Tap a code to copy.</p>
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {personalCoupons.map((pc) => (
+                            <button
+                                key={pc.id}
+                                type="button"
+                                onClick={() => copyCoupon(pc.code)}
+                                data-testid={`profile-coupon-${pc.id}`}
+                                className="text-left bg-white/15 hover:bg-white/25 backdrop-blur-sm border-2 border-dashed border-white/60 rounded-xl px-3 py-2 transition-colors"
+                            >
+                                <div className="font-display font-black text-base tracking-wider">{pc.code}</div>
+                                <div className="text-[11px] text-white/80">
+                                    {pc.discount_percent > 0 ? `${pc.discount_percent}% OFF` : `Rs. ${pc.discount_amount} OFF`}
+                                    {pc.expires_at && ` · expires ${new Date(pc.expires_at).toLocaleDateString()}`}
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             <h2 className="font-display font-bold text-2xl text-brand-ink mb-5">Order History</h2>
 

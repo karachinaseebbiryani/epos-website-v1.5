@@ -27,6 +27,7 @@ import BankPaymentPage from "./pages/BankPaymentPage";
 import PaymentResultPage from "./pages/PaymentResultPage";
 import TrackingPage from "./pages/TrackingPage";
 import ReviewPage from "./pages/ReviewPage";
+import RiderViewPage from "./pages/RiderViewPage";
 
 // --- Online-store admin panel (NEW) ---
 import AdminLoginPage from "./pages/admin/AdminLoginPage";
@@ -40,6 +41,7 @@ import AdminEvents from "./pages/admin/AdminEvents";
 import AdminSettings from "./pages/admin/AdminSettings";
 import LoyaltySettings from "./pages/admin/LoyaltySettings";
 import RewardsManagement from "./pages/admin/RewardsManagement";
+import AdminNotifications from "./pages/admin/AdminNotifications";
 import ReviewManagement from "./pages/admin/ReviewManagement";
 import AdminLayout from "./components/AdminLayout";
 
@@ -89,6 +91,7 @@ function App() {
           <CartProvider>
             <BrowserRouter>
               <Toaster position="top-center" richColors />
+              <SpeedInsights />
               <Routes>
                 {/* ------------ Public customer-facing site ------------ */}
                 <Route element={<Layout />}>
@@ -111,6 +114,10 @@ function App() {
                   <Route path="/payment/success" element={<PaymentResultPage outcome="success" />} />
                   <Route path="/payment/cancel" element={<PaymentResultPage outcome="cancel" />} />
                 </Route>
+
+                {/* Rider one-tap delivery view — bypasses the customer Layout (no header
+                    chrome) because riders use this on their phones in 1 hand. */}
+                <Route path="/rider/:orderId" element={<RiderViewPage />} />
 
                 {/* ------------ Admin login pages ------------
                      Unified sign-in is the canonical entry point. The two legacy
@@ -137,6 +144,7 @@ function App() {
                   <Route path="/admin/reviews" element={<ReviewManagement />} />
                   <Route path="/admin/loyalty-settings" element={<LoyaltySettings />} />
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
+                  <Route path="/admin/notifications" element={<AdminNotifications />} />
                   <Route path="/admin/settings" element={<AdminSettings />} />
 
                   {/* ----- POS Operations (preserved from OLD) ----- */}

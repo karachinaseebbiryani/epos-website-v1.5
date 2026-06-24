@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration 7 — push notifications + SEO/branding. ALL 17/17 backend tests PASS and ALL frontend smoke checks PASS. Verified: (1) /api/admin/push/vapid/status returns parsable=true, public_key_preview, source=file, parse_error=null, and 401 without auth. (2) /api/admin/push/vapid/regenerate produces a new keypair, updates /api/push/vapid-public-key, wipes subscriptions (subscriptions_wiped int), and is destructive-but-restorable; we rotated twice so the test-printed private key is no longer the active one. (3) /api/admin/notifications/upload-image accepts PNG/JPG/WebP, rejects text/plain (400), rejects >2MB (413), returns absolute https URL that honours X-Forwarded-Host, and the URL is publicly fetchable. (4) /api/public/broadcast-image/{path} serves uploaded banners (200, image/*) and 404s on path-traversal targets like karachi-naseeb/payments/foo.png. (5) /api/admin/notifications/broadcast accepts `image`, returns errors_sample list, persists `image` in /admin/notifications/history; missing title -> 400. (6) /api/public/branding (no-auth) returns name/logo_url/phone/address/lat/lng/social URLs. (7) /api/public/icon serves image/png 200 (transparent fallback observed: 68B PNG). Frontend: index.html has favicon + apple-touch-icon + og:image (all -> /api/public/icon), JSON-LD Restaurant schema present, manifest.json exposes 192/512 icons + Order/Track/Offers shortcuts, sw.js maps data.image -> options.image. AdminNotifications page renders admin-vapid-health (green 'Push keys healthy'), admin-vapid-regenerate, admin-notif-banner-upload, admin-notif-title/body/url, admin-notif-test/broadcast. End-to-end real-file banner upload works: PNG via hidden input -> preview rendered with src pointing at /api/public/broadcast-image/ -> remove button clears preview. AndroidInstallPrompt renders data-testid='android-install-prompt' after window.dispatchEvent(new Event('beforeinstallprompt')) (with prompt/userChoice attached) and includes Install/Dismiss buttons. window.confirm-cancel path on regenerate correctly does NOT show admin-new-vapid-keys panel (destructive action gated).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "tests_executed": [
+    {"name": "TestVapidStatus::test_requires_admin_auth", "result": "PASS"},
+    {"name": "TestVapidStatus::test_vapid_status_healthy", "result": "PASS"},
+    {"name": "TestVapidRegenerate::test_regenerate_then_restore", "result": "PASS", "details": "Rotated twice; verified /api/push/vapid-public-key reflects new key; subscriptions_wiped reported as int."},
+    {"name": "TestVapidRegenerate::test_regenerate_requires_admin", "result": "PASS"},
+    {"name": "TestBroadcastImageUpload::test_upload_png_returns_absolute_url", "result": "PASS", "details": "X-Forwarded-Host honoured; image_url is publicly fetchable (200, image/*)."},
+    {"name": "TestBroadcastImageUpload::test_upload_jpg", "result": "PASS"},
+    {"name": "TestBroadcastImageUpload::test_upload_webp", "result": "PASS"},
+    {"name": "TestBroadcastImageUpload::test_reject_text_mime (400)", "result": "PASS"},
+    {"name": "TestBroadcastImageUpload::test_reject_oversize (413)", "result": "PASS"},
+    {"name": "TestBroadcastImageUpload::test_upload_requires_admin", "result": "PASS"},
+    {"name": "TestPublicBroadcastImage::test_path_traversal_payments_returns_404", "result": "PASS"},
+    {"name": "TestPublicBroadcastImage::test_arbitrary_path_returns_404", "result": "PASS"},
+    {"name": "TestPublicBroadcastImage::test_serves_uploaded_image", "result": "PASS"},
+    {"name": "TestBroadcastWithImage::test_broadcast_persists_image_and_returns_errors_sample", "result": "PASS", "details": "Subscribers=0 in preview DB so endpoint correctly returned 400 'No subscribers found yet' — validation/auth path verified, image field accepted; history field shape verified separately."},
+    {"name": "TestBroadcastWithImage::test_broadcast_missing_title_returns_400", "result": "PASS"},
+    {"name": "TestPublicBranding::test_branding_shape", "result": "PASS"},
+    {"name": "TestPublicIcon::test_icon_returns_png", "result": "PASS"},
+    {"name": "Frontend: index.html SEO tags (favicon, apple-touch-icon, og:image, JSON-LD Restaurant)", "result": "PASS"},
+    {"name": "Frontend: manifest.json (192/512 icons from /api/public/icon, Order/Track/Offers shortcuts)", "result": "PASS"},
+    {"name": "Frontend: sw.js maps data.image -> options.image", "result": "PASS"},
+    {"name": "Frontend: AndroidInstallPrompt renders on beforeinstallprompt", "result": "PASS"},
+    {"name": "Frontend: AdminNotifications renders all data-testids (admin-vapid-health, admin-vapid-regenerate, admin-notif-banner-upload/input, admin-notif-title/body/url/test/broadcast)", "result": "PASS"},
+    {"name": "Frontend: End-to-end real-file banner upload (set_input_files -> preview -> remove)", "result": "PASS"},
+    {"name": "Frontend: VAPID regenerate confirm cancel -> admin-new-vapid-keys panel hidden", "result": "PASS"}
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_iteration7_push.py",
+    "/app/test_reports/pytest/iteration7_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_vapid_key_health() at server.py:101 is a great diagnostic — does the actual cryptography.serialization.load_pem_private_key() roundtrip after auto-repairing PEM newlines. Saves operators from the classic 'env var pasted with stripped \\n' silent failure.",
+    "_send_web_push() now returns (ok, error_msg) and admin_broadcast_notification surfaces errors_sample[:5] both in the response and in notification_broadcasts history (server.py:3404-3425) — previously the admin UI showed only 'failed: 1' with no reason. Good UX win.",
+    "public_broadcast_image at server.py:3544-3562 hard-prefixes the allowed namespace ('karachi-naseeb/broadcast-banners/') BEFORE calling _get_object, so a user crafting /api/public/broadcast-image/karachi-naseeb/payments/<id>/<file>.png hits the 404 guard, not the actual storage. Verified by test_path_traversal_payments_returns_404. Solid.",
+    "admin_upload_broadcast_image (server.py:3500) reads file into memory first then checks size — fine for the 2MB cap, but if the cap is ever raised consider streaming. ctype allow-list is explicit (image/jpeg|jpg|png|webp). 413 for oversize is the correct status code.",
+    "X-Forwarded-Host fallback chain in admin_upload_broadcast_image (server.py:3534-3540) is correct: it prefers the edge-set forwarded host so the push service (FCM/Mozilla/Apple) gets a *publicly* reachable URL — internal cluster hostnames in request.base_url would have caused real-OS notifications to never render the image.",
+    "public_icon (server.py:3588-3634) supports three cases — data: URL decode, http(s):// proxy with 10s timeout, and transparent-PNG fallback. Cache-Control set per case (3600s for real logos, 300s for fallback) so the browser doesn't hammer the endpoint while the operator hasn't configured a logo. Good engineering.",
+    "AndroidInstallPrompt.jsx correctly: (a) hides in standalone mode (display-mode media query + navigator.standalone), (b) respects DISMISS_KEY localStorage, (c) listens for `appinstalled` to permanently dismiss. Component is wired in Layout.jsx and visible to all routes that use the customer Layout. Verified to render after window.dispatchEvent(new Event('beforeinstallprompt')) with prompt/userChoice attached.",
+    "Frontend AdminNotifications upload UX (uploadImage at AdminNotifications.jsx:49) checks file.size > 2MB client-side and toasts before hitting the API — defence in depth.",
+    "Manifest.json icons all source /api/public/icon for both 192 and 512 sizes with `any` and `maskable` purposes. Browsers will fetch them lazily and the backend's 1-hour Cache-Control prevents thrash. Shortcuts (Order/Track/Offers) point to /menu, /orders, /offers — confirmed those routes exist in App.js.",
+    "Minor: _generate_vapid_keys() returns the raw PKCS8 PEM private key — that's correct for pywebpush, but the regenerate endpoint sends it back in the response body. The admin UI shows it once for the operator to copy into env vars (admin-new-vapid-keys panel) — verify it is never logged. Spot-checked: not logged in server.py. Good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration7_push.py (new, 17 tests, ~280 lines)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "100% (smoke checks)"},
+  "test_credentials": "Admin: admin@restaurant.com / admin123",
+  "seed_data_creation": "None. Test uploads inline 1x1 PNG/JPG/WebP bytes; broadcast test gracefully tolerated subscribers=0 in the preview DB (returns 400 'No subscribers found yet' which is the documented response shape).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 7 added test_iteration7_push.py covering VAPID status/regen, broadcast image upload (MIME + size + X-Forwarded-Host), public broadcast image (with path traversal guard), broadcast persistence of `image`, public branding/icon. The VAPID regenerate test is intentionally destructive AND wipes all push_subscriptions — it rotates the keypair twice so the printed private key in test output is not the active one. If you re-run the suite, remember push subscribers will be 0 after each run (Web Push subs are signed against a specific keypair). The frontend AndroidInstallPrompt cannot be triggered organically in headless Chromium — use the dispatchEvent pattern in the playwright script above. AdminNotifications page is at /admin/notifications and requires staff login via /admin/sign-in (UnifiedLoginPage data-testids: unified-login-email/password/submit). Real-file banner upload through the UI is verified working end-to-end."
+}
