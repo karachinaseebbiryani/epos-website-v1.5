@@ -164,7 +164,6 @@ function App() {
           </CartProvider>
         </StaffAuthProvider>
       </AuthProvider>
-      <Analytics />
     </div>
   );
   // Wrap in GoogleOAuthProvider only when a client id is configured. The provider must be a
