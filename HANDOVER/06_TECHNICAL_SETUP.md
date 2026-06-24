@@ -90,7 +90,7 @@ STRIPE_API_KEY=""                           # test key from /app/scripts (if exi
 
 ```bash
 # Protected by Emergent platform — do NOT change in preview env
-REACT_APP_BACKEND_URL="https://order-management-139.preview.emergentagent.com"
+REACT_APP_BACKEND_URL="https://alert-delivery-2.preview.emergentagent.com"
 ```
 
 For local dev, set to `http://localhost:8001` instead.
