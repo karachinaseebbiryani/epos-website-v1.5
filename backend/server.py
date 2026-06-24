@@ -202,8 +202,15 @@ def _vapid_key_health() -> dict:
     try:
         normalized = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
         info["normalized"] = normalized != VAPID_PRIVATE_KEY
+        # Verify with BOTH parsers: cryptography's load_pem_private_key (always lenient)
+        # AND py-vapid's Vapid01.from_pem — the latter is what pywebpush actually uses
+        # at send-time. If we only checked the former, a PEM that crashes pywebpush
+        # would report parsable:true here (the original bug that hid this issue for
+        # weeks). Both must succeed for the diagnostic to be trustworthy.
         from cryptography.hazmat.primitives import serialization as _ser
         _ser.load_pem_private_key(normalized.encode(), password=None)
+        from py_vapid import Vapid01  # type: ignore
+        Vapid01.from_pem(normalized.encode())
         info["parsable"] = True
     except Exception as e:
         info["parse_error"] = f"{type(e).__name__}: {e}"
@@ -3354,9 +3361,18 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         return False, "VAPID keys not configured on server."
     try:
         from pywebpush import webpush, WebPushException  # type: ignore
+        from py_vapid import Vapid01  # type: ignore
         # Auto-repair every common env-var corruption — literal backslash-n, wrapping
         # quotes, missing newlines, etc. Idempotent on clean PEMs. See _normalize_vapid_pem.
         priv = _normalize_vapid_pem(VAPID_PRIVATE_KEY)
+        # CRITICAL: pywebpush 2.x routes string input through Vapid.from_string(), which
+        # strips all newlines from the PEM and tries to base64-decode the whole thing —
+        # including the "-----BEGIN/END-----" markers — producing garbage bytes and an
+        # "ASN.1 parsing error: invalid length". The fix is to parse the PEM ourselves
+        # via Vapid01.from_pem (which extracts the body correctly) and pass the resulting
+        # Vapid01 instance — pywebpush checks isinstance(Vapid01) first and skips the
+        # broken from_string path. See: https://github.com/web-push-libs/pywebpush v2.x.
+        vapid_obj = Vapid01.from_pem(priv.encode())
         payload_dict = {"title": title, "body": body, "url": url, "icon": "/api/public/icon", "badge": "/api/public/icon"}
         if image:
             payload_dict["image"] = image
@@ -3364,7 +3380,7 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         webpush(
             subscription_info={"endpoint": subscription_doc["endpoint"], "keys": subscription_doc["keys"]},
             data=payload,
-            vapid_private_key=priv,
+            vapid_private_key=vapid_obj,
             vapid_claims={"sub": VAPID_EMAIL},
         )
         return True, None
