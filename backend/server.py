@@ -49,39 +49,63 @@ _login_attempts: "dict[str, deque]" = defaultdict(deque)
 _login_lockouts: "dict[str, float]" = {}
 
 # --- Web Push (browser notification) configuration ---
-# VAPID keys identify the application server to the push service. They're auto-generated
-# on first boot (persisted to /app/backend/vapid_keys.json) so this works zero-config in
-# dev. In production, set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY env vars to keep the same
-# pair across redeploys — otherwise every redeploy invalidates all existing subscriptions.
+# VAPID keys are stored in MongoDB (app_config collection) so they survive every redeploy
+# without any manual env var management. Env vars still override when set (dev/CI use).
+# Migration path: on first boot the old vapid_keys.json is read and saved to MongoDB,
+# after which the file is no longer needed.
 VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:karachinaseebbiryani@gmail.com")
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
 _VAPID_KEYS_PATH = Path(__file__).parent / "vapid_keys.json"
+# Module-level sync fallback: load from file so the key is available before startup().
+# MongoDB load (async) happens in startup() and overwrites these if a DB record exists.
 if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
     try:
         if _VAPID_KEYS_PATH.exists():
             _kj = json.loads(_VAPID_KEYS_PATH.read_text())
             VAPID_PUBLIC_KEY = _kj.get("public_key")
             VAPID_PRIVATE_KEY = _kj.get("private_key")
-        if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
-            from py_vapid import Vapid  # type: ignore
-            _v = Vapid()
-            _v.generate_keys()
-            # py-vapid v1.9 exposes the raw PEMs via private_pem()/public_pem(), but the
-            # web push libs expect URL-safe base64 (the "applicationServerKey" format).
-            # `_v.public_key.public_bytes_raw()` returns 65 bytes (uncompressed P-256).
-            from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
-            import base64 as _b64
-            priv_der = _v.private_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
-            # Save in the form pywebpush expects (PEM for private; URL-safe-b64 for public).
-            priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
-            pub_raw = _v.public_key.public_bytes(Encoding.X962, __import__("cryptography").hazmat.primitives.serialization.PublicFormat.UncompressedPoint)
-            VAPID_PRIVATE_KEY = priv_pem
-            VAPID_PUBLIC_KEY = _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode()
-            _VAPID_KEYS_PATH.write_text(json.dumps({"public_key": VAPID_PUBLIC_KEY, "private_key": VAPID_PRIVATE_KEY}))
-            _ = priv_der  # silence unused
     except Exception as _e:
         logger_init_err = _e  # captured for later; logger may not exist yet
+
+
+async def _load_vapid_keys_from_db() -> bool:
+    """Load VAPID keys from MongoDB app_config. Returns True if keys were found."""
+    global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+    try:
+        doc = await db.app_config.find_one({"key": "vapid_keys"})
+        if doc and doc.get("public_key") and doc.get("private_key"):
+            VAPID_PUBLIC_KEY = doc["public_key"]
+            VAPID_PRIVATE_KEY = doc["private_key"]
+            return True
+    except Exception as e:
+        logger.warning(f"Could not load VAPID keys from MongoDB: {e}")
+    return False
+
+
+async def _save_vapid_keys_to_db(pub: str, priv: str) -> None:
+    """Persist VAPID keys to MongoDB so they survive redeploys."""
+    try:
+        await db.app_config.update_one(
+            {"key": "vapid_keys"},
+            {"$set": {"key": "vapid_keys", "public_key": pub, "private_key": priv,
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"Could not save VAPID keys to MongoDB: {e}")
+
+
+def _generate_vapid_keypair_raw() -> tuple:
+    """Generate a fresh VAPID keypair. Returns (public_key_url_b64, private_key_pem)."""
+    from py_vapid import Vapid  # type: ignore
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, PublicFormat
+    import base64 as _b64
+    _v = Vapid()
+    _v.generate_keys()
+    priv_pem = _v.private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+    pub_raw = _v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return _b64.urlsafe_b64encode(pub_raw).rstrip(b"=").decode(), priv_pem
 
 
 def _normalize_vapid_pem(priv: str) -> str:
@@ -123,6 +147,17 @@ def _normalize_vapid_pem(priv: str) -> str:
                 wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
                 p = f"{head}{begin}\n{wrapped}\n{end}{foot_tail}".strip()
                 break
+    # pywebpush 2.x requires SEC1 format (BEGIN EC PRIVATE KEY) not PKCS8
+    # (BEGIN PRIVATE KEY). Convert if needed — the underlying key material is identical.
+    if "BEGIN PRIVATE KEY" in p and "BEGIN EC PRIVATE KEY" not in p:
+        try:
+            from cryptography.hazmat.primitives.serialization import (
+                load_pem_private_key, Encoding, PrivateFormat, NoEncryption)
+            _key = load_pem_private_key(p.encode(), password=None)
+            p = _key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL,
+                                   NoEncryption()).decode()
+        except Exception:
+            pass  # leave as-is if conversion fails; let pywebpush surface the real error
     # Make sure the PEM ends with a newline (cryptography is tolerant but pywebpush /
     # py-vapid sometimes feed the string through openssl which is pickier).
     if "BEGIN" in p and not p.endswith("\n"):
@@ -2164,6 +2199,26 @@ async def startup():
         await db.z_reports.create_index([("date", -1)])
     except Exception as e:
         logger.warning(f"Index creation skipped: {e}")
+    # Load VAPID keys from MongoDB (primary persistent store).
+    # Falls back to: env vars (already loaded at module level) → vapid_keys.json → auto-generate.
+    # This means keys survive every redeploy with zero manual intervention.
+    if not os.environ.get("VAPID_PUBLIC_KEY"):  # env vars take priority; skip DB load if set
+        db_has_keys = await _load_vapid_keys_from_db()
+        if not db_has_keys:
+            # Nothing in DB yet — migrate from file if present, otherwise auto-generate.
+            global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+            if not (VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY):
+                try:
+                    new_pub, new_priv = _generate_vapid_keypair_raw()
+                    VAPID_PUBLIC_KEY = new_pub
+                    VAPID_PRIVATE_KEY = new_priv
+                    logger.info("VAPID keys auto-generated on first boot.")
+                except Exception as e:
+                    logger.error(f"VAPID key generation failed: {e}")
+            # Save whatever we have (migrated from file or newly generated) into MongoDB.
+            if VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY:
+                await _save_vapid_keys_to_db(VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY)
+                logger.info("VAPID keys saved to MongoDB — will survive all future redeploys.")
     await seed_admin()
     await cleanup_old_data()
     # Start the scheduler
@@ -3493,23 +3548,24 @@ async def admin_vapid_regenerate(request: Request):
     keys are useless against the new pair — subscribers will re-register automatically
     next time they open the site (push.js is idempotent).
 
-    Persists to /app/backend/vapid_keys.json so it survives backend restarts in dev.
-    In production, the operator must ALSO update VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
-    env vars on Fly.io (we return the new values so they can copy them)."""
+    Persists new keys to MongoDB so they survive redeploys — no env var update needed."""
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     global VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
     try:
-        new_pub, new_priv = _generate_vapid_keys()
+        new_pub, new_priv = _generate_vapid_keypair_raw()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Key generation failed: {e}")
     VAPID_PUBLIC_KEY = new_pub
     VAPID_PRIVATE_KEY = new_priv
+    # Save to MongoDB — survives every redeploy without any manual env var changes.
+    await _save_vapid_keys_to_db(new_pub, new_priv)
+    # Also write to file as a local backup (best-effort, not critical).
     try:
         _VAPID_KEYS_PATH.write_text(json.dumps({"public_key": new_pub, "private_key": new_priv}))
     except Exception as e:
-        logger.warning(f"VAPID keys not persisted to disk: {e}")
+        logger.warning(f"VAPID keys not persisted to disk (non-critical, DB is source of truth): {e}")
     # Wipe stale subscriptions — they were signed against the old key and will all 410.
     wiped = await db.push_subscriptions.delete_many({})
     return {
@@ -3517,7 +3573,7 @@ async def admin_vapid_regenerate(request: Request):
         "public_key": new_pub,
         "private_key": new_priv,
         "subscriptions_wiped": wiped.deleted_count,
-        "next_step": "Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY env vars on your backend host so the keys survive redeploys.",
+        "next_step": "Keys saved to MongoDB — no env var update needed. Subscribers will re-register automatically on their next visit.",
     }
 
 
