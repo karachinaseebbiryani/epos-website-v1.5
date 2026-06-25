@@ -3373,7 +3373,7 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         # Vapid01 instance — pywebpush checks isinstance(Vapid01) first and skips the
         # broken from_string path. See: https://github.com/web-push-libs/pywebpush v2.x.
         vapid_obj = Vapid01.from_pem(priv.encode())
-        payload_dict = {"title": title, "body": body, "url": url, "icon": "/api/public/icon", "badge": "/api/public/icon"}
+        payload_dict = {"title": title, "body": body, "url": url, "icon": "/logo-192.png", "badge": "/favicon-32x32.png"}
         if image:
             payload_dict["image"] = image
         payload = json.dumps(payload_dict)

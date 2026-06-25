@@ -91,7 +91,6 @@ function App() {
           <CartProvider>
             <BrowserRouter>
               <Toaster position="top-center" richColors />
-              <SpeedInsights />
               <Routes>
                 {/* ------------ Public customer-facing site ------------ */}
                 <Route element={<Layout />}>

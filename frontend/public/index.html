@@ -15,12 +15,16 @@
     <meta name="theme-color" content="#D92D20" />
     <link rel="manifest" href="/manifest.json" />
 
-    <!-- Favicon + apple-touch-icon are served from the backend so they auto-update
-         whenever the operator changes the restaurant logo in admin settings. -->
-    <link rel="icon" href="/api/public/icon" />
-    <link rel="shortcut icon" href="/api/public/icon" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/api/public/icon" />
-    <link rel="apple-touch-icon-precomposed" href="/api/public/icon" />
+    <!-- Favicon set — static files baked into the Vercel build. We previously pointed
+         these at /api/public/icon (backend-served dynamic logo) but Vercel's rewrites
+         send /api/* to index.html, so the favicon was effectively broken in production.
+         Static files always work; the admin "upload logo" flow now serves through the
+         Layout component instead, which is the correct place for a dynamic header logo. -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Karachi Naseeb" />
@@ -32,15 +36,19 @@
         content="Karachi Naseeb Biryani & Murg Pulao — order authentic Pakistani biryani, pulao, BBQ and karahi online. Free delivery in Lahore. Cash on Delivery available. Earn Diamonds on every order."
     />
     <meta name="keywords" content="karachi biryani lahore, naseeb biryani, murg pulao, BBQ delivery Lahore, Pakistani food online order, cash on delivery biryani" />
-    <link rel="canonical" href="https://karachinaseeb.com/" />
+    <link rel="canonical" href="https://www.karachinaseebbiryani.com/" />
 
     <!-- Open Graph — controls the preview when the link is shared on WhatsApp /
-         Facebook / Twitter. The og:image is served from /api/public/icon so it
-         always reflects the latest logo uploaded in admin settings. -->
+         Facebook / Twitter. URLs MUST be absolute or the platforms ignore them. -->
     <meta property="og:type" content="restaurant" />
+    <meta property="og:url" content="https://www.karachinaseebbiryani.com/" />
     <meta property="og:title" content="Karachi Naseeb Biryani & Murg Pulao" />
     <meta property="og:description" content="Order authentic Karachi-style biryani, pulao and BBQ online — live tracking, free delivery, Cash on Delivery." />
-    <meta property="og:image" content="/api/public/icon" />
+    <meta property="og:image" content="https://www.karachinaseebbiryani.com/og-image.jpg" />
+    <meta property="og:image:secure_url" content="https://www.karachinaseebbiryani.com/og-image.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="Karachi Naseeb Biryani logo" />
     <meta property="og:site_name" content="Karachi Naseeb Biryani" />
     <meta property="og:locale" content="en_PK" />
@@ -48,17 +56,19 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Karachi Naseeb Biryani & Murg Pulao" />
     <meta name="twitter:description" content="Order authentic Karachi-style biryani, pulao and BBQ online — live tracking, Cash on Delivery." />
-    <meta name="twitter:image" content="/api/public/icon" />
+    <meta name="twitter:image" content="https://www.karachinaseebbiryani.com/og-image.jpg" />
 
-    <!-- JSON-LD: Restaurant schema. Tells Google + ChatGPT what this business is
-         so the logo shows up on search results, knowledge panel and AI answers. -->
+    <!-- JSON-LD: Restaurant schema. Image / logo URLs MUST be absolute https://
+         URLs for Google to use them in search results, knowledge panel and AI
+         answers. Relative paths get silently dropped by the structured data parser. -->
     <script type="application/ld+json">
     {
         "@context": "https://schema.org",
         "@type": "Restaurant",
         "name": "Karachi Naseeb Biryani and Murg Pulao",
-        "image": "/api/public/icon",
-        "logo": "/api/public/icon",
+        "url": "https://www.karachinaseebbiryani.com/",
+        "image": "https://www.karachinaseebbiryani.com/og-image.jpg",
+        "logo": "https://www.karachinaseebbiryani.com/logo-512.png",
         "description": "Authentic Karachi-style biryani, murg pulao, BBQ and karahi delivered hot across Lahore.",
         "servesCuisine": ["Pakistani", "Biryani", "BBQ", "Karahi"],
         "priceRange": "Rs",
@@ -72,12 +82,24 @@
             "addressCountry": "PK"
         },
         "acceptsReservations": false,
-        "hasMenu": "/menu",
+        "hasMenu": "https://www.karachinaseebbiryani.com/menu",
         "potentialAction": {
             "@type": "OrderAction",
-            "target": "/menu",
+            "target": "https://www.karachinaseebbiryani.com/menu",
             "deliveryMethod": ["http://purl.org/goodrelations/v1#DeliveryModeOwnFleet", "http://purl.org/goodrelations/v1#DeliveryModePickUp"]
         }
+    }
+    </script>
+
+    <!-- Organisation schema — separate entry so Google has a clean logo binding
+         for the brand/knowledge-panel side (distinct from the Restaurant entity). -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Karachi Naseeb Biryani",
+        "url": "https://www.karachinaseebbiryani.com/",
+        "logo": "https://www.karachinaseebbiryani.com/logo-512.png"
     }
     </script>
 
