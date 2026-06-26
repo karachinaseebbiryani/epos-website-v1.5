@@ -45,6 +45,9 @@ import AdminNotifications from "./pages/admin/AdminNotifications";
 import ReviewManagement from "./pages/admin/ReviewManagement";
 import AdminFAQs from "./pages/admin/AdminFAQs";
 import FAQPage from "./pages/FAQPage";
+import AboutPage from "./pages/AboutPage";
+import ContactPage from "./pages/ContactPage";
+import PolicyPage from "./pages/PolicyPage";
 import AdminLayout from "./components/AdminLayout";
 
 // --- Operational POS pages (preserved from OLD system, lazy-loaded) ---
@@ -105,6 +108,12 @@ function App() {
                   <Route path="/offers" element={<OffersPage />} />
                   <Route path="/events" element={<EventsPage />} />
                   <Route path="/faq" element={<FAQPage />} />
+                  <Route path="/about" element={<AboutPage />} />
+                  <Route path="/contact" element={<ContactPage />} />
+                  <Route path="/privacy" element={<PolicyPage />} />
+                  <Route path="/terms" element={<PolicyPage />} />
+                  <Route path="/delivery" element={<PolicyPage />} />
+                  <Route path="/rewards-program" element={<PolicyPage />} />
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/orders" element={<OrdersPage />} />
                   <Route path="/rewards" element={<RewardsPage />} />
