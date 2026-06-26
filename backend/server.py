@@ -2372,6 +2372,27 @@ class OfferUpdate(BaseModel):
     min_order_amount: Optional[float] = None
     one_time_per_customer: Optional[bool] = None
 
+class FAQCreate(BaseModel):
+    """Public-facing frequently asked questions, admin-managed.
+    `sort_order` decides display order on the public /faq page (lower = higher).
+    `enabled` lets admin hide entries without deleting them."""
+    question: str
+    answer: str
+    sort_order: int = 0
+    enabled: bool = True
+
+class FAQUpdate(BaseModel):
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    sort_order: Optional[int] = None
+    enabled: Optional[bool] = None
+
+class FAQReorder(BaseModel):
+    """Atomic re-order helper — admin sends the full ordered list of FAQ ids
+    after a drag-and-drop or arrow-shift. We persist sort_order = list index."""
+    ids: list[str]
+
+
 class EventBookingCreate(BaseModel):
     name: str
     phone: str
@@ -4237,6 +4258,234 @@ async def delete_offer(offer_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Admin only")
     await db.offers.delete_one({"_id": ObjectId(offer_id)})
     return {"message": "Deleted"}
+
+
+# ===== FAQ ENDPOINTS =====
+# Public list (only enabled) drives the /faq page and the FAQ JSON-LD schema.
+# Admin endpoints (full CRUD + reorder) live behind get_current_user role=admin.
+
+def _serialize_faq(f: dict) -> dict:
+    return {
+        "id": str(f["_id"]),
+        "question": f.get("question", ""),
+        "answer": f.get("answer", ""),
+        "sort_order": int(f.get("sort_order", 0)),
+        "enabled": bool(f.get("enabled", True)),
+        "created_at": f.get("created_at", ""),
+        "updated_at": f.get("updated_at", ""),
+    }
+
+
+@api_router.get("/faqs")
+async def list_faqs_public():
+    """Public FAQ feed — only enabled entries, ordered for display. Cached by the
+    frontend; backs both the /faq page UI and the FAQPage schema.org JSON-LD."""
+    faqs = await db.faqs.find({"enabled": True}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    return [_serialize_faq(f) for f in faqs]
+
+
+@api_router.get("/admin/faqs")
+async def list_faqs_admin(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    faqs = await db.faqs.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(1000)
+    return [_serialize_faq(f) for f in faqs]
+
+
+@api_router.post("/admin/faqs")
+async def create_faq(body: FAQCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    q = (body.question or "").strip()
+    a = (body.answer or "").strip()
+    if not q or not a:
+        raise HTTPException(status_code=400, detail="Both question and answer are required.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # If no explicit sort_order, append to the end so new FAQs go last by default.
+    if body.sort_order == 0:
+        last = await db.faqs.find({}).sort("sort_order", -1).limit(1).to_list(1)
+        next_order = (int(last[0].get("sort_order", 0)) + 1) if last else 0
+    else:
+        next_order = int(body.sort_order)
+    doc = {
+        "question": q,
+        "answer": a,
+        "sort_order": next_order,
+        "enabled": bool(body.enabled),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    result = await db.faqs.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _serialize_faq(doc)
+
+
+@api_router.put("/admin/faqs/{faq_id}")
+async def update_faq(faq_id: str, body: FAQUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(faq_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    ud = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not ud:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ud["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.faqs.update_one({"_id": oid}, {"$set": ud})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    refreshed = await db.faqs.find_one({"_id": oid})
+    return _serialize_faq(refreshed)
+
+
+@api_router.delete("/admin/faqs/{faq_id}")
+async def delete_faq(faq_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(faq_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    res = await db.faqs.delete_one({"_id": oid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    return {"message": "Deleted"}
+
+
+@api_router.post("/admin/faqs/reorder")
+async def reorder_faqs(body: FAQReorder, request: Request):
+    """Persist a new ordering for all FAQs in one call. Sent by the admin UI
+    after the operator drags entries / clicks the up/down arrows. Each id's
+    sort_order is set to its index in the submitted list. Unlisted ids stay put."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not body.ids or not isinstance(body.ids, list):
+        raise HTTPException(status_code=400, detail="ids list required")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for idx, faq_id in enumerate(body.ids):
+        try:
+            oid = ObjectId(faq_id)
+        except Exception:
+            continue  # skip malformed ids — don't fail the whole batch
+        await db.faqs.update_one({"_id": oid}, {"$set": {"sort_order": idx, "updated_at": now_iso}})
+    return {"message": "Reordered", "count": len(body.ids)}
+
+
+# ===== SEO endpoints: sitemap.xml + robots.txt =====
+# These are served via the /api prefix so the Kubernetes ingress routes them to
+# this backend. The frontend (Vercel) rewrites /sitemap.xml and /robots.txt
+# (see vercel.json) so search engines / AI crawlers find them at the root.
+
+def _abs_origin(request: Request) -> str:
+    """Best-effort canonical https://hostname/ for sitemap URLs. Falls back to
+    the production domain so a sitemap fetched directly from the fly.io host
+    still emits the public-facing karachinaseebbiryani.com URLs (which is what
+    Google indexes)."""
+    public = os.environ.get("PUBLIC_SITE_URL", "https://www.karachinaseebbiryani.com").rstrip("/")
+    return public
+
+
+@api_router.get("/sitemap.xml", response_class=Response)
+async def sitemap_xml(request: Request):
+    """Dynamic XML sitemap. Includes every public route + active menu category
+    landing fragments + active offer fragments + FAQ slugs. Google + Bing +
+    Perplexity all use this to discover what to crawl. Updated last-mod is
+    important for re-crawl priority — we pull the most recent updated_at off
+    each entity so the sitemap stays fresh without a manual rebuild."""
+    base = _abs_origin(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    urls: list[dict] = [
+        {"loc": f"{base}/",          "changefreq": "daily",   "priority": "1.0", "lastmod": today},
+        {"loc": f"{base}/menu",      "changefreq": "weekly",  "priority": "0.9", "lastmod": today},
+        {"loc": f"{base}/offers",    "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/events",    "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/feedback",  "changefreq": "monthly", "priority": "0.4", "lastmod": today},
+        {"loc": f"{base}/faq",       "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/login",     "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/register",  "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+    ]
+    # Include each active offer as its own URL fragment so search engines can
+    # surface them individually. Same trick for menu categories.
+    try:
+        async for o in db.offers.find({"active": True}, {"_id": 1, "coupon_code": 1}):
+            code = (o.get("coupon_code") or "").lower().strip()
+            if code:
+                urls.append({"loc": f"{base}/offers#{code}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
+    except Exception:
+        pass
+    try:
+        async for c in db.categories.find({}, {"_id": 1, "name": 1}):
+            slug = (c.get("name") or "").lower().replace(" ", "-")
+            if slug:
+                urls.append({"loc": f"{base}/menu#{slug}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
+    except Exception:
+        pass
+
+    body_parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        body_parts.append("  <url>")
+        body_parts.append(f"    <loc>{u['loc']}</loc>")
+        body_parts.append(f"    <lastmod>{u['lastmod']}</lastmod>")
+        body_parts.append(f"    <changefreq>{u['changefreq']}</changefreq>")
+        body_parts.append(f"    <priority>{u['priority']}</priority>")
+        body_parts.append("  </url>")
+    body_parts.append("</urlset>")
+    xml = "\n".join(body_parts)
+    return Response(content=xml, media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@api_router.get("/robots.txt", response_class=Response)
+async def robots_txt(request: Request):
+    """robots.txt: open the site for search engines + AI crawlers (GPTBot,
+    PerplexityBot, Google-Extended, ClaudeBot) and explicitly disallow the
+    transactional / admin / customer-PII routes that should never appear in
+    search results."""
+    base = _abs_origin(request)
+    body = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /admin",
+        "Disallow: /admin/",
+        "Disallow: /api/admin/",
+        "Disallow: /checkout",
+        "Disallow: /cart",
+        "Disallow: /track/",
+        "Disallow: /rider/",
+        "Disallow: /order/",
+        "Disallow: /profile",
+        "Disallow: /orders",
+        "",
+        # Explicitly invite the major AI crawlers (some respect User-agent blocks
+        # globally, so spelling them out lets us allow them even if we ever flip
+        # the default-deny). Today we explicitly allow them everywhere.
+        "User-agent: GPTBot",
+        "Allow: /",
+        "",
+        "User-agent: ChatGPT-User",
+        "Allow: /",
+        "",
+        "User-agent: PerplexityBot",
+        "Allow: /",
+        "",
+        "User-agent: Google-Extended",
+        "Allow: /",
+        "",
+        "User-agent: ClaudeBot",
+        "Allow: /",
+        "",
+        f"Sitemap: {base}/sitemap.xml",
+        "",
+    ])
+    return Response(content=body, media_type="text/plain",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 # --- Event Bookings ---
 @api_router.post("/event-bookings")

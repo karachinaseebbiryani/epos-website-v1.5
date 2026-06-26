@@ -574,3 +574,258 @@ agent_communication:
         Backend logs show no errors during test execution.
         
         RECOMMENDATION: The payment manipulation fix is production-ready. Ready to summarize and finish.
+
+
+# =====================================================================
+# Round 4: FAQ system + SEO endpoints (sitemap.xml, robots.txt)
+# =====================================================================
+
+current_focus_round4:
+  - "FAQ system — public list + admin CRUD + reorder"
+  - "SEO: /api/sitemap.xml and /api/robots.txt"
+
+backend_round4:
+  - task: "FAQ system — public list, admin CRUD, reorder"
+    implemented: true
+    working: true
+    file: "backend/server.py (~lines 4239-4360)"
+    needs_retesting: false
+    stuck_count: 0
+    priority: "high"
+    description: |
+      New endpoints:
+        GET  /api/faqs                — public, only enabled FAQs, sorted by sort_order asc.
+        GET  /api/admin/faqs          — admin only, ALL FAQs (incl. disabled).
+        POST /api/admin/faqs          — admin only. Body: { question, answer, sort_order?, enabled? }
+                                        If sort_order==0 we auto-append at the end.
+        PUT  /api/admin/faqs/{id}     — admin only, partial update.
+        DEL  /api/admin/faqs/{id}     — admin only.
+        POST /api/admin/faqs/reorder  — admin only. Body: { ids: [..] }. Persists sort_order = index.
+      All admin endpoints require Bearer token with role=admin → otherwise 403.
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "FAQ system implemented with full CRUD + reorder functionality"
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ FAQ SYSTEM VERIFICATION COMPLETE - ALL 10 TESTS PASSED (F1-F10)
+            
+            Test execution summary:
+            - Created comprehensive test suite in /app/backend_test_faq_seo.py
+            - Tested with admin credentials from /app/memory/test_credentials.md
+            - Admin login successful (admin@restaurant.com / admin123)
+            
+            ✅ Test F1 - Public FAQ List (GET /api/faqs, no auth)
+               Status: 200 (expected 200)
+               Response: Empty array initially (0 FAQs)
+               PASS: Public endpoint accessible without auth, returns array
+            
+            ✅ Test F2 - Create First FAQ (POST /api/admin/faqs with admin Bearer)
+               Status: 200 (expected 200/201)
+               Body: {"question": "How long is delivery?", "answer": "30 to 45 minutes within 7 km of Chatri Chowk.", "enabled": true}
+               Response: id=6a3e6f6d8a1f950218284df6, sort_order=0, enabled=True
+               PASS: FAQ created with valid id (string), sort_order (int), enabled=true
+            
+            ✅ Test F3 - Create Three More FAQs
+               FAQ 2: id=6a3e6f6d8a1f950218284df7, sort_order=1 (question: "Do you accept Cash on Delivery?")
+               FAQ 3: id=6a3e6f6d8a1f950218284df8, sort_order=2 (question: "How do Diamonds work?")
+               FAQ 4: id=6a3e6f6e8a1f950218284df9, sort_order=3 (question: "Can I cancel an order?")
+               PASS: All 3 FAQs created successfully, each with unique id and sort_order strictly greater than previous
+            
+            ✅ Test F4 - Get All Enabled FAQs (GET /api/faqs)
+               Status: 200 (expected 200)
+               Response: 4 FAQs returned, all 4 created FAQs present
+               Sort order: [0, 1, 2, 3] (ascending, correct)
+               PASS: All enabled FAQs returned in correct sort_order
+            
+            ✅ Test F5 - Disable FAQ and Verify Visibility
+               Disabled FAQ: 6a3e6f6d8a1f950218284df8 (third FAQ)
+               PUT /api/admin/faqs/{id} with {"enabled": false} → 200
+               GET /api/faqs (public) → disabled FAQ NOT present ✓
+               GET /api/admin/faqs (admin Bearer) → disabled FAQ present with enabled=false ✓
+               PASS: Public endpoint excludes disabled FAQ, admin endpoint includes it
+            
+            ✅ Test F6 - Update FAQ Text
+               Updated FAQ: 6a3e6f6d8a1f950218284df6 (first FAQ)
+               PUT /api/admin/faqs/{id} with {"answer": "Changed answer."} → 200
+               GET /api/faqs → same FAQ now shows "Changed answer." ✓
+               PASS: Text update persisted and visible in public endpoint
+            
+            ✅ Test F7 - Reorder FAQs
+               Original order: [6a3e6f6d8a1f950218284df6, 6a3e6f6d8a1f950218284df7, 6a3e6f6d8a1f950218284df8, 6a3e6f6e8a1f950218284df9]
+               Reversed order: [6a3e6f6e8a1f950218284df9, 6a3e6f6d8a1f950218284df8, 6a3e6f6d8a1f950218284df7, 6a3e6f6d8a1f950218284df6]
+               POST /api/admin/faqs/reorder with {"ids": [reversed list]} → 200
+               GET /api/admin/faqs → order matches reversed list ✓
+               Sort orders: [0, 1, 2, 3] (correct sequential values) ✓
+               PASS: Reorder functionality working correctly
+            
+            ✅ Test F8 - Delete FAQ
+               Deleted FAQ: 6a3e6f6e8a1f950218284df9 (last FAQ)
+               DELETE /api/admin/faqs/{id} → 200
+               GET /api/admin/faqs → deleted FAQ not present ✓
+               PASS: FAQ successfully deleted and not returned in subsequent requests
+            
+            ✅ Test F9 - Authorization Checks (all return 401 without Bearer token)
+               GET /api/admin/faqs → 401 ✓
+               POST /api/admin/faqs → 401 ✓
+               PUT /api/admin/faqs/{id} → 401 ✓
+               DELETE /api/admin/faqs/{id} → 401 ✓
+               POST /api/admin/faqs/reorder → 401 ✓
+               PASS: All admin endpoints properly protected (401 is acceptable, spec allows any 4xx)
+            
+            ✅ Test F10 - Validation Checks
+               POST /api/admin/faqs with empty question/answer → 400 ✓
+               PUT /api/admin/faqs/000000000000000000000000 → 404 ✓
+               DELETE /api/admin/faqs/000000000000000000000000 → 404 ✓
+               PUT /api/admin/faqs/invalid-id-format → 404 ✓
+               PASS: All validation checks return expected status codes
+            
+            FUNCTIONALITY VERIFICATION:
+            ✓ Public endpoint (GET /api/faqs) accessible without auth
+            ✓ Public endpoint returns only enabled FAQs
+            ✓ Public endpoint sorts by sort_order ascending
+            ✓ Admin endpoints require Bearer token (401 without auth)
+            ✓ Admin endpoint (GET /api/admin/faqs) returns ALL FAQs including disabled
+            ✓ Create FAQ (POST) returns id (string), sort_order (int), enabled (bool)
+            ✓ Auto-increment sort_order when sort_order=0 (default)
+            ✓ Update FAQ (PUT) supports partial updates
+            ✓ Disable FAQ hides it from public but keeps it in admin view
+            ✓ Reorder FAQ (POST /reorder) persists sort_order = index
+            ✓ Delete FAQ (DELETE) removes it from all endpoints
+            ✓ Validation: empty question/answer rejected (400)
+            ✓ Validation: non-existent ID returns 404
+            ✓ Validation: invalid ID format returns 404
+            
+            BACKEND LOGS VERIFICATION:
+            - No errors or exceptions during test execution
+            - All FAQ operations processed correctly
+            - Authorization logic working as expected
+            
+            CONCLUSION:
+            The FAQ system is fully functional and production-ready. All CRUD operations work correctly,
+            authorization is properly enforced, and validation handles edge cases appropriately.
+
+  - task: "SEO endpoints — /api/sitemap.xml and /api/robots.txt"
+    implemented: true
+    working: true
+    file: "backend/server.py (~lines 4360-4440)"
+    needs_retesting: false
+    stuck_count: 0
+    priority: "high"
+    description: |
+      GET /api/sitemap.xml returns application/xml with at least 8 <url> entries plus dynamic offer/category fragments.
+      GET /api/robots.txt returns text/plain with Allow/Disallow rules + Sitemap directive + named bot allows (GPTBot, PerplexityBot, ClaudeBot, Google-Extended).
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "SEO endpoints implemented for sitemap.xml and robots.txt"
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ SEO ENDPOINTS VERIFICATION COMPLETE - ALL 2 TESTS PASSED (S1-S2)
+            
+            Test execution summary:
+            - Tested both SEO endpoints without authentication (public access)
+            - Verified content type, structure, and required content
+            
+            ✅ Test S1 - Sitemap XML (GET /api/sitemap.xml)
+               Status: 200 (expected 200)
+               Content-Type: application/xml ✓
+               Body starts with '<?xml' ✓
+               Contains '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' ✓
+               <url> entries count: 15 (expected ≥6) ✓
+               Contains required locs:
+                 - /menu ✓
+                 - /offers ✓
+                 - /events ✓
+                 - /faq ✓
+               PASS: Sitemap XML properly formatted with all required entries
+            
+            ✅ Test S2 - Robots.txt (GET /api/robots.txt)
+               Status: 200 (expected 200)
+               Content-Type: text/plain; charset=utf-8 ✓
+               Contains required strings:
+                 - "User-agent: *" ✓
+                 - "Disallow: /admin" ✓
+                 - "Sitemap: " ✓
+                 - "GPTBot" ✓
+                 - "PerplexityBot" ✓
+                 - "ClaudeBot" ✓
+               PASS: Robots.txt properly formatted with all required directives
+            
+            FUNCTIONALITY VERIFICATION:
+            ✓ Sitemap XML accessible without auth
+            ✓ Sitemap XML returns valid XML with proper namespace
+            ✓ Sitemap XML includes static pages (/, /menu, /offers, /events, /faq, /login, /register, /feedback)
+            ✓ Sitemap XML includes dynamic entries (offers, categories)
+            ✓ Sitemap XML has 15 <url> entries (8 static + dynamic)
+            ✓ Robots.txt accessible without auth
+            ✓ Robots.txt returns text/plain content type
+            ✓ Robots.txt allows all user agents by default
+            ✓ Robots.txt disallows admin routes
+            ✓ Robots.txt includes sitemap directive
+            ✓ Robots.txt explicitly allows AI crawlers (GPTBot, PerplexityBot, ClaudeBot, Google-Extended)
+            
+            BACKEND LOGS VERIFICATION:
+            - No errors or exceptions during test execution
+            - Both endpoints responding correctly
+            
+            CONCLUSION:
+            Both SEO endpoints are fully functional and production-ready. Sitemap.xml provides proper
+            XML structure with all required pages, and robots.txt properly configures crawler access.
+
+agent_communication_round4:
+    - agent: "main"
+      message: |
+        Verify the FAQ system + SEO endpoints. Admin creds in /app/memory/test_credentials.md
+        (admin@restaurant.com / admin123). Backend on supervisor port 8001.
+
+        FAQ tests:
+          F1. GET /api/faqs (no auth) → 200, array.
+          F2. POST /api/admin/faqs (admin Bearer) body
+              { "question": "How long is delivery?", "answer": "30-45 min.", "enabled": true }
+              EXPECT 200/201 with id, sort_order int, enabled true.
+          F3. Create 3 more FAQs the same way.
+          F4. GET /api/faqs → contains all enabled FAQs.
+          F5. Disable one: PUT /api/admin/faqs/{id} { "enabled": false } → 200. GET /api/faqs MUST exclude it. GET /api/admin/faqs MUST include it.
+          F6. Update text: PUT /api/admin/faqs/{id} { "answer": "Changed." } → 200. Public GET shows new answer.
+          F7. Reorder: POST /api/admin/faqs/reorder { "ids": [reversed list] } → 200. Then GET /api/faqs returns FAQs in reversed order with sort_order = 0,1,2,...
+          F8. DELETE /api/admin/faqs/{id} → 200. Subsequent GETs exclude it.
+          F9. Auth: every admin endpoint MUST return 403 without Bearer token (or 401 if missing).
+          F10. Validation:
+              - POST /api/admin/faqs with empty question+answer → 400.
+              - PUT /api/admin/faqs/000000000000000000000000 → 404.
+              - DELETE /api/admin/faqs/000000000000000000000000 → 404.
+
+        SEO tests:
+          S1. GET /api/sitemap.xml → 200, Content-Type contains "xml". Body begins with "<?xml" and contains "<urlset" and ≥6 "<url>" entries.
+          S2. GET /api/robots.txt → 200, text/plain. Body contains "User-agent: *", "Disallow: /admin", "Sitemap: ", and mentions GPTBot / PerplexityBot / ClaudeBot.
+
+        Report per test: HTTP status, key response field summary, PASS/FAIL.
+        Do NOT do frontend testing — main agent will request that separately.
+    
+    - agent: "testing"
+      message: |
+        ✅ ROUND 4 TESTING COMPLETE - ALL 12 TESTS PASSED (FAQ + SEO)
+        
+        SUMMARY:
+        ✅ F1 - Public FAQ List (GET /api/faqs, no auth) → 200, returns array
+        ✅ F2 - Create First FAQ (POST /api/admin/faqs) → 200, returns id/sort_order/enabled
+        ✅ F3 - Create Three More FAQs → 200, each with unique id and incrementing sort_order
+        ✅ F4 - Get All Enabled FAQs → 200, all 4 FAQs present in sort_order
+        ✅ F5 - Disable FAQ → 200, public excludes it, admin includes it with enabled=false
+        ✅ F6 - Update FAQ Text → 200, change persisted and visible
+        ✅ F7 - Reorder FAQs → 200, order reversed with sort_order 0,1,2,3
+        ✅ F8 - Delete FAQ → 200, FAQ removed from all endpoints
+        ✅ F9 - Authorization Checks → 401 for all admin endpoints without Bearer token
+        ✅ F10 - Validation Checks → 400/404 for invalid inputs
+        ✅ S1 - Sitemap XML → 200, application/xml, 15 <url> entries, all required locs present
+        ✅ S2 - Robots.txt → 200, text/plain, all required directives present
+        
+        NO ISSUES FOUND. All FAQ CRUD operations working correctly. All SEO endpoints
+        returning proper content. Authorization properly enforced. Validation handling
+        edge cases appropriately. Backend logs show no errors.
+        
+        RECOMMENDATION: Ready to summarize and finish. Both features are production-ready.
+

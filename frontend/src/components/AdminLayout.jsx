@@ -4,6 +4,7 @@ import {
   LayoutDashboard, ShoppingBag, ChefHat, Tag, CalendarDays, LogOut,
   Settings, FolderTree, ShoppingCart, Package, Receipt, Truck, RotateCcw,
   History, FileBarChart, SlidersHorizontal, Diamond, Gift, MessageSquare, Bell,
+  HelpCircle,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
@@ -33,6 +34,7 @@ const ONLINE_NAV = [
   { to: "/admin/offers",     label: "Offers",        icon: Tag, perm: "online_offers" },
   { to: "/admin/events",     label: "Events",        icon: CalendarDays, perm: "online_events" },
   { to: "/admin/reviews",    label: "Reviews",       icon: MessageSquare, perm: "online_settings" },
+  { to: "/admin/faqs",       label: "FAQs",          icon: HelpCircle, perm: "online_settings" },
   { to: "/admin/loyalty-settings", label: "Loyalty Settings", icon: Diamond, perm: "online_settings" },
   { to: "/admin/rewards",    label: "Rewards",       icon: Gift, perm: "online_settings" },
   { to: "/admin/notifications", label: "Notifications", icon: Bell, perm: "online_settings" },

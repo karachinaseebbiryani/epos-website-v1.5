@@ -25,6 +25,7 @@ export default function Footer() {
                         <li><Link to="/menu" data-testid="footer-menu-link" className="hover:text-white">Menu</Link></li>
                         <li><Link to="/offers" data-testid="footer-offers-link" className="hover:text-white">Offers</Link></li>
                         <li><Link to="/events" data-testid="footer-events-link" className="hover:text-white">Book an Event</Link></li>
+                        <li><Link to="/faq" data-testid="footer-faq-link" className="hover:text-white">FAQ</Link></li>
                         <li><Link to="/profile" data-testid="footer-profile-link" className="hover:text-white">My Orders</Link></li>
                     </ul>
                 </div>

@@ -43,6 +43,8 @@ import LoyaltySettings from "./pages/admin/LoyaltySettings";
 import RewardsManagement from "./pages/admin/RewardsManagement";
 import AdminNotifications from "./pages/admin/AdminNotifications";
 import ReviewManagement from "./pages/admin/ReviewManagement";
+import AdminFAQs from "./pages/admin/AdminFAQs";
+import FAQPage from "./pages/FAQPage";
 import AdminLayout from "./components/AdminLayout";
 
 // --- Operational POS pages (preserved from OLD system, lazy-loaded) ---
@@ -102,6 +104,7 @@ function App() {
                   <Route path="/register" element={<RegisterPage />} />
                   <Route path="/offers" element={<OffersPage />} />
                   <Route path="/events" element={<EventsPage />} />
+                  <Route path="/faq" element={<FAQPage />} />
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/orders" element={<OrdersPage />} />
                   <Route path="/rewards" element={<RewardsPage />} />
@@ -141,6 +144,7 @@ function App() {
                   <Route path="/admin/offers" element={<AdminOffers />} />
                   <Route path="/admin/events" element={<AdminEvents />} />
                   <Route path="/admin/reviews" element={<ReviewManagement />} />
+                  <Route path="/admin/faqs" element={<AdminFAQs />} />
                   <Route path="/admin/loyalty-settings" element={<LoyaltySettings />} />
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
                   <Route path="/admin/notifications" element={<AdminNotifications />} />

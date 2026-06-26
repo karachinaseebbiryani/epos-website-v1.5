@@ -1,0 +1,33 @@
+# robots.txt for Karachi Naseeb Biryani
+# Open for general crawling; explicitly disallow transactional / admin / PII routes.
+# AI assistants (ChatGPT, Perplexity, Gemini, Claude) are explicitly invited below.
+
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /admin/
+Disallow: /api/admin/
+Disallow: /checkout
+Disallow: /cart
+Disallow: /track/
+Disallow: /rider/
+Disallow: /order/
+Disallow: /profile
+Disallow: /orders
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+Sitemap: https://www.karachinaseebbiryani.com/sitemap.xml
