@@ -101,3 +101,208 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  IDOR vulnerability on /api/track/{order_id} — public endpoint accessible without
+  authentication. Mongo ObjectIds are predictable / enumerable, so anyone can iterate
+  the sequential counter and harvest masked customer PII (first name, last-4-digit
+  phone, suburb prefix, items, total) from neighbouring orders.
+
+backend:
+  - task: "IDOR fix on /api/track/{order_id} — require per-order share token"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Fix implemented:
+            1. New 16-byte url-safe `track_token` generated on every POST /api/online-orders (stored on the order doc, returned via _serialize_online_order).
+            2. /api/track/{order_id} now accepts an optional `?t=<token>` query parameter. Authorization rules:
+               - Admin user (Bearer token, role=admin) → full PII (unchanged).
+               - Order owner (customer Bearer token whose _id matches order.customer_id) → full PII (unchanged).
+               - Anyone else MUST provide `?t=` matching order.track_token via secrets.compare_digest. Otherwise 404 (not 401/403 — denies enumeration).
+            3. All tracking URLs generated server-side (WhatsApp confirm, accept, reject, modify, status update) now embed `?t=<token>` via the refactored _origin_tracking_url helper.
+            4. Startup backfill: every existing online_orders doc missing `track_token` gets one assigned on next boot.
+            5. Frontend (TrackingPage, OrderSuccessPage, OrdersPage, BankPaymentPage) reads `?t=` from URL and forwards it to /api/track; also sends Bearer auth header so signed-in owners work without `?t=`.
+
+            Test scenarios required:
+            A. Create an online order via POST /api/online-orders (with a signed-in customer) → response includes a non-empty `track_token` string.
+            B. GET /api/track/{order_id} WITHOUT `?t=` and WITHOUT any auth → MUST return 404.
+            C. GET /api/track/{order_id}?t=<wrong_random_token> → MUST return 404.
+            D. GET /api/track/{order_id}?t=<correct_token> → returns 200 with MASKED PII (phone = "*****1234", address truncated, customer_name = first name only).
+            E. GET /api/track/{order_id} with the OWNER's Bearer token (no `?t=`) → returns 200 with FULL PII.
+            F. GET /api/track/{order_id} with an ADMIN Bearer token (no `?t=`) → returns 200 with FULL PII.
+            G. GET /api/track/{order_id} with a DIFFERENT customer's Bearer token and no `?t=` → MUST return 404 (other customer is not the owner).
+            H. Try to enumerate: pick a valid order id, mutate the last byte by ±1 (so it's a likely-neighbour id), call /api/track/{neighbour_id} with no `?t=` and no auth → MUST return 404 even if that order exists.
+            I. Confirm tracking_url returned by the WhatsApp confirmation flow contains `t=` (inspect the order doc's track_token and verify the message includes the same value).
+            J. Existing flows still work: signed-in owner polls /api/track every 5s with Bearer token only — should keep returning 200.
+
+frontend:
+  - task: "TrackingPage forwards ?t= and Bearer auth on /api/track polling"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/TrackingPage.jsx, OrderSuccessPage.jsx, OrdersPage.jsx, BankPaymentPage.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false   # main agent is delegating only backend to deep_testing_backend_v2
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Frontend wires up the share token: useSearchParams reads ?t=, the polling axios.get sends it as a query param + the customer's knb_token Bearer header. Track buttons in OrdersPage / OrderSuccessPage / BankPaymentPage redirect carry ?t= forward.
+            Per protocol, frontend will NOT be auto-tested without explicit user permission.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 2
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "IDOR fix on /api/track/{order_id} — require per-order share token"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Please verify the IDOR fix on GET /api/track/{order_id}. The endpoint must:
+        1. Return 404 when called with no auth and no ?t= query param (even if the order id is valid).
+        2. Return 404 when called with no auth and a wrong ?t= token.
+        3. Return 200 with masked PII when called with no auth and the correct ?t= token from the order's `track_token` field.
+        4. Return 200 with FULL PII (unmasked phone / address / customer_name) when called with the owner's customer Bearer token, OR with an admin Bearer token — even without ?t=.
+        5. Return 404 when called with a DIFFERENT customer's Bearer token (and no ?t=).
+        6. Order creation (POST /api/online-orders) must return a non-empty `track_token` field on the order.
+
+        Helpful endpoints / auth flow:
+        - Admin login: POST /api/auth/login with { email: "<admin>", password: "<password>" } → returns Bearer token. Check /app/memory/test_credentials.md for seeded admin creds. If empty, the seeded admin is usually `admin@karachinaseebbiryani.com` / `admin123` — please verify in the seed_admin function in server.py.
+        - Customer signup: POST /api/customer/signup with { email, password, name, phone } → returns Bearer token. Sign up TWO customers (A and B) to test cross-account isolation.
+        - Create an order: POST /api/online-orders with Authorization: Bearer <customer_A_token> and JSON body { items: [{ item_id, name, price, quantity }], customer_name, phone, address, total_price, payment_method: "cod" }. The response includes `id` and `track_token`.
+
+        Edge case to confirm specifically: pick the valid order id created above. Replace the LAST 3 hex chars of the 24-char ObjectId with adjacent values (e.g. if id ends in "abc" try "abd" / "abb"). Call /api/track/<neighbour> with no auth and no ?t=. Even if that ObjectId happens to be a real order (e.g. one you created in a previous test run), MUST return 404. This proves the IDOR enumeration vector is closed.
+
+        Backend service is running on supervisor (port 8001 internally, mapped via REACT_APP_BACKEND_URL externally).
+
+        Backend service is running on supervisor (port 8001 internally, mapped via REACT_APP_BACKEND_URL externally).
+
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ IDOR FIX VERIFICATION COMPLETE - ALL TESTS PASSED (9/9)
+            
+            Test execution summary:
+            - Created comprehensive test suite in /app/backend_test.py
+            - Tested with admin credentials from /app/memory/test_credentials.md
+            - Signed up two customers (A and B) for cross-account isolation testing
+            - Created test order as Customer A (ID: 6a3e5c0b772da75ef6a839e0, track_token: ZTxr2PC5QL0uf8gE7C0Z9w)
+            
+            ✅ Test A - No auth, no token → 404
+               Status: 404 (expected 404)
+               Response: {"detail":"Order not found"}
+               PASS: Unauthenticated requests without token are properly blocked
+            
+            ✅ Test B - No auth, wrong token → 404
+               Status: 404 (expected 404)
+               Response: {"detail":"Order not found"}
+               PASS: Invalid tokens are rejected with 404 (not 401/403, preventing enumeration)
+            
+            ✅ Test C - No auth, correct token → 200 with MASKED PII
+               Status: 200 (expected 200)
+               Phone: ********4567 (last 4 digits visible)
+               Address: House 12, Block A,… (truncated to 18 chars)
+               Customer Name: Ahmed (first name only)
+               PASS: PII is properly masked for token-only access
+            
+            ✅ Test D - Owner auth, no token → 200 with FULL PII
+               Status: 200 (expected 200)
+               Phone: 923001234567 (full number)
+               Address: House 12, Block A, DHA Phase 5, Lahore, Punjab (full address)
+               Customer Name: Ahmed Khan (full name)
+               PASS: Order owner sees full unmasked PII
+            
+            ✅ Test E - Admin auth, no token → 200 with FULL PII
+               Status: 200 (expected 200)
+               Phone: 923001234567 (full number)
+               Address: House 12, Block A, DHA Phase 5, Lahore, Punjab (full address)
+               Customer Name: Ahmed Khan (full name)
+               PASS: Admin sees full unmasked PII
+            
+            ✅ Test F - Different customer auth, no token → 404
+               Status: 404 (expected 404)
+               Response: {"detail":"Order not found"}
+               PASS: Cross-account isolation working - Customer B cannot access Customer A's order
+            
+            ✅ Test G - Enumeration attack (mutated ID, no auth, no token) → 404
+               Original ID: 6a3e5c0b772da75ef6a839e0
+               Mutated ID:  6a3e5c0b772da75ef6a839e1
+               Status: 404 (expected 404)
+               Response: {"detail":"Order not found"}
+               PASS: Enumeration attacks are blocked - mutated IDs return 404
+            
+            ✅ Test H - Order creation includes track_token
+               track_token present: ZTxr2PC5QL0uf8gE7C0Z9w (length: 22)
+               PASS: track_token is generated and returned on order creation
+            
+            ✅ Test I - /api/online-orders/me includes track_token
+               track_token present: True, order: 6a3e5c0b772da75ef6a839e0
+               PASS: Existing endpoints return track_token in order data
+            
+            SECURITY VERIFICATION:
+            ✓ Per-order track_token (16 url-safe bytes, ~128 bits entropy) is generated on order creation
+            ✓ Unauthenticated access requires valid track_token via ?t= query parameter
+            ✓ Invalid or missing tokens return 404 (not 401/403) to prevent enumeration
+            ✓ Token-only access returns MASKED PII (phone last 4 digits, address truncated, first name only)
+            ✓ Owner authentication bypasses token requirement and returns FULL PII
+            ✓ Admin authentication bypasses token requirement and returns FULL PII
+            ✓ Cross-account isolation enforced - different customer cannot access order
+            ✓ Enumeration attacks blocked - mutated ObjectIds return 404 without valid token
+
+    - agent: "testing"
+      message: |
+        ✅ IDOR FIX VERIFICATION COMPLETE - ALL 9 TESTS PASSED
+        
+        Comprehensive testing completed on GET /api/track/{order_id} endpoint:
+        
+        PASSED TESTS (9/9):
+        ✅ Test A - No auth, no token → 404 (enumeration blocked)
+        ✅ Test B - No auth, wrong token → 404 (invalid tokens rejected)
+        ✅ Test C - No auth, correct token → 200 with MASKED PII (phone: ********4567, address truncated, first name only)
+        ✅ Test D - Owner auth, no token → 200 with FULL PII (owner sees complete data)
+        ✅ Test E - Admin auth, no token → 200 with FULL PII (admin sees complete data)
+        ✅ Test F - Different customer auth, no token → 404 (cross-account isolation working)
+        ✅ Test G - Enumeration attack simulation → 404 (mutated IDs blocked)
+        ✅ Test H - Order creation includes track_token (22-char url-safe token generated)
+        ✅ Test I - /api/online-orders/me includes track_token (existing endpoints working)
+        
+        SECURITY FEATURES VERIFIED:
+        ✓ Per-order track_token (16 url-safe bytes, ~128 bits entropy) generated on order creation
+        ✓ Unauthenticated access requires valid ?t= query parameter
+        ✓ Invalid/missing tokens return 404 (not 401/403) to prevent enumeration
+        ✓ Token-only access returns MASKED PII (phone last 4 digits, address truncated, first name only)
+        ✓ Owner/Admin authentication bypasses token requirement and returns FULL PII
+        ✓ Cross-account isolation enforced
+        ✓ Enumeration attacks blocked via 404 responses
+        ✓ Constant-time comparison (secrets.compare_digest) prevents timing attacks
+        
+        NO ISSUES FOUND. The IDOR vulnerability has been successfully mitigated.
+        Backend logs show no errors during test execution.
+        
+        RECOMMENDATION: Ready to summarize and finish. The security fix is production-ready.
+            ✓ Constant-time comparison (secrets.compare_digest) prevents timing attacks
+            
+            BACKEND LOGS VERIFICATION:
+            - All track endpoint requests logged correctly
+            - No errors or exceptions during test execution
+            - Authorization logic working as expected
+            
+            CONCLUSION:
+            The IDOR vulnerability has been successfully mitigated. The per-order track_token
+            mechanism prevents enumeration attacks on MongoDB ObjectId-based order IDs while
+            maintaining usability for authenticated users and token holders.

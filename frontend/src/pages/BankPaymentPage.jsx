@@ -55,7 +55,10 @@ export default function BankPaymentPage() {
                 });
             }
             toast.success("Payment details submitted! We'll verify shortly.");
-            navigate(`/track/${id}`, { state: { order: { ...order, payment_status: "pending_verification", payment_method: via } } });
+            // Forward the per-order share token so the tracking page works even if the
+            // customer signs out / shares the link.
+            const tokenParam = order?.track_token ? `?t=${encodeURIComponent(order.track_token)}` : "";
+            navigate(`/track/${id}${tokenParam}`, { state: { order: { ...order, payment_status: "pending_verification", payment_method: via } } });
         } catch (err) {
             toast.error(formatApiError(err.response?.data?.detail));
         } finally { setSubmitting(false); }
