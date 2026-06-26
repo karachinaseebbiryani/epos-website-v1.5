@@ -27,6 +27,11 @@ export default function OrderSuccessPage() {
     const redirectedRef = useRef(false);
     const [pushAvailable, setPushAvailable] = useState(false);
     const [pushState, setPushState] = useState(typeof Notification !== "undefined" ? Notification.permission : "default");
+    // Per-order share token — needed by /api/track for unauthenticated viewers (IDOR fix).
+    // The order creation response embeds it in `track_token`, so on the success page
+    // (which arrives here from /checkout → /order/:id/success with order in router state)
+    // we already have it. Fall back to "" so the polling URL stays valid for signed-in owners.
+    const trackToken = initialOrder?.track_token || order?.track_token || "";
 
     useEffect(() => {
         isPushSupported().then(setPushAvailable);
@@ -50,7 +55,11 @@ export default function OrderSuccessPage() {
         let cancelled = false;
         const fetchStatus = async () => {
             try {
-                const { data } = await axios.get(`${API}/track/${id}`);
+                const authToken = localStorage.getItem("knb_token");
+                const { data } = await axios.get(`${API}/track/${id}`, {
+                    params: trackToken ? { t: trackToken } : undefined,
+                    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+                });
                 if (cancelled) return;
                 setOrder((prev) => ({ ...(prev || {}), ...data }));
                 if (typeof data.response_deadline_seconds === "number") {
@@ -59,14 +68,16 @@ export default function OrderSuccessPage() {
                 if (!redirectedRef.current && data.status && data.status !== "pending") {
                     redirectedRef.current = true;
                     // Give the user a fraction of a second to see the new state before navigating.
-                    setTimeout(() => navigate(`/track/${id}`, { replace: false }), 600);
+                    // Forward the share token so the next page can read the same order anonymously.
+                    const target = trackToken ? `/track/${id}?t=${encodeURIComponent(trackToken)}` : `/track/${id}`;
+                    setTimeout(() => navigate(target, { replace: false }), 600);
                 }
             } catch (e) { /* silent — keep polling */ }
         };
         fetchStatus();
         const t = setInterval(fetchStatus, 3000);
         return () => { cancelled = true; clearInterval(t); };
-    }, [id, navigate]);
+    }, [id, navigate, trackToken]);
 
     // Local tick-down so the countdown looks responsive between polls.
     useEffect(() => {
@@ -156,7 +167,7 @@ export default function OrderSuccessPage() {
             </div>
 
             <div className="flex gap-3 justify-center flex-wrap">
-                <Link to={`/track/${id}`} data-testid="success-track-order" className="inline-flex items-center gap-2 bg-brand-red hover:bg-brand-red-dark text-white rounded-full px-7 py-3.5 font-semibold transition-colors">
+                <Link to={trackToken ? `/track/${id}?t=${encodeURIComponent(trackToken)}` : `/track/${id}`} data-testid="success-track-order" className="inline-flex items-center gap-2 bg-brand-red hover:bg-brand-red-dark text-white rounded-full px-7 py-3.5 font-semibold transition-colors">
                     Track Order <ArrowRight className="w-4 h-4" />
                 </Link>
                 {/* Subtle one-tap "enable order alerts" — the natural moment to ask.

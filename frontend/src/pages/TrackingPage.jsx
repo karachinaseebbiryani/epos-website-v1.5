@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../lib/api";
 import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation } from "lucide-react";
@@ -25,6 +25,12 @@ function progressIndex(status) {
 
 export default function TrackingPage() {
     const { id } = useParams();
+    // `?t=...` is the per-order share token required by the public /api/track endpoint
+    // for unauthenticated viewers (IDOR fix). Signed-in owners + admins don't need it
+    // because their auth cookie/header proves access — but we still forward whatever
+    // token is in the URL so shared links keep working when an owner clicks them.
+    const [searchParams] = useSearchParams();
+    const trackToken = searchParams.get("t") || "";
     const [order, setOrder] = useState(null);
     const [error, setError] = useState(null);
     const [restaurantPhone, setRestaurantPhone] = useState("+923004928411");
@@ -68,7 +74,14 @@ export default function TrackingPage() {
     useEffect(() => {
         const load = async () => {
             try {
-                const { data } = await axios.get(`${API}/track/${id}`);
+                // Send the per-order share token (if present in URL) AND the
+                // customer's bearer token (if signed in). Backend accepts either —
+                // signed-in owner OR valid share token → unmask. Neither → 404.
+                const authToken = localStorage.getItem("knb_token");
+                const { data } = await axios.get(`${API}/track/${id}`, {
+                    params: trackToken ? { t: trackToken } : undefined,
+                    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+                });
                 setOrder(data);
             } catch (err) {
                 setError("Order not found");
@@ -77,7 +90,7 @@ export default function TrackingPage() {
         load();
         const t = setInterval(load, 5000); // 5s polling — matches POS so customer sees updates fast
         return () => clearInterval(t);
-    }, [id]);
+    }, [id, trackToken]);
 
     if (error) return (
         <div className="max-w-md mx-auto px-4 py-24 text-center" data-testid="tracking-not-found">

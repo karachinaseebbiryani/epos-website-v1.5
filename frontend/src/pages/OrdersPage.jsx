@@ -246,7 +246,7 @@ export default function OrdersPage() {
                                 {/* Action Buttons */}
                                 <div className="flex flex-wrap gap-2">
                                     <Link
-                                        to={`/track/${order.id}`}
+                                        to={order.track_token ? `/track/${order.id}?t=${encodeURIComponent(order.track_token)}` : `/track/${order.id}`}
                                         data-testid={`track-order-${order.id}`}
                                         className="inline-flex items-center gap-2 px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-brand-ink rounded-full text-sm font-semibold transition-colors">
                                         <Package className="w-3.5 h-3.5" /> Track Order

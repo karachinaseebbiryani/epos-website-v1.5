@@ -2228,6 +2228,23 @@ async def startup():
                 logger.info("VAPID keys saved to MongoDB — will survive all future redeploys.")
     await seed_admin()
     await cleanup_old_data()
+    # IDOR mitigation backfill — every order needs a per-order share token so
+    # the public /api/track endpoint can require it. Legacy orders without one
+    # are unreachable to anonymous viewers (by design: blocks enumeration of
+    # historical orders' PII), but signed-in owners can still access them via
+    # "My Orders". Each token is 16 url-safe bytes (~128 bits of entropy).
+    try:
+        legacy_count = await db.online_orders.count_documents({"track_token": {"$exists": False}})
+        if legacy_count:
+            logger.info(f"Backfilling track_token on {legacy_count} legacy online_orders…")
+            async for doc in db.online_orders.find({"track_token": {"$exists": False}}, {"_id": 1}):
+                await db.online_orders.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {"track_token": secrets.token_urlsafe(16)}},
+                )
+            logger.info(f"track_token backfill complete on {legacy_count} orders.")
+    except Exception as e:
+        logger.warning(f"track_token backfill skipped: {e}")
     # Start the scheduler
     try:
         scheduler = AsyncIOScheduler()
@@ -2931,6 +2948,14 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     else:
         payment_status = "pending"  # awaiting card/bank flow
     now = datetime.now(timezone.utc)
+    # Per-order unguessable share token. The /api/track endpoint requires this on
+    # every unauthenticated request to close the IDOR — without it, anyone who
+    # guesses or enumerates an order id (Mongo ObjectIds embed a sequential
+    # counter so they are very predictable) could read masked PII (first name,
+    # last-4-digit phone, suburb prefix, items, total). 16 url-safe bytes ≈ 128
+    # bits of entropy — practically un-bruteforceable. We embed this in every
+    # tracking URL we hand out (WhatsApp confirmation, status updates, etc.).
+    track_token = secrets.token_urlsafe(16)
     doc = {
         "items": [it.model_dump() for it in order.items],
         "subtotal": order.total_price,
@@ -2952,6 +2977,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "diamonds_earned": diamonds_earned,  # NEW: Diamonds earned from this order
         "status": "pending",
         "printed": False,
+        "track_token": track_token,
         "created_at": now.isoformat(),
         "date": now.strftime("%Y-%m-%d"),
     }
@@ -2985,13 +3011,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     serialized = _serialize_online_order(doc)
     # WhatsApp confirmation (fire-and-forget)
     try:
-        # Use Frontend URL deduced from request origin
-        origin = request.headers.get("origin") or request.headers.get("referer", "").rstrip("/")
-        if origin and origin.endswith("/"):
-            origin = origin[:-1]
-        if not origin:
-            origin = ""
-        tracking_url = f"{origin}/track/{serialized['id']}" if origin else f"/track/{serialized['id']}"
+        tracking_url = _origin_tracking_url(request, serialized['id'], doc.get('track_token'))
         msg = _format_order_confirmation(doc, tracking_url)
         asyncio.create_task(send_whatsapp(order.phone, msg))
     except Exception as e:
@@ -3181,10 +3201,7 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     # WhatsApp status update
     try:
         if body.status in {"accepted", "preparing", "out_for_delivery", "delivered", "cancelled", "rejected"}:
-            origin = request.headers.get("origin") or ""
-            if origin.endswith("/"):
-                origin = origin[:-1]
-            tracking_url = f"{origin}/track/{order_id}" if origin else f"/track/{order_id}"
+            tracking_url = _origin_tracking_url(request, order_id, order.get("track_token"))
             msg = _format_status_update(order, body.status, tracking_url)
             asyncio.create_task(send_whatsapp(order.get("phone", ""), msg))
     except Exception as e:
@@ -3208,11 +3225,17 @@ async def online_orders_pending_count(request: Request):
     return {"pending_count": count, "latest_id": latest_id, "latest_at": latest_at}
 
 
-def _origin_tracking_url(request: Request, order_id: str) -> str:
+def _origin_tracking_url(request: Request, order_id: str, track_token: Optional[str] = None) -> str:
+    """Build the public /track URL for an order. Always include the per-order
+    `track_token` query parameter — the /api/track endpoint REQUIRES it for
+    unauthenticated viewers (IDOR mitigation). Authenticated owners + admins
+    don't need the token, but we still include it so they can share the link
+    with riders / family members who aren't signed in."""
     origin = request.headers.get("origin") or ""
     if origin.endswith("/"):
         origin = origin[:-1]
-    return f"{origin}/track/{order_id}" if origin else f"/track/{order_id}"
+    base = f"{origin}/track/{order_id}" if origin else f"/track/{order_id}"
+    return f"{base}?t={track_token}" if track_token else base
 
 
 @api_router.post("/online-orders/{order_id}/accept")
@@ -3236,7 +3259,7 @@ async def accept_online_order(order_id: str, request: Request):
     )
     refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     try:
-        msg = _format_status_update(refreshed, "accepted", _origin_tracking_url(request, order_id))
+        msg = _format_status_update(refreshed, "accepted", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
         asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
     except Exception as e:
         logger.warning(f"WhatsApp accept notify failed: {e}")
@@ -3265,7 +3288,7 @@ async def reject_online_order(order_id: str, body: OrderRejectRequest, request: 
     )
     refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     try:
-        msg = _format_status_update(refreshed, "rejected", _origin_tracking_url(request, order_id))
+        msg = _format_status_update(refreshed, "rejected", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
         asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
     except Exception as e:
         logger.warning(f"WhatsApp reject notify failed: {e}")
@@ -3907,7 +3930,7 @@ async def confirm_modified_online_order(order_id: str, request: Request):
     refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     try:
         # Special "modified+confirmed" message
-        msg = _format_status_update(refreshed, "modified", _origin_tracking_url(request, order_id))
+        msg = _format_status_update(refreshed, "modified", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
         asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
     except Exception as e:
         logger.warning(f"WhatsApp modified-confirm notify failed: {e}")
@@ -5125,11 +5148,22 @@ async def public_restaurant_info():
 
 
 @api_router.get("/track/{order_id}")
-async def public_track_order(order_id: str, request: Request):
-    """Public tracking endpoint reachable via order receipt link / WhatsApp.
-    Customer PII (full phone, full address) is masked here to limit exposure when
-    the order id is shared/forwarded. The authenticated /api/online-orders/{id}
-    endpoint still returns the full record to the order owner and to admins."""
+async def public_track_order(order_id: str, request: Request, t: Optional[str] = None):
+    """Public tracking endpoint reachable via the order's WhatsApp / receipt link.
+
+    IDOR mitigation (CRITICAL): order ids are MongoDB ObjectIds and embed a
+    sequential counter — enumerable in seconds. Without a secondary secret an
+    attacker who sees ONE order id (e.g. their own receipt) can iterate the
+    counter byte and harvest PII (first name, last-4 phone, suburb prefix,
+    items, total) from every neighbouring order. We require a per-order
+    `track_token` query parameter that is issued at order creation and only
+    embedded in links we hand directly to the customer. Without a valid token
+    we return 404 — never 401/403 — so attackers cannot probe which ids exist.
+
+    Authenticated owners + admins bypass the token check (their identity
+    already proves authorization). The owner also continues to see full PII;
+    everyone else (token-only viewers, e.g. a family member the customer
+    shared the link with) gets the masked response."""
     try:
         o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -5137,22 +5171,35 @@ async def public_track_order(order_id: str, request: Request):
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # If the caller IS authenticated (admin OR the order owner) skip masking so
-    # existing flows that rely on the full address (driver app, admin tracking) keep working.
+    # Authorization layer 1: signed-in admin OR the order's customer.
     show_full = False
+    is_authorized = False
     try:
         user = await get_current_user(request)
         if user.get("role") == "admin":
             show_full = True
+            is_authorized = True
     except HTTPException:
         pass
-    if not show_full:
+    if not is_authorized:
         try:
             cust = await get_current_customer(request)
             if cust and o.get("customer_id") and str(o.get("customer_id")) == str(cust.get("_id")):
                 show_full = True
+                is_authorized = True
         except HTTPException:
             pass
+
+    # Authorization layer 2: per-order share token. Constant-time compare so we
+    # don't leak token bytes via timing. Only checked if the caller is not
+    # already an authenticated owner / admin (saves a DB hit on the hot path
+    # for signed-in users polling their own orders every 5s).
+    if not is_authorized:
+        order_token = o.get("track_token") or ""
+        if not (t and order_token and secrets.compare_digest(str(t), str(order_token))):
+            # Return 404, not 401/403 — denying existence prevents enumeration of
+            # which ids are real even after the token requirement is enforced.
+            raise HTTPException(status_code=404, detail="Order not found")
 
     def _mask_phone(p: str) -> str:
         p = str(p or "")
