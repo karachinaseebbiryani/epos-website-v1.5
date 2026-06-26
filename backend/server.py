@@ -2770,6 +2770,63 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         bh = compute_business_hours_status(s_for_hours)
         if not bh.get("is_open"):
             raise HTTPException(status_code=400, detail="Restaurant is currently closed. Please order during business hours.")
+
+    # ===== SERVER-SIDE AUTHORITATIVE PRICING =====
+    # SECURITY (payment manipulation fix): Every previous calculation below relied on
+    # `order.total_price` and `order.items[*].price`, both of which come straight from
+    # the client JSON. An attacker could send negative quantities, negative prices,
+    # arbitrary low prices, or a manipulated total to pay Rs 1 for any cart.
+    # We now ignore client-supplied price/total fields entirely and rebuild them from
+    # the menu_items collection — the only source of truth for what a thing costs.
+    if not order.items or len(order.items) == 0:
+        raise HTTPException(status_code=400, detail="Order must contain at least one item.")
+    if len(order.items) > 50:
+        raise HTTPException(status_code=400, detail="Too many line items in this order.")
+    validated_items: list[dict] = []
+    server_subtotal: float = 0.0
+    # Batch the menu lookups so a 20-item cart doesn't fan out 20 round-trips.
+    requested_ids: list[ObjectId] = []
+    for line in order.items:
+        try:
+            requested_ids.append(ObjectId(str(line.item_id)))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid menu item id: {line.item_id}")
+    menu_docs = {}
+    async for mi in db.menu_items.find({"_id": {"$in": requested_ids}}):
+        menu_docs[str(mi["_id"])] = mi
+    for line in order.items:
+        # Quantity sanity — must be a positive integer within a sane range. Catches
+        # negative quantities (the original bug: -1 made the line total negative and
+        # the order rang up at Rs 0) plus zero, floats, and absurd large numbers.
+        try:
+            qty = int(line.quantity)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity for {getattr(line, 'name', 'item')}.")
+        if qty < 1 or qty > 100:
+            raise HTTPException(status_code=400, detail=f"Quantity must be between 1 and 100 (got {qty}).")
+        db_item = menu_docs.get(str(line.item_id))
+        if not db_item:
+            raise HTTPException(status_code=400, detail=f"Menu item not found or unavailable.")
+        # Optional: respect an `active` / `is_available` flag if the menu doc has one,
+        # so admins can deactivate an item and have it instantly refuse new orders.
+        if db_item.get("active") is False or db_item.get("is_available") is False:
+            raise HTTPException(status_code=400, detail=f"'{db_item.get('name', 'Item')}' is no longer available.")
+        # Server-side price. Negative DB price = data corruption, not customer's
+        # fault — refuse with a 500 so it surfaces in logs / alerts.
+        server_price = float(db_item.get("price", 0))
+        if server_price < 0:
+            logger.error(f"Negative price on menu_items {db_item['_id']}: {server_price}")
+            raise HTTPException(status_code=500, detail="Pricing error — please contact support.")
+        server_subtotal += server_price * qty
+        validated_items.append({
+            "item_id": str(db_item["_id"]),
+            "name": db_item.get("name", ""),
+            "price": server_price,
+            "quantity": qty,
+        })
+    # Round to 2 decimals to avoid floating point drift propagating into discounts.
+    server_subtotal = round(server_subtotal, 2)
+
     # Coupon validation
     discount_amount = 0.0
     coupon_used = None
@@ -2800,7 +2857,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             if not cust or str(cust["_id"]) != str(personal.get("customer_id")):
                 raise HTTPException(status_code=400, detail="This coupon belongs to a different account. Please sign in with the correct account.")
             if personal.get("discount_percent"):
-                discount_amount = round(order.total_price * float(personal["discount_percent"]) / 100, 2)
+                discount_amount = round(server_subtotal * float(personal["discount_percent"]) / 100, 2)
             else:
                 discount_amount = float(personal.get("discount_amount", 0))
             coupon_used = code_normalized
@@ -2810,7 +2867,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             if offer:
                 # V2: enforce minimum order amount on offers
                 min_amount = float(offer.get("min_order_amount", 0) or 0)
-                if min_amount > 0 and float(order.total_price or 0) < min_amount:
+                if min_amount > 0 and server_subtotal < min_amount:
                     raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
                 # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
                 # should only fire once per signed-in customer (matched by id) and once
@@ -2826,7 +2883,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                     if already_used:
                         raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
                 if offer.get("discount_percent"):
-                    discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
+                    discount_amount = round(server_subtotal * float(offer["discount_percent"]) / 100, 2)
                 elif offer.get("discount_amount"):
                     discount_amount = float(offer["discount_amount"])
                 coupon_used = offer["coupon_code"]
@@ -2836,11 +2893,11 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     if order.delivery_lat is not None and order.delivery_lng is not None:
         s = await get_online_settings_doc()
         distance_km = haversine_km(s["restaurant_lat"], s["restaurant_lng"], order.delivery_lat, order.delivery_lng)
-        quote = calculate_delivery_fee(distance_km, s, subtotal=float(order.total_price or 0) - float(discount_amount or 0))
+        quote = calculate_delivery_fee(distance_km, s, subtotal=server_subtotal - float(discount_amount or 0))
         if not quote["in_range"]:
             raise HTTPException(status_code=400, detail=f"Delivery address is outside our {quote['max_radius_km']} km service area.")
         delivery_fee = float(quote["fee"])
-    final_total = max(0, order.total_price - discount_amount) + delivery_fee
+    final_total = max(0, server_subtotal - discount_amount) + delivery_fee
     
     # --- LOYALTY SYSTEM: Reward Redemption & Diamond Earning ---
     loyalty_settings = await db.loyalty_settings.find_one({"key": "loyalty"}) or {}
@@ -2886,13 +2943,16 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                         except Exception:
                             free_item_doc = None
                         if free_item_doc:
-                            free_line = OnlineOrderItem(
-                                item_id=str(free_item_doc["_id"]),
-                                name=f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
-                                price=0.0,
-                                quantity=1,
-                            )
-                            order.items.append(free_line)
+                            # Append directly to the SERVER-VALIDATED items list — the client
+                            # `order.items` list is no longer used for persistence (it was the
+                            # vehicle for the payment-manipulation attack). The free item's
+                            # price is 0 and is set here on the server, so it's trusted.
+                            validated_items.append({
+                                "item_id": str(free_item_doc["_id"]),
+                                "name": f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
+                                "price": 0.0,
+                                "quantity": 1,
+                            })
                         else:
                             logger.warning(f"free_item reward {reward.get('_id')} references missing menu item {reward_value}")
                     
@@ -2957,8 +3017,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # tracking URL we hand out (WhatsApp confirmation, status updates, etc.).
     track_token = secrets.token_urlsafe(16)
     doc = {
-        "items": [it.model_dump() for it in order.items],
-        "subtotal": order.total_price,
+        # SECURITY: persist the SERVER-VALIDATED items + subtotal, never the
+        # client-supplied ones. This is what payment manipulation tried to corrupt.
+        "items": validated_items,
+        "subtotal": server_subtotal,
         "discount_amount": discount_amount,
         "delivery_fee": delivery_fee,
         "distance_km": round(distance_km, 2) if distance_km is not None else None,

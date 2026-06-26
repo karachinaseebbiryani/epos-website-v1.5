@@ -160,17 +160,239 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 2
+  test_sequence: 3
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "IDOR fix on /api/track/{order_id} — require per-order share token"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
+backend:
+  - task: "Payment manipulation fix — server-side authoritative pricing"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Previously POST /api/online-orders trusted three client-supplied fields:
+              * order.total_price          (the cart subtotal)
+              * order.items[*].price       (per-line unit price)
+              * order.items[*].quantity    (no bounds check — negatives accepted)
+            Attacker could pay Rs 1 (or Rs 0, or negative) for any cart by manipulating
+            the JSON payload.
+
+            Fix (server.py around line 2773):
+              1. Before any pricing math, reject empty carts and carts with >50 lines.
+              2. Batch-fetch every requested menu item by ObjectId.
+              3. For each line: require quantity ∈ [1, 100] AS AN INTEGER. Reject if missing,
+                 negative, zero, float, or > 100. The original bug (negative qty → Rs 0 order)
+                 dies here.
+              4. Resolve item_id → menu_items doc. Reject if item not found or inactive.
+              5. Recompute price = db_item.price (DB-trusted, ignored client price entirely).
+                 Reject if DB price < 0 (data corruption, surfaces in logs).
+              6. server_subtotal = sum(server_price * qty), rounded to 2 decimals.
+              7. EVERY downstream calculation (coupon %, offer min_order_amount, delivery fee
+                 subtotal, final_total) replaced its `order.total_price` reference with
+                 `server_subtotal`. Confirmed no `order.total_price` / `order.items[` survives
+                 outside comments.
+              8. Free-item Diamond reward now appends to `validated_items` (server-validated
+                 list) instead of `order.items`. Price stays 0.0 (server-set, trusted).
+              9. The persisted doc now stores `items: validated_items` and `subtotal: server_subtotal`,
+                 never client-supplied values.
+        - working: true
+          agent: "testing"
+          comment: |
+            ✅ PAYMENT MANIPULATION FIX VERIFICATION COMPLETE - 11/12 TESTS PASSED
+            
+            Test execution summary:
+            - Created comprehensive test suite in /app/backend_test.py
+            - Tested with admin credentials from /app/memory/test_credentials.md
+            - Signed up test customer (testcustomer82748@test.com)
+            - Used existing menu item: Chicken Biryani (Half) (ID: 6a3be37226de31379e195978, Price: Rs 350)
+            - Created test coupon TESTPAY48 (10% discount) for coupon testing
+            
+            ✅ Test 1 - Negative Quantity Attack
+               Status: 400 (expected 400)
+               Error: "Quantity must be between 1 and 100 (got -3)."
+               PASS: Negative quantities are properly rejected
+            
+            ✅ Test 2 - Zero Quantity Attack
+               Status: 400 (expected 400)
+               Error: "Quantity must be between 1 and 100 (got 0)."
+               PASS: Zero quantities are properly rejected
+            
+            ✅ Test 3 - Negative Price Attack
+               Status: 201 (expected 201)
+               Response: subtotal=350.0, total=350.0, item_price=350.0 (all equal DB price 350.0)
+               PASS: Server ignored client's negative price (-500) and used DB price (350)
+            
+            ✅ Test 4 - Price Override to Rs 1 Attack
+               Status: 201 (expected 201)
+               Response: subtotal=350.0, item_price=350.0 (both equal DB price 350.0)
+               PASS: Server ignored client's Rs 1 price and used DB price (350)
+            
+            ✅ Test 5 - Manipulated Total Price Attack
+               Status: 201 (expected 201)
+               Response: subtotal=700.0, total=700.0 (expected 700.0 for qty=2)
+               PASS: Server ignored client's total_price=1.0 and calculated correct total (700)
+            
+            ✅ Test 6 - Unknown Item ID
+               Status: 400 (expected 400)
+               Error: "Menu item not found or unavailable."
+               PASS: Non-existent item IDs are properly rejected
+            
+            ✅ Test 7 - Invalid Item ID Format
+               Status: 400 (expected 400)
+               Error: "Invalid menu item id: not-a-valid-objectid"
+               PASS: Malformed ObjectIds are properly rejected
+            
+            ✅ Test 8 - Empty Cart
+               Status: 400 (expected 400)
+               Error: "Order must contain at least one item."
+               PASS: Empty carts are properly rejected
+            
+            ✅ Test 9 - Huge Quantity
+               Status: 400 (expected 400)
+               Error: "Quantity must be between 1 and 100 (got 9999)."
+               PASS: Excessive quantities are properly rejected
+            
+            ✅ Test 10 - Normal Order (Regression)
+               Status: 201 (expected 201)
+               Response: subtotal=700.0, total=700.0 (expected 700.0)
+               PASS: Normal orders still work correctly
+            
+            ✅ Test 11 - Coupon Discount Uses Server Subtotal
+               Status: 201 (expected 201)
+               Response: discount=35.0 (10% of DB subtotal 350), expected=35.0
+               PASS: Coupon discount calculated from server subtotal, not client's lie (5000)
+            
+            ⚠️ Test 12 - Float Quantity (BONUS)
+               Status: 422 (expected 400)
+               Error: Pydantic validation - "Input should be a valid integer, got a number with a fractional part"
+               NOTE: This is BETTER than expected - Pydantic schema validation rejects float quantities
+               at the API layer BEFORE the manual validation code. This is more secure.
+            
+            SECURITY VERIFICATION:
+            ✓ Server ignores ALL client-supplied price fields (items[*].price, total_price)
+            ✓ Server fetches authoritative prices from menu_items collection
+            ✓ Server validates quantity ∈ [1, 100] as positive integer
+            ✓ Server computes server_subtotal = sum(db_price * qty)
+            ✓ ALL downstream calculations use server_subtotal (coupons, delivery fee, final total)
+            ✓ Persisted order document stores validated_items with server prices
+            ✓ Negative quantity attack blocked (original bug fixed)
+            ✓ Negative price attack blocked (server ignores client price)
+            ✓ Price override attack blocked (Rs 1 for anything - server ignores client price)
+            ✓ Total manipulation attack blocked (server ignores client total)
+            ✓ Coupon discount calculated from server subtotal, not client's manipulated value
+            ✓ Empty carts, invalid item IDs, and excessive quantities properly rejected
+            ✓ Normal orders continue to work correctly (regression test passed)
+            
+            BACKEND LOGS VERIFICATION:
+            - All order creation requests processed correctly
+            - No errors or exceptions during test execution
+            - Validation logic working as expected
+            - Server-side pricing calculations accurate
+            
+            CONCLUSION:
+            The payment manipulation vulnerability has been successfully mitigated. The server now
+            has authoritative control over all pricing calculations and ignores client-supplied
+            price/quantity/total fields. All attack vectors tested (negative qty, negative price,
+            price override, total manipulation) are blocked. The fix is production-ready.
+
+  - task: "IDOR fix on /api/track/{order_id} — require per-order share token"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "Verified 9/9 tests in previous round."
+
 agent_communication:
+    - agent: "main"
+      message: |
+        Please verify the payment-manipulation fix on POST /api/online-orders. The server must
+        IGNORE every client-supplied price/total field and recompute from menu_items.
+
+        ADMIN: POST /api/auth/login { "email": "admin@restaurant.com", "password": "admin123" }
+        CUSTOMER: signup via POST /api/customer/signup (same shape as before).
+
+        SETUP REQUIRED BEFORE TESTING:
+        1. As ADMIN, ensure at least one menu_item exists. Use GET /api/menu-items with admin token
+           to list. If none exist, POST /api/menu-items with body:
+             { "name": "Biryani", "price": 500, "category_id": "<any valid cat id from GET /api/categories>", "stock": 100, "is_available": true }
+           Note the returned id (string).
+        2. If "Restaurant is currently closed" blocks orders during your test window, call
+           PUT /api/online-settings as admin with { "business_hours_enabled": false } and remember
+           to restore it after the test.
+
+        TESTS (acting as authenticated customer):
+
+        Test 1 — NEGATIVE QUANTITY:
+          POST /api/online-orders with one item line { item_id: "<valid>", name:"X", price: 500, quantity: -3 }
+          and total_price: 0, payment_method: "cod", + customer_name/phone/address.
+          EXPECT: HTTP 400 with a message about quantity being between 1 and 100.
+
+        Test 2 — ZERO QUANTITY:
+          Same payload but quantity: 0.
+          EXPECT: HTTP 400.
+
+        Test 3 — NEGATIVE PRICE:
+          quantity: 1, price: -500 (everything else valid).
+          EXPECT: HTTP 201 (success) BUT the returned order's `subtotal` AND `total_price`
+          AND items[0].price MUST equal the menu_items DB price (e.g. 500), NOT -500.
+          The client-supplied negative price MUST be ignored.
+
+        Test 4 — PRICE OVERRIDE TO Rs 1:
+          quantity: 1, price: 1.0 (real DB price is e.g. 500). total_price: 1.0.
+          EXPECT: HTTP 201 BUT the response order.subtotal == 500 (DB price), items[0].price == 500.
+          Verify in DB / response that subtotal is the SERVER-COMPUTED 500, not the client's 1.
+
+        Test 5 — MANIPULATED TOTAL:
+          quantity: 2, price: 500 (real), total_price: 1.0 (lie).
+          EXPECT: HTTP 201 BUT response.subtotal == 1000, response.total_price == 1000 (+ delivery fee if any).
+          The client's total_price must be ignored.
+
+        Test 6 — UNKNOWN ITEM ID:
+          item_id: "000000000000000000000000" (24 zeros, valid ObjectId format but no menu item).
+          EXPECT: HTTP 400 about "Menu item not found".
+
+        Test 7 — INVALID ITEM ID FORMAT:
+          item_id: "not-a-valid-objectid"
+          EXPECT: HTTP 400 about invalid menu item id.
+
+        Test 8 — EMPTY CART:
+          items: []
+          EXPECT: HTTP 400 about "Order must contain at least one item".
+
+        Test 9 — HUGE QUANTITY:
+          quantity: 9999
+          EXPECT: HTTP 400 about quantity being between 1 and 100.
+
+        Test 10 — NORMAL ORDER (regression):
+          1 item with quantity: 2, valid item_id. EXPECT: HTTP 201, response.subtotal == 2 * db_price,
+          response.total_price == subtotal + delivery_fee (delivery_fee may be 0 if no lat/lng sent).
+
+        Test 11 — COUPON DISCOUNT USES SERVER SUBTOTAL (regression):
+          If there's an existing active percentage-discount offer (or you can create one as admin
+          with POST /api/offers { coupon_code: "TEST10", discount_percent: 10, active: true }),
+          send an order with coupon_code: "TEST10" and quantity: 1 of a Rs 500 item, but lie about
+          total_price: 5000. EXPECT discount_amount == 50 (10% of 500), NOT 500.
+
+        REPORT per test: HTTP status, response.subtotal, response.total_price, response.items[0].price,
+        and PASS/FAIL. Pass criteria: client's price/quantity/total cannot move the persisted numbers.
+
+        Backend on supervisor port 8001; admin creds in /app/memory/test_credentials.md.
     - agent: "main"
       message: |
         Please verify the IDOR fix on GET /api/track/{order_id}. The endpoint must:
@@ -306,3 +528,49 @@ agent_communication:
             The IDOR vulnerability has been successfully mitigated. The per-order track_token
             mechanism prevents enumeration attacks on MongoDB ObjectId-based order IDs while
             maintaining usability for authenticated users and token holders.
+    
+    - agent: "testing"
+      message: |
+        ✅ PAYMENT MANIPULATION FIX VERIFICATION COMPLETE - 11/12 TESTS PASSED
+        
+        Comprehensive testing completed on POST /api/online-orders endpoint:
+        
+        PASSED TESTS (11/12):
+        ✅ Test 1 - Negative Quantity Attack → HTTP 400 (properly rejected)
+        ✅ Test 2 - Zero Quantity Attack → HTTP 400 (properly rejected)
+        ✅ Test 3 - Negative Price Attack → HTTP 201 with server DB price (client price ignored)
+        ✅ Test 4 - Price Override to Rs 1 → HTTP 201 with server DB price (client price ignored)
+        ✅ Test 5 - Manipulated Total → HTTP 201 with server-calculated total (client total ignored)
+        ✅ Test 6 - Unknown Item ID → HTTP 400 (properly rejected)
+        ✅ Test 7 - Invalid Item ID Format → HTTP 400 (properly rejected)
+        ✅ Test 8 - Empty Cart → HTTP 400 (properly rejected)
+        ✅ Test 9 - Huge Quantity → HTTP 400 (properly rejected)
+        ✅ Test 10 - Normal Order (Regression) → HTTP 201 (normal orders still work)
+        ✅ Test 11 - Coupon Discount Uses Server Subtotal → HTTP 201 with correct discount (10% of DB price, not client's lie)
+        
+        ⚠️ Test 12 - Float Quantity (BONUS):
+        Status: HTTP 422 (Pydantic validation rejection)
+        NOTE: This is BETTER than expected. Pydantic schema validation rejects float quantities
+        at the API layer BEFORE the manual validation code runs. This provides an additional
+        layer of security. The error message is clear: "Input should be a valid integer, got a
+        number with a fractional part". This is acceptable and even preferable behavior.
+        
+        SECURITY FEATURES VERIFIED:
+        ✓ Server ignores ALL client-supplied price fields (items[*].price, total_price)
+        ✓ Server fetches authoritative prices from menu_items collection
+        ✓ Server validates quantity ∈ [1, 100] as positive integer
+        ✓ Server computes server_subtotal = sum(db_price * qty)
+        ✓ ALL downstream calculations use server_subtotal (coupons, delivery fee, final total)
+        ✓ Persisted order document stores validated_items with server prices
+        ✓ Negative quantity attack blocked (original bug fixed)
+        ✓ Negative price attack blocked (server ignores client price)
+        ✓ Price override attack blocked (Rs 1 for anything - server ignores client price)
+        ✓ Total manipulation attack blocked (server ignores client total)
+        ✓ Coupon discount calculated from server subtotal, not client's manipulated value
+        ✓ Empty carts, invalid item IDs, and excessive quantities properly rejected
+        ✓ Normal orders continue to work correctly (regression test passed)
+        
+        NO CRITICAL ISSUES FOUND. All attack vectors are blocked.
+        Backend logs show no errors during test execution.
+        
+        RECOMMENDATION: The payment manipulation fix is production-ready. Ready to summarize and finish.
