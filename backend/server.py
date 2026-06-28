@@ -304,6 +304,25 @@ ALL_PERMISSIONS = [
 ]
 ADMIN_PERMISSIONS = ALL_PERMISSIONS.copy()
 
+
+def _has_perm(user: dict, perm: str) -> bool:
+    """Authorization helper used by every admin-shell endpoint.
+
+    Returns True if the caller is the master admin (role=admin, always full
+    access) OR if the named permission is in their per-user permissions list.
+
+    Why it exists: dozens of endpoints used to check `role != "admin"` and
+    return 403 — which broke the entire "give a staff user this module's
+    permission" feature. With this helper a non-admin user that has, say,
+    `online_orders` in their permissions list can now actually list / accept /
+    reject orders, while users without that permission still get a 403.
+    """
+    if not user:
+        return False
+    if user.get("role") == "admin":
+        return True
+    return perm in (user.get("permissions") or [])
+
 # --- Models ---
 class LoginRequest(BaseModel):
     email: str
@@ -2169,8 +2188,18 @@ async def seed_admin():
     if not existing:
         await db.users.insert_one({"email": admin_email, "password_hash": hash_password(admin_password), "name": "Admin", "role": "admin", "permissions": ADMIN_PERMISSIONS, "created_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Admin created: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    else:
+        # IMPORTANT: do NOT reset the admin's password on every boot.
+        # The previous behaviour (overwrite hash if env var doesn't match) silently
+        # reverted the operator's UI-changed password to the env-var default after
+        # every redeploy — the symptom being "I can't log in with my password".
+        # We only resync from the env var when the operator explicitly opts in with
+        # FORCE_ADMIN_PASSWORD_RESET=true (set it once, deploy, unset). That gives
+        # an escape hatch for a forgotten password without breaking normal operation.
+        if (os.environ.get("FORCE_ADMIN_PASSWORD_RESET", "").lower() in ("1", "true", "yes")
+                and not verify_password(admin_password, existing["password_hash"])):
+            await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+            logger.warning(f"Admin password RESET from env var (FORCE_ADMIN_PASSWORD_RESET=true): {admin_email}")
     # Ensure admin always has the FULL set of permissions (covers cases where
     # ALL_PERMISSIONS gained new entries — e.g. online_dashboard, online_orders, etc.).
     if existing:
@@ -2180,12 +2209,23 @@ async def seed_admin():
     # Seed default settings
     if not await db.settings.find_one({"key": "global"}):
         await db.settings.insert_one({"key": "global", **DEFAULT_SETTINGS})
-    # Write test credentials (safe for both cloud and local)
+    # Write test credentials (safe for both cloud and local).
+    # We only write the env-var password here if we KNOW it's the current truth —
+    # i.e. we just created the admin row OR we just did a FORCE reset. Otherwise the
+    # admin may have changed their password via the UI and the file would mislead
+    # the testing agent / fork agent into trying a stale credential.
     try:
+        admin_doc_now = await db.users.find_one({"email": admin_email})
+        password_is_truthful = bool(admin_doc_now) and verify_password(admin_password, admin_doc_now["password_hash"])
         memory_dir = ROOT_DIR.parent / "memory"
         memory_dir.mkdir(exist_ok=True)
         with open(memory_dir / "test_credentials.md", "w") as f:
-            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n")
+            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n")
+            if password_is_truthful:
+                f.write(f"- Password: {admin_password}\n")
+            else:
+                f.write("- Password: <changed via UI — env-var ADMIN_PASSWORD no longer matches. Set FORCE_ADMIN_PASSWORD_RESET=true and restart to reset.>\n")
+            f.write("- Role: admin\n")
     except Exception:
         pass
 
@@ -3133,8 +3173,8 @@ async def get_my_personal_coupons(request: Request):
 @api_router.get("/online-orders")
 async def list_online_orders(request: Request, status: Optional[str] = None):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     query = {}
     if status and status != "all":
         query["status"] = status
@@ -3145,24 +3185,24 @@ async def list_online_orders(request: Request, status: Optional[str] = None):
 async def list_pending_print_orders(request: Request):
     """Endpoint for POS thermal printer agent to poll new unprinted orders."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     orders = await db.online_orders.find({"printed": False, "status": {"$ne": "cancelled"}}).sort("created_at", 1).to_list(100)
     return [_serialize_online_order(o) for o in orders]
 
 @api_router.put("/online-orders/{order_id}/printed")
 async def mark_order_printed(order_id: str, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update online orders.")
     await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": {"printed": True, "printed_at": datetime.now(timezone.utc).isoformat()}})
     return {"message": "Marked as printed"}
 
 @api_router.put("/online-orders/{order_id}/status")
 async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdate, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update online orders.")
     valid = {"pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "cancelled", "rejected"}
     if body.status not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid}")
@@ -3298,8 +3338,8 @@ async def online_orders_pending_count(request: Request):
     """Lightweight polling endpoint: returns count of orders awaiting staff action.
     Used by POS UI to start/stop the ringing alert sound."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     count = await db.online_orders.count_documents({"status": "pending"})
     # Latest pending order id (so frontend can detect new arrivals between polls)
     latest = await db.online_orders.find({"status": "pending"}, {"_id": 1, "created_at": 1}).sort("created_at", -1).limit(1).to_list(1)
@@ -3325,8 +3365,8 @@ def _origin_tracking_url(request: Request, order_id: str, track_token: Optional[
 async def accept_online_order(order_id: str, request: Request):
     """Staff accepts a pending order. Stops ringing on the POS, notifies customer via WhatsApp."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to accept orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3353,8 +3393,8 @@ async def accept_online_order(order_id: str, request: Request):
 async def reject_online_order(order_id: str, body: OrderRejectRequest, request: Request):
     """Staff rejects a pending order with a reason. Stops ringing on the POS, notifies customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to reject orders.")
     reason = (body.reason or "").strip() or "other"
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
@@ -3393,8 +3433,8 @@ async def modify_online_order(order_id: str, body: OrderModifyRequest, request: 
     """Staff edits items (remove items, change qty, change price). Marks the order as modified
     but DOES NOT change status — staff must call /confirm-modified after contacting the customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to modify orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3932,8 +3972,8 @@ async def update_order_operations(order_id: str, body: OrderOperationsUpdate, re
     """Staff-only: update preparation time and/or override the delivery fee on a live order.
     Customers see the new values within a few seconds on the tracking page."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to manage orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3988,8 +4028,8 @@ async def confirm_modified_online_order(order_id: str, request: Request):
     """Called after staff has phoned the customer to confirm the modified order.
     Moves the order to 'accepted' and notifies the customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to confirm modified orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -4028,10 +4068,10 @@ async def get_online_order_detail(order_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Order not found")
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
-    # Try admin first
+    # Try staff/admin first — anyone with online_orders permission can view order details.
     try:
         user = await get_current_user(request)
-        if user.get("role") == "admin":
+        if _has_perm(user, "online_orders"):
             return _serialize_online_order(o)
     except HTTPException:
         pass
@@ -5126,8 +5166,8 @@ async def submit_bank_payment(order_id: str, req: BankPaymentReference):
 @api_router.put("/online-orders/{order_id}/payment-status")
 async def admin_update_payment_status(order_id: str, body: dict, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update payment status.")
     new_status = body.get("payment_status")
     if new_status not in {"pending", "pending_verification", "paid", "failed", "refunded"}:
         raise HTTPException(status_code=400, detail="Invalid payment_status")
