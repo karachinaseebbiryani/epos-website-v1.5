@@ -4401,14 +4401,20 @@ async def sitemap_xml(request: Request):
     base = _abs_origin(request)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     urls: list[dict] = [
-        {"loc": f"{base}/",          "changefreq": "daily",   "priority": "1.0", "lastmod": today},
-        {"loc": f"{base}/menu",      "changefreq": "weekly",  "priority": "0.9", "lastmod": today},
-        {"loc": f"{base}/offers",    "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
-        {"loc": f"{base}/events",    "changefreq": "monthly", "priority": "0.6", "lastmod": today},
-        {"loc": f"{base}/feedback",  "changefreq": "monthly", "priority": "0.4", "lastmod": today},
-        {"loc": f"{base}/faq",       "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
-        {"loc": f"{base}/login",     "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
-        {"loc": f"{base}/register",  "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/",                  "changefreq": "daily",   "priority": "1.0", "lastmod": today},
+        {"loc": f"{base}/menu",              "changefreq": "weekly",  "priority": "0.9", "lastmod": today},
+        {"loc": f"{base}/offers",            "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/events",            "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/about",             "changefreq": "monthly", "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/contact",           "changefreq": "monthly", "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/faq",               "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/delivery",          "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/rewards-program",   "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/privacy",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/terms",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/feedback",          "changefreq": "monthly", "priority": "0.4", "lastmod": today},
+        {"loc": f"{base}/login",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/register",          "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
     ]
     # Include each active offer as its own URL fragment so search engines can
     # surface them individually. Same trick for menu categories.
