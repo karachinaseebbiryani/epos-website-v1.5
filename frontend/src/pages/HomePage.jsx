@@ -5,6 +5,7 @@ import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
+import TrustStrip from "../components/TrustStrip";
 
 export default function HomePage() {
     const [menuData, setMenuData] = useState({ categories: [], items: [] });
@@ -182,7 +183,7 @@ export default function HomePage() {
             </section>
 
             {/* CTA */}
-            <section className="max-w-7xl mx-auto px-4 md:px-8 pb-20">
+            <section className="max-w-7xl mx-auto px-4 md:px-8 pb-12">
                 <div className="bg-gradient-to-br from-brand-red to-brand-red-dark rounded-3xl p-10 md:p-16 text-white text-center relative overflow-hidden">
                     <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-brand-yellow/20 blur-3xl" />
                     <div className="absolute -bottom-20 -left-20 w-64 h-64 rounded-full bg-white/10 blur-3xl" />
@@ -193,6 +194,10 @@ export default function HomePage() {
                     </Link>
                 </div>
             </section>
+
+            {/* Trust strip — reassurance just before the customer scrolls into the
+                footer. Shows verified badge, secure checkout, COD support, live tracking. */}
+            <TrustStrip variant="homepage" />
 
             {/* Size / variation picker shared with MenuPage so the UX is identical
                 whether the customer taps "+" on the home bestsellers or in the full menu. */}

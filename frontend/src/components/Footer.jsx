@@ -1,11 +1,11 @@
 import { Link } from "react-router-dom";
-import { Phone, MapPin, Mail, Instagram, Facebook } from "lucide-react";
+import { Phone, MapPin, Mail, Instagram, Facebook, Clock, ShieldCheck, Banknote, CreditCard, Wallet, Smartphone } from "lucide-react";
 
 export default function Footer() {
     return (
         <footer className="bg-brand-ink text-white mt-20" data-testid="site-footer">
-            <div className="max-w-7xl mx-auto px-4 md:px-8 py-16 grid grid-cols-1 md:grid-cols-4 gap-10">
-                <div className="md:col-span-2">
+            <div className="max-w-7xl mx-auto px-4 md:px-8 py-16 grid grid-cols-2 md:grid-cols-5 gap-8 md:gap-10">
+                <div className="col-span-2 md:col-span-2">
                     <div className="flex items-center gap-3 mb-4">
                         <div className="w-12 h-12 rounded-full bg-brand-red flex items-center justify-center font-display font-black text-xl">K</div>
                         <div>
@@ -13,19 +13,34 @@ export default function Footer() {
                             <div className="text-brand-yellow text-sm font-semibold">Biryani &amp; Murg Pulao</div>
                         </div>
                     </div>
-                    <p className="text-white/60 max-w-md text-sm leading-relaxed">
+                    <p className="text-white/60 max-w-md text-sm leading-relaxed mb-4">
                         Authentic Karachi-style biryani and Murg Pulao, freshly cooked with traditional recipes.
-                        Family-owned, flavor-driven.
+                        Family-owned, flavor-driven, in Lahore since 2009.
                     </p>
+                    <div className="inline-flex items-center gap-2 bg-emerald-900/40 text-emerald-200 border border-emerald-700/40 rounded-full px-3 py-1 text-xs font-semibold" data-testid="footer-secure-badge">
+                        <ShieldCheck className="w-3.5 h-3.5" /> Verified business · Secure checkout
+                    </div>
                 </div>
 
                 <div>
-                    <h3 className="font-display font-bold mb-4 text-sm uppercase tracking-wider text-brand-yellow">Quick Links</h3>
+                    <h3 className="font-display font-bold mb-4 text-sm uppercase tracking-wider text-brand-yellow">Order</h3>
                     <ul className="space-y-2 text-white/70 text-sm">
                         <li><Link to="/menu" data-testid="footer-menu-link" className="hover:text-white">Menu</Link></li>
                         <li><Link to="/offers" data-testid="footer-offers-link" className="hover:text-white">Offers</Link></li>
                         <li><Link to="/events" data-testid="footer-events-link" className="hover:text-white">Book an Event</Link></li>
+                        <li><Link to="/rewards-program" data-testid="footer-rewards-program-link" className="hover:text-white">Rewards Program</Link></li>
                         <li><Link to="/profile" data-testid="footer-profile-link" className="hover:text-white">My Orders</Link></li>
+                    </ul>
+                </div>
+
+                <div>
+                    <h3 className="font-display font-bold mb-4 text-sm uppercase tracking-wider text-brand-yellow">Company</h3>
+                    <ul className="space-y-2 text-white/70 text-sm">
+                        <li><Link to="/about" data-testid="footer-about-link" className="hover:text-white">About Us</Link></li>
+                        <li><Link to="/contact" data-testid="footer-contact-link" className="hover:text-white">Contact</Link></li>
+                        <li><Link to="/faq" data-testid="footer-faq-link" className="hover:text-white">FAQ</Link></li>
+                        <li><Link to="/delivery" data-testid="footer-delivery-link" className="hover:text-white">Delivery Info</Link></li>
+                        <li><Link to="/feedback" data-testid="footer-feedback-link" className="hover:text-white">Leave Feedback</Link></li>
                     </ul>
                 </div>
 
@@ -42,9 +57,12 @@ export default function Footer() {
                             </a>
                         </li>
                         <li>
-                            <a href="mailto:karachinaseebbiryani599@gmail.com" data-testid="footer-email-link" className="flex items-center gap-2 hover:text-white">
-                                <Mail className="w-4 h-4 text-brand-red" /> karachinaseebbiryani599@gmail.com
+                            <a href="mailto:karachinaseebbiryani599@gmail.com" data-testid="footer-email-link" className="flex items-center gap-2 hover:text-white break-all">
+                                <Mail className="w-4 h-4 text-brand-red shrink-0" /> karachinaseebbiryani599@gmail.com
                             </a>
+                        </li>
+                        <li className="flex items-center gap-2">
+                            <Clock className="w-4 h-4 text-brand-red" /> Daily · 11:30 AM – 11:30 PM
                         </li>
                     </ul>
 
@@ -58,7 +76,26 @@ export default function Footer() {
                     </div>
                 </div>
             </div>
-            <div className="border-t border-white/10 py-6 text-center text-white/40 text-xs">
+
+            {/* Payment methods strip — reassurance just before the copyright line. */}
+            <div className="border-t border-white/10">
+                <div className="max-w-7xl mx-auto px-4 md:px-8 py-5 flex flex-col md:flex-row items-center justify-between gap-3 text-xs text-white/60">
+                    <div className="flex items-center gap-2 md:gap-3 flex-wrap" data-testid="footer-payment-methods">
+                        <span className="font-semibold uppercase tracking-wider text-white/40">We accept:</span>
+                        <span className="inline-flex items-center gap-1.5 bg-white/5 rounded-full px-3 py-1"><Banknote className="w-3.5 h-3.5" /> Cash on Delivery</span>
+                        <span className="inline-flex items-center gap-1.5 bg-white/5 rounded-full px-3 py-1"><CreditCard className="w-3.5 h-3.5" /> Card</span>
+                        <span className="inline-flex items-center gap-1.5 bg-white/5 rounded-full px-3 py-1"><Wallet className="w-3.5 h-3.5" /> JazzCash / Easypaisa</span>
+                        <span className="inline-flex items-center gap-1.5 bg-white/5 rounded-full px-3 py-1"><Smartphone className="w-3.5 h-3.5" /> Bank Transfer</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-white/50">
+                        <Link to="/privacy" data-testid="footer-privacy-link" className="hover:text-white">Privacy</Link>
+                        <span>·</span>
+                        <Link to="/terms" data-testid="footer-terms-link" className="hover:text-white">Terms</Link>
+                    </div>
+                </div>
+            </div>
+
+            <div className="border-t border-white/10 py-5 text-center text-white/40 text-xs">
                 &copy; {new Date().getFullYear()} Karachi Naseeb Biryani &amp; Murg Pulao. All rights reserved.
             </div>
         </footer>

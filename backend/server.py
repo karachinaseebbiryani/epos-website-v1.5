@@ -304,6 +304,25 @@ ALL_PERMISSIONS = [
 ]
 ADMIN_PERMISSIONS = ALL_PERMISSIONS.copy()
 
+
+def _has_perm(user: dict, perm: str) -> bool:
+    """Authorization helper used by every admin-shell endpoint.
+
+    Returns True if the caller is the master admin (role=admin, always full
+    access) OR if the named permission is in their per-user permissions list.
+
+    Why it exists: dozens of endpoints used to check `role != "admin"` and
+    return 403 — which broke the entire "give a staff user this module's
+    permission" feature. With this helper a non-admin user that has, say,
+    `online_orders` in their permissions list can now actually list / accept /
+    reject orders, while users without that permission still get a 403.
+    """
+    if not user:
+        return False
+    if user.get("role") == "admin":
+        return True
+    return perm in (user.get("permissions") or [])
+
 # --- Models ---
 class LoginRequest(BaseModel):
     email: str
@@ -2169,8 +2188,18 @@ async def seed_admin():
     if not existing:
         await db.users.insert_one({"email": admin_email, "password_hash": hash_password(admin_password), "name": "Admin", "role": "admin", "permissions": ADMIN_PERMISSIONS, "created_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Admin created: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+    else:
+        # IMPORTANT: do NOT reset the admin's password on every boot.
+        # The previous behaviour (overwrite hash if env var doesn't match) silently
+        # reverted the operator's UI-changed password to the env-var default after
+        # every redeploy — the symptom being "I can't log in with my password".
+        # We only resync from the env var when the operator explicitly opts in with
+        # FORCE_ADMIN_PASSWORD_RESET=true (set it once, deploy, unset). That gives
+        # an escape hatch for a forgotten password without breaking normal operation.
+        if (os.environ.get("FORCE_ADMIN_PASSWORD_RESET", "").lower() in ("1", "true", "yes")
+                and not verify_password(admin_password, existing["password_hash"])):
+            await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+            logger.warning(f"Admin password RESET from env var (FORCE_ADMIN_PASSWORD_RESET=true): {admin_email}")
     # Ensure admin always has the FULL set of permissions (covers cases where
     # ALL_PERMISSIONS gained new entries — e.g. online_dashboard, online_orders, etc.).
     if existing:
@@ -2180,12 +2209,23 @@ async def seed_admin():
     # Seed default settings
     if not await db.settings.find_one({"key": "global"}):
         await db.settings.insert_one({"key": "global", **DEFAULT_SETTINGS})
-    # Write test credentials (safe for both cloud and local)
+    # Write test credentials (safe for both cloud and local).
+    # We only write the env-var password here if we KNOW it's the current truth —
+    # i.e. we just created the admin row OR we just did a FORCE reset. Otherwise the
+    # admin may have changed their password via the UI and the file would mislead
+    # the testing agent / fork agent into trying a stale credential.
     try:
+        admin_doc_now = await db.users.find_one({"email": admin_email})
+        password_is_truthful = bool(admin_doc_now) and verify_password(admin_password, admin_doc_now["password_hash"])
         memory_dir = ROOT_DIR.parent / "memory"
         memory_dir.mkdir(exist_ok=True)
         with open(memory_dir / "test_credentials.md", "w") as f:
-            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n")
+            f.write(f"# Test Credentials\n\n## Admin\n- Email: {admin_email}\n")
+            if password_is_truthful:
+                f.write(f"- Password: {admin_password}\n")
+            else:
+                f.write("- Password: <changed via UI — env-var ADMIN_PASSWORD no longer matches. Set FORCE_ADMIN_PASSWORD_RESET=true and restart to reset.>\n")
+            f.write("- Role: admin\n")
     except Exception:
         pass
 
@@ -2371,6 +2411,27 @@ class OfferUpdate(BaseModel):
     active: Optional[bool] = None
     min_order_amount: Optional[float] = None
     one_time_per_customer: Optional[bool] = None
+
+class FAQCreate(BaseModel):
+    """Public-facing frequently asked questions, admin-managed.
+    `sort_order` decides display order on the public /faq page (lower = higher).
+    `enabled` lets admin hide entries without deleting them."""
+    question: str
+    answer: str
+    sort_order: int = 0
+    enabled: bool = True
+
+class FAQUpdate(BaseModel):
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    sort_order: Optional[int] = None
+    enabled: Optional[bool] = None
+
+class FAQReorder(BaseModel):
+    """Atomic re-order helper — admin sends the full ordered list of FAQ ids
+    after a drag-and-drop or arrow-shift. We persist sort_order = list index."""
+    ids: list[str]
+
 
 class EventBookingCreate(BaseModel):
     name: str
@@ -2770,6 +2831,63 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         bh = compute_business_hours_status(s_for_hours)
         if not bh.get("is_open"):
             raise HTTPException(status_code=400, detail="Restaurant is currently closed. Please order during business hours.")
+
+    # ===== SERVER-SIDE AUTHORITATIVE PRICING =====
+    # SECURITY (payment manipulation fix): Every previous calculation below relied on
+    # `order.total_price` and `order.items[*].price`, both of which come straight from
+    # the client JSON. An attacker could send negative quantities, negative prices,
+    # arbitrary low prices, or a manipulated total to pay Rs 1 for any cart.
+    # We now ignore client-supplied price/total fields entirely and rebuild them from
+    # the menu_items collection — the only source of truth for what a thing costs.
+    if not order.items or len(order.items) == 0:
+        raise HTTPException(status_code=400, detail="Order must contain at least one item.")
+    if len(order.items) > 50:
+        raise HTTPException(status_code=400, detail="Too many line items in this order.")
+    validated_items: list[dict] = []
+    server_subtotal: float = 0.0
+    # Batch the menu lookups so a 20-item cart doesn't fan out 20 round-trips.
+    requested_ids: list[ObjectId] = []
+    for line in order.items:
+        try:
+            requested_ids.append(ObjectId(str(line.item_id)))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid menu item id: {line.item_id}")
+    menu_docs = {}
+    async for mi in db.menu_items.find({"_id": {"$in": requested_ids}}):
+        menu_docs[str(mi["_id"])] = mi
+    for line in order.items:
+        # Quantity sanity — must be a positive integer within a sane range. Catches
+        # negative quantities (the original bug: -1 made the line total negative and
+        # the order rang up at Rs 0) plus zero, floats, and absurd large numbers.
+        try:
+            qty = int(line.quantity)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid quantity for {getattr(line, 'name', 'item')}.")
+        if qty < 1 or qty > 100:
+            raise HTTPException(status_code=400, detail=f"Quantity must be between 1 and 100 (got {qty}).")
+        db_item = menu_docs.get(str(line.item_id))
+        if not db_item:
+            raise HTTPException(status_code=400, detail=f"Menu item not found or unavailable.")
+        # Optional: respect an `active` / `is_available` flag if the menu doc has one,
+        # so admins can deactivate an item and have it instantly refuse new orders.
+        if db_item.get("active") is False or db_item.get("is_available") is False:
+            raise HTTPException(status_code=400, detail=f"'{db_item.get('name', 'Item')}' is no longer available.")
+        # Server-side price. Negative DB price = data corruption, not customer's
+        # fault — refuse with a 500 so it surfaces in logs / alerts.
+        server_price = float(db_item.get("price", 0))
+        if server_price < 0:
+            logger.error(f"Negative price on menu_items {db_item['_id']}: {server_price}")
+            raise HTTPException(status_code=500, detail="Pricing error — please contact support.")
+        server_subtotal += server_price * qty
+        validated_items.append({
+            "item_id": str(db_item["_id"]),
+            "name": db_item.get("name", ""),
+            "price": server_price,
+            "quantity": qty,
+        })
+    # Round to 2 decimals to avoid floating point drift propagating into discounts.
+    server_subtotal = round(server_subtotal, 2)
+
     # Coupon validation
     discount_amount = 0.0
     coupon_used = None
@@ -2800,7 +2918,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             if not cust or str(cust["_id"]) != str(personal.get("customer_id")):
                 raise HTTPException(status_code=400, detail="This coupon belongs to a different account. Please sign in with the correct account.")
             if personal.get("discount_percent"):
-                discount_amount = round(order.total_price * float(personal["discount_percent"]) / 100, 2)
+                discount_amount = round(server_subtotal * float(personal["discount_percent"]) / 100, 2)
             else:
                 discount_amount = float(personal.get("discount_amount", 0))
             coupon_used = code_normalized
@@ -2810,7 +2928,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             if offer:
                 # V2: enforce minimum order amount on offers
                 min_amount = float(offer.get("min_order_amount", 0) or 0)
-                if min_amount > 0 and float(order.total_price or 0) < min_amount:
+                if min_amount > 0 and server_subtotal < min_amount:
                     raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
                 # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
                 # should only fire once per signed-in customer (matched by id) and once
@@ -2826,7 +2944,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                     if already_used:
                         raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
                 if offer.get("discount_percent"):
-                    discount_amount = round(order.total_price * float(offer["discount_percent"]) / 100, 2)
+                    discount_amount = round(server_subtotal * float(offer["discount_percent"]) / 100, 2)
                 elif offer.get("discount_amount"):
                     discount_amount = float(offer["discount_amount"])
                 coupon_used = offer["coupon_code"]
@@ -2836,11 +2954,11 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     if order.delivery_lat is not None and order.delivery_lng is not None:
         s = await get_online_settings_doc()
         distance_km = haversine_km(s["restaurant_lat"], s["restaurant_lng"], order.delivery_lat, order.delivery_lng)
-        quote = calculate_delivery_fee(distance_km, s, subtotal=float(order.total_price or 0) - float(discount_amount or 0))
+        quote = calculate_delivery_fee(distance_km, s, subtotal=server_subtotal - float(discount_amount or 0))
         if not quote["in_range"]:
             raise HTTPException(status_code=400, detail=f"Delivery address is outside our {quote['max_radius_km']} km service area.")
         delivery_fee = float(quote["fee"])
-    final_total = max(0, order.total_price - discount_amount) + delivery_fee
+    final_total = max(0, server_subtotal - discount_amount) + delivery_fee
     
     # --- LOYALTY SYSTEM: Reward Redemption & Diamond Earning ---
     loyalty_settings = await db.loyalty_settings.find_one({"key": "loyalty"}) or {}
@@ -2886,13 +3004,16 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                         except Exception:
                             free_item_doc = None
                         if free_item_doc:
-                            free_line = OnlineOrderItem(
-                                item_id=str(free_item_doc["_id"]),
-                                name=f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
-                                price=0.0,
-                                quantity=1,
-                            )
-                            order.items.append(free_line)
+                            # Append directly to the SERVER-VALIDATED items list — the client
+                            # `order.items` list is no longer used for persistence (it was the
+                            # vehicle for the payment-manipulation attack). The free item's
+                            # price is 0 and is set here on the server, so it's trusted.
+                            validated_items.append({
+                                "item_id": str(free_item_doc["_id"]),
+                                "name": f"{free_item_doc.get('name', 'Free Item')} (FREE — Diamond Reward)",
+                                "price": 0.0,
+                                "quantity": 1,
+                            })
                         else:
                             logger.warning(f"free_item reward {reward.get('_id')} references missing menu item {reward_value}")
                     
@@ -2957,8 +3078,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # tracking URL we hand out (WhatsApp confirmation, status updates, etc.).
     track_token = secrets.token_urlsafe(16)
     doc = {
-        "items": [it.model_dump() for it in order.items],
-        "subtotal": order.total_price,
+        # SECURITY: persist the SERVER-VALIDATED items + subtotal, never the
+        # client-supplied ones. This is what payment manipulation tried to corrupt.
+        "items": validated_items,
+        "subtotal": server_subtotal,
         "discount_amount": discount_amount,
         "delivery_fee": delivery_fee,
         "distance_km": round(distance_km, 2) if distance_km is not None else None,
@@ -3050,8 +3173,8 @@ async def get_my_personal_coupons(request: Request):
 @api_router.get("/online-orders")
 async def list_online_orders(request: Request, status: Optional[str] = None):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     query = {}
     if status and status != "all":
         query["status"] = status
@@ -3062,24 +3185,24 @@ async def list_online_orders(request: Request, status: Optional[str] = None):
 async def list_pending_print_orders(request: Request):
     """Endpoint for POS thermal printer agent to poll new unprinted orders."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     orders = await db.online_orders.find({"printed": False, "status": {"$ne": "cancelled"}}).sort("created_at", 1).to_list(100)
     return [_serialize_online_order(o) for o in orders]
 
 @api_router.put("/online-orders/{order_id}/printed")
 async def mark_order_printed(order_id: str, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update online orders.")
     await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": {"printed": True, "printed_at": datetime.now(timezone.utc).isoformat()}})
     return {"message": "Marked as printed"}
 
 @api_router.put("/online-orders/{order_id}/status")
 async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdate, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update online orders.")
     valid = {"pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "cancelled", "rejected"}
     if body.status not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid}")
@@ -3215,8 +3338,8 @@ async def online_orders_pending_count(request: Request):
     """Lightweight polling endpoint: returns count of orders awaiting staff action.
     Used by POS UI to start/stop the ringing alert sound."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
     count = await db.online_orders.count_documents({"status": "pending"})
     # Latest pending order id (so frontend can detect new arrivals between polls)
     latest = await db.online_orders.find({"status": "pending"}, {"_id": 1, "created_at": 1}).sort("created_at", -1).limit(1).to_list(1)
@@ -3242,8 +3365,8 @@ def _origin_tracking_url(request: Request, order_id: str, track_token: Optional[
 async def accept_online_order(order_id: str, request: Request):
     """Staff accepts a pending order. Stops ringing on the POS, notifies customer via WhatsApp."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to accept orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3270,8 +3393,8 @@ async def accept_online_order(order_id: str, request: Request):
 async def reject_online_order(order_id: str, body: OrderRejectRequest, request: Request):
     """Staff rejects a pending order with a reason. Stops ringing on the POS, notifies customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to reject orders.")
     reason = (body.reason or "").strip() or "other"
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
@@ -3310,8 +3433,8 @@ async def modify_online_order(order_id: str, body: OrderModifyRequest, request: 
     """Staff edits items (remove items, change qty, change price). Marks the order as modified
     but DOES NOT change status — staff must call /confirm-modified after contacting the customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to modify orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3849,8 +3972,8 @@ async def update_order_operations(order_id: str, body: OrderOperationsUpdate, re
     """Staff-only: update preparation time and/or override the delivery fee on a live order.
     Customers see the new values within a few seconds on the tracking page."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to manage orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3905,8 +4028,8 @@ async def confirm_modified_online_order(order_id: str, request: Request):
     """Called after staff has phoned the customer to confirm the modified order.
     Moves the order to 'accepted' and notifies the customer."""
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to confirm modified orders.")
     try:
         order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     except Exception:
@@ -3945,10 +4068,10 @@ async def get_online_order_detail(order_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Order not found")
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
-    # Try admin first
+    # Try staff/admin first — anyone with online_orders permission can view order details.
     try:
         user = await get_current_user(request)
-        if user.get("role") == "admin":
+        if _has_perm(user, "online_orders"):
             return _serialize_online_order(o)
     except HTTPException:
         pass
@@ -4175,6 +4298,240 @@ async def delete_offer(offer_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Admin only")
     await db.offers.delete_one({"_id": ObjectId(offer_id)})
     return {"message": "Deleted"}
+
+
+# ===== FAQ ENDPOINTS =====
+# Public list (only enabled) drives the /faq page and the FAQ JSON-LD schema.
+# Admin endpoints (full CRUD + reorder) live behind get_current_user role=admin.
+
+def _serialize_faq(f: dict) -> dict:
+    return {
+        "id": str(f["_id"]),
+        "question": f.get("question", ""),
+        "answer": f.get("answer", ""),
+        "sort_order": int(f.get("sort_order", 0)),
+        "enabled": bool(f.get("enabled", True)),
+        "created_at": f.get("created_at", ""),
+        "updated_at": f.get("updated_at", ""),
+    }
+
+
+@api_router.get("/faqs")
+async def list_faqs_public():
+    """Public FAQ feed — only enabled entries, ordered for display. Cached by the
+    frontend; backs both the /faq page UI and the FAQPage schema.org JSON-LD."""
+    faqs = await db.faqs.find({"enabled": True}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    return [_serialize_faq(f) for f in faqs]
+
+
+@api_router.get("/admin/faqs")
+async def list_faqs_admin(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    faqs = await db.faqs.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(1000)
+    return [_serialize_faq(f) for f in faqs]
+
+
+@api_router.post("/admin/faqs")
+async def create_faq(body: FAQCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    q = (body.question or "").strip()
+    a = (body.answer or "").strip()
+    if not q or not a:
+        raise HTTPException(status_code=400, detail="Both question and answer are required.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # If no explicit sort_order, append to the end so new FAQs go last by default.
+    if body.sort_order == 0:
+        last = await db.faqs.find({}).sort("sort_order", -1).limit(1).to_list(1)
+        next_order = (int(last[0].get("sort_order", 0)) + 1) if last else 0
+    else:
+        next_order = int(body.sort_order)
+    doc = {
+        "question": q,
+        "answer": a,
+        "sort_order": next_order,
+        "enabled": bool(body.enabled),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    result = await db.faqs.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _serialize_faq(doc)
+
+
+@api_router.put("/admin/faqs/{faq_id}")
+async def update_faq(faq_id: str, body: FAQUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(faq_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    ud = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not ud:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ud["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.faqs.update_one({"_id": oid}, {"$set": ud})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    refreshed = await db.faqs.find_one({"_id": oid})
+    return _serialize_faq(refreshed)
+
+
+@api_router.delete("/admin/faqs/{faq_id}")
+async def delete_faq(faq_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(faq_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    res = await db.faqs.delete_one({"_id": oid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="FAQ not found")
+    return {"message": "Deleted"}
+
+
+@api_router.post("/admin/faqs/reorder")
+async def reorder_faqs(body: FAQReorder, request: Request):
+    """Persist a new ordering for all FAQs in one call. Sent by the admin UI
+    after the operator drags entries / clicks the up/down arrows. Each id's
+    sort_order is set to its index in the submitted list. Unlisted ids stay put."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not body.ids or not isinstance(body.ids, list):
+        raise HTTPException(status_code=400, detail="ids list required")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for idx, faq_id in enumerate(body.ids):
+        try:
+            oid = ObjectId(faq_id)
+        except Exception:
+            continue  # skip malformed ids — don't fail the whole batch
+        await db.faqs.update_one({"_id": oid}, {"$set": {"sort_order": idx, "updated_at": now_iso}})
+    return {"message": "Reordered", "count": len(body.ids)}
+
+
+# ===== SEO endpoints: sitemap.xml + robots.txt =====
+# These are served via the /api prefix so the Kubernetes ingress routes them to
+# this backend. The frontend (Vercel) rewrites /sitemap.xml and /robots.txt
+# (see vercel.json) so search engines / AI crawlers find them at the root.
+
+def _abs_origin(request: Request) -> str:
+    """Best-effort canonical https://hostname/ for sitemap URLs. Falls back to
+    the production domain so a sitemap fetched directly from the fly.io host
+    still emits the public-facing karachinaseebbiryani.com URLs (which is what
+    Google indexes)."""
+    public = os.environ.get("PUBLIC_SITE_URL", "https://www.karachinaseebbiryani.com").rstrip("/")
+    return public
+
+
+@api_router.get("/sitemap.xml", response_class=Response)
+async def sitemap_xml(request: Request):
+    """Dynamic XML sitemap. Includes every public route + active menu category
+    landing fragments + active offer fragments + FAQ slugs. Google + Bing +
+    Perplexity all use this to discover what to crawl. Updated last-mod is
+    important for re-crawl priority — we pull the most recent updated_at off
+    each entity so the sitemap stays fresh without a manual rebuild."""
+    base = _abs_origin(request)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    urls: list[dict] = [
+        {"loc": f"{base}/",                  "changefreq": "daily",   "priority": "1.0", "lastmod": today},
+        {"loc": f"{base}/menu",              "changefreq": "weekly",  "priority": "0.9", "lastmod": today},
+        {"loc": f"{base}/offers",            "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/events",            "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/about",             "changefreq": "monthly", "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/contact",           "changefreq": "monthly", "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/faq",               "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
+        {"loc": f"{base}/delivery",          "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/rewards-program",   "changefreq": "monthly", "priority": "0.6", "lastmod": today},
+        {"loc": f"{base}/privacy",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/terms",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/feedback",          "changefreq": "monthly", "priority": "0.4", "lastmod": today},
+        {"loc": f"{base}/login",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/register",          "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+    ]
+    # Include each active offer as its own URL fragment so search engines can
+    # surface them individually. Same trick for menu categories.
+    try:
+        async for o in db.offers.find({"active": True}, {"_id": 1, "coupon_code": 1}):
+            code = (o.get("coupon_code") or "").lower().strip()
+            if code:
+                urls.append({"loc": f"{base}/offers#{code}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
+    except Exception:
+        pass
+    try:
+        async for c in db.categories.find({}, {"_id": 1, "name": 1}):
+            slug = (c.get("name") or "").lower().replace(" ", "-")
+            if slug:
+                urls.append({"loc": f"{base}/menu#{slug}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
+    except Exception:
+        pass
+
+    body_parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        body_parts.append("  <url>")
+        body_parts.append(f"    <loc>{u['loc']}</loc>")
+        body_parts.append(f"    <lastmod>{u['lastmod']}</lastmod>")
+        body_parts.append(f"    <changefreq>{u['changefreq']}</changefreq>")
+        body_parts.append(f"    <priority>{u['priority']}</priority>")
+        body_parts.append("  </url>")
+    body_parts.append("</urlset>")
+    xml = "\n".join(body_parts)
+    return Response(content=xml, media_type="application/xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@api_router.get("/robots.txt", response_class=Response)
+async def robots_txt(request: Request):
+    """robots.txt: open the site for search engines + AI crawlers (GPTBot,
+    PerplexityBot, Google-Extended, ClaudeBot) and explicitly disallow the
+    transactional / admin / customer-PII routes that should never appear in
+    search results."""
+    base = _abs_origin(request)
+    body = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Disallow: /admin",
+        "Disallow: /admin/",
+        "Disallow: /api/admin/",
+        "Disallow: /checkout",
+        "Disallow: /cart",
+        "Disallow: /track/",
+        "Disallow: /rider/",
+        "Disallow: /order/",
+        "Disallow: /profile",
+        "Disallow: /orders",
+        "",
+        # Explicitly invite the major AI crawlers (some respect User-agent blocks
+        # globally, so spelling them out lets us allow them even if we ever flip
+        # the default-deny). Today we explicitly allow them everywhere.
+        "User-agent: GPTBot",
+        "Allow: /",
+        "",
+        "User-agent: ChatGPT-User",
+        "Allow: /",
+        "",
+        "User-agent: PerplexityBot",
+        "Allow: /",
+        "",
+        "User-agent: Google-Extended",
+        "Allow: /",
+        "",
+        "User-agent: ClaudeBot",
+        "Allow: /",
+        "",
+        f"Sitemap: {base}/sitemap.xml",
+        "",
+    ])
+    return Response(content=body, media_type="text/plain",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 # --- Event Bookings ---
 @api_router.post("/event-bookings")
@@ -4809,8 +5166,8 @@ async def submit_bank_payment(order_id: str, req: BankPaymentReference):
 @api_router.put("/online-orders/{order_id}/payment-status")
 async def admin_update_payment_status(order_id: str, body: dict, request: Request):
     user = await get_current_user(request)
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to update payment status.")
     new_status = body.get("payment_status")
     if new_status not in {"pending", "pending_verification", "paid", "failed", "refunded"}:
         raise HTTPException(status_code=400, detail="Invalid payment_status")

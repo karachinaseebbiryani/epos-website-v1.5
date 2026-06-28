@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-IDOR Fix Verification Test Suite for GET /api/track/{order_id}
+Payment Manipulation Fix Verification Test Suite for POST /api/online-orders
 
-Tests the per-order track_token authorization mechanism that prevents
-enumeration attacks on MongoDB ObjectId-based order IDs.
+Tests server-side authoritative pricing to prevent:
+- Negative quantity attacks
+- Negative price attacks
+- Price override attacks (Rs 1 for anything)
+- Total price manipulation
+- Invalid item IDs
+- Empty carts
+- Huge quantities
 """
 
 import requests
@@ -96,349 +102,519 @@ def disable_business_hours(admin_token: str) -> bool:
         print(f"⚠ Business hours disable error: {e}")
         return False
 
-def create_order(customer_token: str, customer_name: str, phone: str) -> Optional[Dict]:
-    """Create an online order and return order data including track_token"""
+def get_menu_items(admin_token: str) -> Optional[list]:
+    """Get list of menu items"""
     try:
-        order_data = {
-            "items": [
-                {
-                    "item_id": "test-item-001",
-                    "name": "Chicken Biryani",
-                    "price": 500,
-                    "quantity": 1
-                }
-            ],
+        response = requests.get(
+            f"{BASE_URL}/menu-items",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10
+        )
+        if response.status_code == 200:
+            items = response.json()
+            print(f"✓ Retrieved {len(items)} menu items")
+            return items
+        else:
+            print(f"✗ Failed to get menu items: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"✗ Get menu items error: {e}")
+        return None
+
+def get_categories(admin_token: str) -> Optional[list]:
+    """Get list of categories"""
+    try:
+        response = requests.get(
+            f"{BASE_URL}/categories",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10
+        )
+        if response.status_code == 200:
+            categories = response.json()
+            print(f"✓ Retrieved {len(categories)} categories")
+            return categories
+        else:
+            print(f"✗ Failed to get categories: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"✗ Get categories error: {e}")
+        return None
+
+def create_menu_item(admin_token: str, category_id: str) -> Optional[Dict]:
+    """Create a test menu item"""
+    try:
+        response = requests.post(
+            f"{BASE_URL}/menu-items",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "name": "Test Biryani",
+                "price": 500,
+                "category_id": category_id,
+                "stock": 100,
+                "is_available": True,
+                "description": "Test item for payment manipulation testing"
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            item = response.json()
+            print(f"✓ Created test menu item: {item.get('name')} (ID: {item.get('id')}, Price: Rs {item.get('price')})")
+            return item
+        else:
+            print(f"✗ Failed to create menu item: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"✗ Create menu item error: {e}")
+        return None
+
+def create_offer(admin_token: str, coupon_code: str, discount_percent: int) -> Optional[Dict]:
+    """Create a test offer/coupon"""
+    try:
+        response = requests.post(
+            f"{BASE_URL}/offers",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "coupon_code": coupon_code,
+                "discount_percent": discount_percent,
+                "active": True,
+                "title": "Payment Test Coupon",
+                "description": f"{discount_percent}% discount for testing"
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            offer = response.json()
+            print(f"✓ Created test offer: {coupon_code} ({discount_percent}% off)")
+            return offer
+        else:
+            print(f"⚠ Could not create offer: {response.status_code} - {response.text}")
+            return None
+    except Exception as e:
+        print(f"⚠ Create offer error: {e}")
+        return None
+
+def create_order(customer_token: str, item_id: str, item_name: str, price: float, quantity: int, 
+                 total_price: float, customer_name: str, phone: str, coupon_code: str = None) -> Optional[Dict]:
+    """Create an online order"""
+    try:
+        payload = {
+            "items": [{
+                "item_id": item_id,
+                "name": item_name,
+                "price": price,
+                "quantity": quantity
+            }],
             "customer_name": customer_name,
             "phone": phone,
-            "address": "House 12, Block A, DHA Phase 5, Lahore, Punjab",
-            "total_price": 500,
-            "payment_method": "cod",
-            "notes": "Test order for IDOR verification"
+            "address": "House 12, Some Suburb, Lahore",
+            "total_price": total_price,
+            "payment_method": "cod"
         }
+        if coupon_code:
+            payload["coupon_code"] = coupon_code
+        
+        headers = {}
+        if customer_token:
+            headers["Authorization"] = f"Bearer {customer_token}"
         
         response = requests.post(
             f"{BASE_URL}/online-orders",
-            headers={"Authorization": f"Bearer {customer_token}"},
-            json=order_data,
+            headers=headers,
+            json=payload,
             timeout=10
         )
         
-        if response.status_code == 200:
-            data = response.json()
-            order_id = data.get("id")
-            track_token = data.get("track_token")
-            print(f"✓ Order created: ID={order_id}, track_token={track_token}")
-            return data
-        else:
-            print(f"✗ Order creation failed: {response.status_code} - {response.text}")
-            return None
+        return {
+            "status_code": response.status_code,
+            "data": response.json() if response.status_code in [200, 201] else None,
+            "error": response.json() if response.status_code >= 400 else None,
+            "text": response.text
+        }
     except Exception as e:
-        print(f"✗ Order creation error: {e}")
+        print(f"✗ Create order error: {e}")
         return None
 
-def test_track_endpoint(
-    test_name: str,
-    order_id: str,
-    token: Optional[str] = None,
-    bearer_token: Optional[str] = None,
-    expected_status: int = 200,
-    expect_masked: bool = False,
-    expect_full: bool = False
-) -> Dict:
-    """Test the /api/track/{order_id} endpoint with various auth scenarios"""
-    try:
-        url = f"{BASE_URL}/track/{order_id}"
-        if token:
-            url += f"?t={token}"
-        
-        headers = {}
-        if bearer_token:
-            headers["Authorization"] = f"Bearer {bearer_token}"
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        result = {
-            "status_code": response.status_code,
-            "response": response.text[:500]  # Limit response size
-        }
-        
-        passed = response.status_code == expected_status
-        
-        details = f"Status: {response.status_code} (expected {expected_status})"
-        
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                phone = data.get("phone", "")
-                address = data.get("address", "")
-                customer_name = data.get("customer_name", "")
-                
-                details += f"\n  Phone: {phone}"
-                details += f"\n  Address: {address[:50]}..."
-                details += f"\n  Customer Name: {customer_name}"
-                
-                if expect_masked:
-                    # Check if PII is masked
-                    phone_masked = "*" in phone
-                    address_masked = "…" in address or len(address) <= 20
-                    name_masked = " " not in customer_name  # First name only
-                    
-                    if phone_masked and address_masked and name_masked:
-                        details += "\n  ✓ PII is properly MASKED"
-                    else:
-                        details += f"\n  ✗ PII masking incomplete: phone_masked={phone_masked}, address_masked={address_masked}, name_masked={name_masked}"
-                        passed = False
-                
-                if expect_full:
-                    # Check if PII is full (not masked)
-                    phone_full = "*" not in phone and len(phone) > 4
-                    address_full = "…" not in address and len(address) > 20
-                    
-                    if phone_full and address_full:
-                        details += "\n  ✓ PII is FULL (not masked)"
-                    else:
-                        details += f"\n  ✗ PII should be full but appears masked: phone_full={phone_full}, address_full={address_full}"
-                        passed = False
-                        
-            except json.JSONDecodeError:
-                details += f"\n  Response: {response.text[:200]}"
-        else:
-            details += f"\n  Response: {response.text[:200]}"
-        
-        log_test(test_name, passed, details)
-        return result
-        
-    except Exception as e:
-        details = f"Exception: {str(e)}"
-        log_test(test_name, False, details)
-        return {"error": str(e)}
-
-def mutate_order_id(order_id: str) -> str:
-    """Mutate the last hex character of an order ID for enumeration testing"""
-    if len(order_id) < 24:
-        return order_id
+def print_summary():
+    """Print test summary"""
+    print("\n" + "="*80)
+    print("TEST SUMMARY")
+    print("="*80)
     
-    last_char = order_id[-1]
-    # Increment the last hex character
-    if last_char == '9':
-        new_char = 'a'
-    elif last_char == 'f':
-        new_char = '0'
-    else:
-        try:
-            new_char = hex(int(last_char, 16) + 1)[2:]
-        except:
-            new_char = '0'
+    passed = sum(1 for r in test_results if r["passed"])
+    failed = sum(1 for r in test_results if not r["passed"])
+    total = len(test_results)
     
-    return order_id[:-1] + new_char
+    print(f"\nTotal Tests: {total}")
+    print(f"Passed: {passed} ✅")
+    print(f"Failed: {failed} ❌")
+    print(f"Success Rate: {(passed/total*100) if total > 0 else 0:.1f}%")
+    
+    if failed > 0:
+        print("\n" + "="*80)
+        print("FAILED TESTS:")
+        print("="*80)
+        for r in test_results:
+            if not r["passed"]:
+                print(f"\n❌ {r['test']}")
+                print(f"   {r['details']}")
+    
+    return failed == 0
 
 def main():
-    print("=" * 80)
-    print("IDOR FIX VERIFICATION TEST SUITE")
-    print("Testing GET /api/track/{order_id} with per-order track_token")
-    print("=" * 80)
+    print("="*80)
+    print("PAYMENT MANIPULATION FIX VERIFICATION TEST SUITE")
+    print("="*80)
     
     # Step 1: Admin login
-    print("\n[STEP 1] Admin Login")
+    print("\n[SETUP] Admin Login")
     admin_token = admin_login()
     if not admin_token:
-        print("❌ CRITICAL: Admin login failed. Cannot proceed with tests.")
+        print("❌ Cannot proceed without admin token")
         sys.exit(1)
     
     # Step 2: Disable business hours
-    print("\n[STEP 2] Disable Business Hours")
+    print("\n[SETUP] Disable Business Hours")
     disable_business_hours(admin_token)
     
-    # Step 3: Sign up Customer A
-    print("\n[STEP 3] Sign up Customer A")
-    customer_a = customer_signup(
-        email="customer_a_idor_test@example.com",
-        password="SecurePass123!",
-        name="Ahmed Khan",
-        phone="+923001234567"
-    )
-    if not customer_a:
-        print("❌ CRITICAL: Customer A signup failed. Cannot proceed.")
-        sys.exit(1)
+    # Step 3: Get or create menu item
+    print("\n[SETUP] Get/Create Menu Item")
+    menu_items = get_menu_items(admin_token)
     
-    # Step 4: Sign up Customer B
-    print("\n[STEP 4] Sign up Customer B")
-    customer_b = customer_signup(
-        email="customer_b_idor_test@example.com",
-        password="SecurePass456!",
-        name="Fatima Ali",
-        phone="+923009876543"
-    )
-    if not customer_b:
-        print("❌ CRITICAL: Customer B signup failed. Cannot proceed.")
-        sys.exit(1)
-    
-    # Step 5: Create order as Customer A
-    print("\n[STEP 5] Create Order as Customer A")
-    order = create_order(
-        customer_token=customer_a["token"],
-        customer_name="Ahmed Khan",
-        phone="+923001234567"
-    )
-    if not order:
-        print("❌ CRITICAL: Order creation failed. Cannot proceed.")
-        sys.exit(1)
-    
-    order_id = order.get("id")
-    track_token = order.get("track_token")
-    
-    # Test H: Verify track_token is present in order creation response
-    print("\n[TEST H] Order Creation Embeds Token")
-    if track_token and len(track_token) > 0:
-        log_test(
-            "Test H - Order creation includes track_token",
-            True,
-            f"track_token present: {track_token} (length: {len(track_token)})"
-        )
+    test_item = None
+    if menu_items and len(menu_items) > 0:
+        test_item = menu_items[0]
+        print(f"✓ Using existing menu item: {test_item.get('name')} (ID: {test_item.get('id')}, Price: Rs {test_item.get('price')})")
     else:
-        log_test(
-            "Test H - Order creation includes track_token",
-            False,
-            f"track_token missing or empty in response: {order}"
-        )
+        print("No menu items found, creating one...")
+        categories = get_categories(admin_token)
+        if categories and len(categories) > 0:
+            test_item = create_menu_item(admin_token, categories[0].get('id'))
+        else:
+            print("❌ No categories found, cannot create menu item")
+            sys.exit(1)
     
-    # Run all track endpoint tests
-    print("\n" + "=" * 80)
-    print("RUNNING TRACK ENDPOINT TESTS")
-    print("=" * 80)
+    if not test_item:
+        print("❌ Cannot proceed without a menu item")
+        sys.exit(1)
     
-    # Test A: No auth, no token
-    print("\n[TEST A] No auth, no token")
-    test_track_endpoint(
-        "Test A - No auth, no token → 404",
-        order_id=order_id,
-        expected_status=404
+    item_id = test_item.get('id')
+    item_name = test_item.get('name')
+    db_price = float(test_item.get('price'))
+    
+    print(f"\n[TEST ITEM] ID: {item_id}, Name: {item_name}, DB Price: Rs {db_price}")
+    
+    # Step 4: Customer signup
+    print("\n[SETUP] Customer Signup")
+    import random
+    random_suffix = random.randint(10000, 99999)
+    customer = customer_signup(
+        f"testcustomer{random_suffix}@test.com",
+        "testpass123",
+        "Test Customer",
+        f"+923001234{random_suffix % 1000:03d}"
     )
+    if not customer or not customer.get("token"):
+        print("❌ Cannot proceed without customer token")
+        sys.exit(1)
     
-    # Test B: No auth, wrong token
-    print("\n[TEST B] No auth, wrong token")
-    test_track_endpoint(
-        "Test B - No auth, wrong token → 404",
-        order_id=order_id,
-        token="AAAAAAAAAAAAAAAAAAAAAA",  # Random 22-char string
-        expected_status=404
-    )
+    customer_token = customer["token"]
+    customer_name = "Test Customer"
+    customer_phone = f"+923001234{random_suffix % 1000:03d}"
     
-    # Test C: No auth, correct token (should return masked PII)
-    print("\n[TEST C] No auth, correct token")
-    test_track_endpoint(
-        "Test C - No auth, correct token → 200 with MASKED PII",
-        order_id=order_id,
-        token=track_token,
-        expected_status=200,
-        expect_masked=True
-    )
+    # ========== TEST 1: Negative Quantity ==========
+    print("\n" + "="*80)
+    print("TEST 1: Negative Quantity Attack")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, db_price, -3, 0, customer_name, customer_phone)
+    if result:
+        if result["status_code"] == 400:
+            error_msg = result["error"].get("detail", "") if result["error"] else ""
+            if "quantity" in error_msg.lower() or "between 1 and 100" in error_msg.lower():
+                log_test("Test 1 - Negative Quantity", True, 
+                        f"HTTP 400 with correct error: {error_msg}")
+            else:
+                log_test("Test 1 - Negative Quantity", False,
+                        f"HTTP 400 but wrong error message: {error_msg}")
+        else:
+            log_test("Test 1 - Negative Quantity", False,
+                    f"Expected HTTP 400, got {result['status_code']}: {result.get('text', '')}")
     
-    # Test D: Owner auth, no token (should return full PII)
-    print("\n[TEST D] Owner auth, no token")
-    test_track_endpoint(
-        "Test D - Owner auth, no token → 200 with FULL PII",
-        order_id=order_id,
-        bearer_token=customer_a["token"],
-        expected_status=200,
-        expect_full=True
-    )
+    # ========== TEST 2: Zero Quantity ==========
+    print("\n" + "="*80)
+    print("TEST 2: Zero Quantity Attack")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, db_price, 0, 0, customer_name, customer_phone)
+    if result:
+        if result["status_code"] == 400:
+            error_msg = result["error"].get("detail", "") if result["error"] else ""
+            log_test("Test 2 - Zero Quantity", True,
+                    f"HTTP 400 with error: {error_msg}")
+        else:
+            log_test("Test 2 - Zero Quantity", False,
+                    f"Expected HTTP 400, got {result['status_code']}: {result.get('text', '')}")
     
-    # Test E: Admin auth, no token (should return full PII)
-    print("\n[TEST E] Admin auth, no token")
-    test_track_endpoint(
-        "Test E - Admin auth, no token → 200 with FULL PII",
-        order_id=order_id,
-        bearer_token=admin_token,
-        expected_status=200,
-        expect_full=True
-    )
+    # ========== TEST 3: Negative Price ==========
+    print("\n" + "="*80)
+    print("TEST 3: Negative Price Attack")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, -500, 1, -500, customer_name, customer_phone)
+    if result:
+        if result["status_code"] in [200, 201]:
+            order = result["data"]
+            subtotal = order.get("subtotal", 0)
+            total = order.get("total_price", 0)
+            item_price = order.get("items", [{}])[0].get("price", 0) if order.get("items") else 0
+            
+            if subtotal == db_price and total == db_price and item_price == db_price:
+                log_test("Test 3 - Negative Price", True,
+                        f"HTTP 201, server ignored client price. subtotal={subtotal}, total={total}, item_price={item_price} (all equal DB price {db_price})")
+            else:
+                log_test("Test 3 - Negative Price", False,
+                        f"HTTP 201 but prices wrong: subtotal={subtotal}, total={total}, item_price={item_price}, expected all={db_price}")
+        else:
+            log_test("Test 3 - Negative Price", False,
+                    f"Expected HTTP 201, got {result['status_code']}: {result.get('text', '')}")
     
-    # Test F: Different customer auth, no token (should return 404)
-    print("\n[TEST F] Different customer auth, no token")
-    test_track_endpoint(
-        "Test F - Different customer auth, no token → 404",
-        order_id=order_id,
-        bearer_token=customer_b["token"],
-        expected_status=404
-    )
+    # ========== TEST 4: Price Override to Rs 1 ==========
+    print("\n" + "="*80)
+    print("TEST 4: Price Override to Rs 1 Attack")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, 1.0, 1, 1.0, customer_name, customer_phone)
+    if result:
+        if result["status_code"] in [200, 201]:
+            order = result["data"]
+            subtotal = order.get("subtotal", 0)
+            total = order.get("total_price", 0)
+            item_price = order.get("items", [{}])[0].get("price", 0) if order.get("items") else 0
+            
+            if subtotal == db_price and item_price == db_price:
+                log_test("Test 4 - Price Override to Rs 1", True,
+                        f"HTTP 201, server ignored client price. subtotal={subtotal}, item_price={item_price} (both equal DB price {db_price})")
+            else:
+                log_test("Test 4 - Price Override to Rs 1", False,
+                        f"HTTP 201 but prices wrong: subtotal={subtotal}, item_price={item_price}, expected={db_price}")
+        else:
+            log_test("Test 4 - Price Override to Rs 1", False,
+                    f"Expected HTTP 201, got {result['status_code']}: {result.get('text', '')}")
     
-    # Test G: Enumeration attack simulation
-    print("\n[TEST G] Enumeration attack simulation")
-    mutated_id = mutate_order_id(order_id)
-    print(f"  Original ID: {order_id}")
-    print(f"  Mutated ID:  {mutated_id}")
-    test_track_endpoint(
-        "Test G - Enumeration attack (mutated ID, no auth, no token) → 404",
-        order_id=mutated_id,
-        expected_status=404
-    )
+    # ========== TEST 5: Manipulated Total ==========
+    print("\n" + "="*80)
+    print("TEST 5: Manipulated Total Price Attack")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, db_price, 2, 1.0, customer_name, customer_phone)
+    if result:
+        if result["status_code"] in [200, 201]:
+            order = result["data"]
+            subtotal = order.get("subtotal", 0)
+            total = order.get("total_price", 0)
+            expected_subtotal = db_price * 2
+            
+            if subtotal == expected_subtotal and total == expected_subtotal:
+                log_test("Test 5 - Manipulated Total", True,
+                        f"HTTP 201, server ignored client total. subtotal={subtotal}, total={total} (both equal expected {expected_subtotal})")
+            else:
+                log_test("Test 5 - Manipulated Total", False,
+                        f"HTTP 201 but prices wrong: subtotal={subtotal}, total={total}, expected={expected_subtotal}")
+        else:
+            log_test("Test 5 - Manipulated Total", False,
+                    f"Expected HTTP 201, got {result['status_code']}: {result.get('text', '')}")
     
-    # Additional verification: Check existing endpoints
-    print("\n" + "=" * 80)
-    print("ADDITIONAL VERIFICATION")
-    print("=" * 80)
+    # ========== TEST 6: Unknown Item ID ==========
+    print("\n" + "="*80)
+    print("TEST 6: Unknown Item ID")
+    print("="*80)
+    result = create_order(customer_token, "000000000000000000000000", item_name, db_price, 1, db_price, customer_name, customer_phone)
+    if result:
+        if result["status_code"] == 400:
+            error_msg = result["error"].get("detail", "") if result["error"] else ""
+            if "menu item" in error_msg.lower() and ("not found" in error_msg.lower() or "unavailable" in error_msg.lower()):
+                log_test("Test 6 - Unknown Item ID", True,
+                        f"HTTP 400 with correct error: {error_msg}")
+            else:
+                log_test("Test 6 - Unknown Item ID", False,
+                        f"HTTP 400 but wrong error message: {error_msg}")
+        else:
+            log_test("Test 6 - Unknown Item ID", False,
+                    f"Expected HTTP 400, got {result['status_code']}: {result.get('text', '')}")
     
-    print("\n[VERIFY] GET /api/online-orders/me (Customer A)")
+    # ========== TEST 7: Invalid Item ID Format ==========
+    print("\n" + "="*80)
+    print("TEST 7: Invalid Item ID Format")
+    print("="*80)
+    result = create_order(customer_token, "not-a-valid-objectid", item_name, db_price, 1, db_price, customer_name, customer_phone)
+    if result:
+        if result["status_code"] == 400:
+            error_msg = result["error"].get("detail", "") if result["error"] else ""
+            if "invalid" in error_msg.lower() and "menu item" in error_msg.lower():
+                log_test("Test 7 - Invalid Item ID Format", True,
+                        f"HTTP 400 with correct error: {error_msg}")
+            else:
+                log_test("Test 7 - Invalid Item ID Format", False,
+                        f"HTTP 400 but wrong error message: {error_msg}")
+        else:
+            log_test("Test 7 - Invalid Item ID Format", False,
+                    f"Expected HTTP 400, got {result['status_code']}: {result.get('text', '')}")
+    
+    # ========== TEST 8: Empty Cart ==========
+    print("\n" + "="*80)
+    print("TEST 8: Empty Cart")
+    print("="*80)
     try:
-        response = requests.get(
-            f"{BASE_URL}/online-orders/me",
-            headers={"Authorization": f"Bearer {customer_a['token']}"},
+        payload = {
+            "items": [],
+            "customer_name": customer_name,
+            "phone": customer_phone,
+            "address": "House 12, Some Suburb, Lahore",
+            "total_price": 0,
+            "payment_method": "cod"
+        }
+        response = requests.post(
+            f"{BASE_URL}/online-orders",
+            headers={"Authorization": f"Bearer {customer_token}"},
+            json=payload,
             timeout=10
         )
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list) and len(data) > 0:
-                first_order = data[0]
-                has_track_token = "track_token" in first_order
-                log_test(
-                    "Verify - /api/online-orders/me includes track_token",
-                    has_track_token,
-                    f"track_token present: {has_track_token}, order: {first_order.get('id', 'N/A')}"
-                )
+        if response.status_code == 400:
+            error_msg = response.json().get("detail", "")
+            if "at least one item" in error_msg.lower() or "empty" in error_msg.lower():
+                log_test("Test 8 - Empty Cart", True,
+                        f"HTTP 400 with correct error: {error_msg}")
             else:
-                log_test(
-                    "Verify - /api/online-orders/me returns orders",
-                    False,
-                    f"No orders returned: {data}"
-                )
+                log_test("Test 8 - Empty Cart", False,
+                        f"HTTP 400 but wrong error message: {error_msg}")
         else:
-            log_test(
-                "Verify - /api/online-orders/me endpoint",
-                False,
-                f"Status: {response.status_code}, Response: {response.text[:200]}"
-            )
+            log_test("Test 8 - Empty Cart", False,
+                    f"Expected HTTP 400, got {response.status_code}: {response.text}")
     except Exception as e:
-        log_test(
-            "Verify - /api/online-orders/me endpoint",
-            False,
-            f"Exception: {str(e)}"
+        log_test("Test 8 - Empty Cart", False, f"Exception: {e}")
+    
+    # ========== TEST 9: Huge Quantity ==========
+    print("\n" + "="*80)
+    print("TEST 9: Huge Quantity")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, db_price, 9999, db_price * 9999, customer_name, customer_phone)
+    if result:
+        if result["status_code"] == 400:
+            error_msg = result["error"].get("detail", "") if result["error"] else ""
+            if "quantity" in error_msg.lower() and ("between 1 and 100" in error_msg.lower() or "100" in error_msg):
+                log_test("Test 9 - Huge Quantity", True,
+                        f"HTTP 400 with correct error: {error_msg}")
+            else:
+                log_test("Test 9 - Huge Quantity", False,
+                        f"HTTP 400 but wrong error message: {error_msg}")
+        else:
+            log_test("Test 9 - Huge Quantity", False,
+                    f"Expected HTTP 400, got {result['status_code']}: {result.get('text', '')}")
+    
+    # ========== TEST 10: Normal Order (Regression) ==========
+    print("\n" + "="*80)
+    print("TEST 10: Normal Order (Regression)")
+    print("="*80)
+    result = create_order(customer_token, item_id, item_name, db_price, 2, db_price * 2, customer_name, customer_phone)
+    if result:
+        if result["status_code"] in [200, 201]:
+            order = result["data"]
+            subtotal = order.get("subtotal", 0)
+            total = order.get("total_price", 0)
+            expected_subtotal = db_price * 2
+            
+            if subtotal == expected_subtotal and total == expected_subtotal:
+                log_test("Test 10 - Normal Order", True,
+                        f"HTTP 201, order created successfully. subtotal={subtotal}, total={total} (expected {expected_subtotal})")
+            else:
+                log_test("Test 10 - Normal Order", False,
+                        f"HTTP 201 but prices wrong: subtotal={subtotal}, total={total}, expected={expected_subtotal}")
+        else:
+            log_test("Test 10 - Normal Order", False,
+                    f"Expected HTTP 201, got {result['status_code']}: {result.get('text', '')}")
+    
+    # ========== TEST 11: Coupon Discount Uses Server Subtotal ==========
+    print("\n" + "="*80)
+    print("TEST 11: Coupon Discount Uses Server Subtotal")
+    print("="*80)
+    
+    # Create a test coupon
+    coupon_code = f"TESTPAY{random_suffix % 100}"
+    offer = create_offer(admin_token, coupon_code, 10)
+    
+    if offer:
+        # Try to order with coupon, lying about total_price
+        result = create_order(customer_token, item_id, item_name, db_price, 1, 5000, customer_name, customer_phone, coupon_code)
+        if result:
+            if result["status_code"] in [200, 201]:
+                order = result["data"]
+                discount = order.get("discount_amount", 0)
+                expected_discount = db_price * 0.1  # 10% of DB price
+                
+                if abs(discount - expected_discount) < 0.01:  # Allow small floating point difference
+                    log_test("Test 11 - Coupon Discount", True,
+                            f"HTTP 201, discount calculated from server subtotal. discount={discount}, expected={expected_discount}")
+                else:
+                    log_test("Test 11 - Coupon Discount", False,
+                            f"HTTP 201 but discount wrong: discount={discount}, expected={expected_discount} (10% of {db_price})")
+            else:
+                log_test("Test 11 - Coupon Discount", False,
+                        f"Expected HTTP 201, got {result['status_code']}: {result.get('text', '')}")
+    else:
+        log_test("Test 11 - Coupon Discount", False, "Could not create test offer, skipping test")
+    
+    # ========== TEST 12: Float Quantity (BONUS) ==========
+    print("\n" + "="*80)
+    print("TEST 12: Float Quantity (BONUS)")
+    print("="*80)
+    try:
+        payload = {
+            "items": [{
+                "item_id": item_id,
+                "name": item_name,
+                "price": db_price,
+                "quantity": 1.5  # Float instead of int
+            }],
+            "customer_name": customer_name,
+            "phone": customer_phone,
+            "address": "House 12, Some Suburb, Lahore",
+            "total_price": db_price * 1.5,
+            "payment_method": "cod"
+        }
+        response = requests.post(
+            f"{BASE_URL}/online-orders",
+            headers={"Authorization": f"Bearer {customer_token}"},
+            json=payload,
+            timeout=10
         )
+        
+        # Note: int(1.5) = 1 in Python, so this might pass through with qty=1
+        # Either behavior is acceptable as long as no Rs 0/1 order is created
+        if response.status_code == 400:
+            error_msg = response.json().get("detail", "")
+            log_test("Test 12 - Float Quantity", True,
+                    f"HTTP 400, float rejected: {error_msg}")
+        elif response.status_code in [200, 201]:
+            order = response.json()
+            qty = order.get("items", [{}])[0].get("quantity", 0) if order.get("items") else 0
+            subtotal = order.get("subtotal", 0)
+            # If it converted 1.5 to 1, that's acceptable
+            if qty == 1 and subtotal == db_price:
+                log_test("Test 12 - Float Quantity", True,
+                        f"HTTP 201, float converted to int(1). qty={qty}, subtotal={subtotal} (acceptable behavior)")
+            else:
+                log_test("Test 12 - Float Quantity", False,
+                        f"HTTP 201 but unexpected values: qty={qty}, subtotal={subtotal}")
+        else:
+            log_test("Test 12 - Float Quantity", False,
+                    f"Unexpected status {response.status_code}: {response.text}")
+    except Exception as e:
+        log_test("Test 12 - Float Quantity", False, f"Exception: {e}")
     
     # Print summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
+    all_passed = print_summary()
     
-    total_tests = len(test_results)
-    passed_tests = sum(1 for r in test_results if r["passed"])
-    failed_tests = total_tests - passed_tests
-    
-    print(f"\nTotal Tests: {total_tests}")
-    print(f"Passed: {passed_tests} ✅")
-    print(f"Failed: {failed_tests} ❌")
-    
-    if failed_tests > 0:
-        print("\n❌ FAILED TESTS:")
-        for result in test_results:
-            if not result["passed"]:
-                print(f"  - {result['test']}")
-                print(f"    {result['details'][:200]}")
-    
-    print("\n" + "=" * 80)
-    
-    # Exit with appropriate code
-    sys.exit(0 if failed_tests == 0 else 1)
+    if all_passed:
+        print("\n✅ ALL TESTS PASSED - Payment manipulation fix is working correctly!")
+        sys.exit(0)
+    else:
+        print("\n❌ SOME TESTS FAILED - Please review the failures above")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
