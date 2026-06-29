@@ -21,11 +21,30 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME')
+if not mongo_url or not db_name:
+    import sys as _sys
+    _sys.stderr.write(
+        f"[FATAL] Required env vars missing: "
+        f"MONGO_URL={'SET' if mongo_url else 'MISSING'}, "
+        f"DB_NAME={'SET' if db_name else 'MISSING'}\n"
+    )
+    _sys.exit(1)
+# serverSelectionTimeoutMS=5000 makes motor fail fast if Mongo is unreachable,
+# instead of hanging the default 30s on every DB call.
+client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+db = client[db_name]
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# Liveness/readiness probe for Fly.io health checks.
+# Intentionally performs NO database I/O so the app stays "healthy" from the
+# load-balancer's perspective even when MongoDB is degraded. The rest of the
+# routes will still return their own errors. Used by fly.toml [[http_service.checks]].
+@api_router.get("/health")
+async def health():
+    return {"ok": True}
 JWT_ALGORITHM = "HS256"
 # Cross-domain deploys (e.g. Vercel frontend + Fly.io backend) need samesite=none + secure=true.
 # Defaults preserve existing same-origin behavior (lax / not-secure).
@@ -2231,6 +2250,18 @@ async def seed_admin():
 
 @app.on_event("startup")
 async def startup():
+    # Non-blocking: schedule heavy DB init so uvicorn binds 0.0.0.0:8080 immediately.
+    # Without this, every `await db.x` below blocks the ASGI lifespan; if Mongo is
+    # slow/unreachable, Fly health checks fail before the socket is ever opened.
+    asyncio.create_task(_startup_background())
+
+async def _startup_background():
+    try:
+        await _do_startup()
+    except Exception as e:
+        logger.exception(f"Background startup failed (server still listening): {e}")
+
+async def _do_startup():
     global scheduler
     await db.users.create_index("email", unique=True)
     # Performance indexes – critical as data grows.
@@ -4670,7 +4701,14 @@ async def seed_online_data():
 
 @app.on_event("startup")
 async def startup_online_seed():
-    await seed_online_data()
+    # Non-blocking: schedule online seeding so uvicorn binds 0.0.0.0:8080 immediately.
+    asyncio.create_task(_startup_online_seed_background())
+
+async def _startup_online_seed_background():
+    try:
+        await seed_online_data()
+    except Exception as e:
+        logger.exception(f"Online seed failed (server still listening): {e}")
 
 # =============================================================================
 # END CUSTOMER ENDPOINTS
@@ -5298,7 +5336,14 @@ def _get_object(path: str):
 
 @app.on_event("startup")
 async def _startup_storage():
-    _init_obj_storage()
+    # Non-blocking: object-storage probe should never block the listener.
+    asyncio.create_task(_startup_storage_background())
+
+async def _startup_storage_background():
+    try:
+        _init_obj_storage()
+    except Exception as e:
+        logger.exception(f"Object storage init failed (server still listening): {e}")
 
 ALLOWED_UPLOAD_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
 ALLOWED_UPLOAD_EXTS = {"jpg", "jpeg", "png", "webp", "pdf"}
@@ -5634,7 +5679,14 @@ async def _ensure_twilio_setting():
 
 @app.on_event("startup")
 async def _startup_twilio_setting():
-    await _ensure_twilio_setting()
+    # Non-blocking: Twilio settings load should never block the listener.
+    asyncio.create_task(_startup_twilio_background())
+
+async def _startup_twilio_background():
+    try:
+        await _ensure_twilio_setting()
+    except Exception as e:
+        logger.exception(f"Twilio settings load failed (server still listening): {e}")
 
 # =============================================================================
 # END OBJECT STORAGE / WHATSAPP / TRACKING
