@@ -7,6 +7,7 @@ load_dotenv(ROOT_DIR / '.env')
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os, logging, bcrypt, jwt, secrets, json
 from pydantic import BaseModel, field_validator
@@ -748,13 +749,16 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     count = await db.menu_items.count_documents({})
     variations = [v.model_dump() for v in (item.variations or [])]
+    # If the admin uploaded the photo as a base64 data: URL, persist it to disk
+    # immediately so the document keeps only a small URL — never inline bytes.
+    persisted_image_url = _persist_data_url_image(item.image_url or "", kind="menu")
     doc = {
         "name": item.name, "price": item.price, "price_fp1": item.price_fp1, "price_fp2": item.price_fp2,
         "category_id": item.category_id, "stock": item.stock, "low_stock_threshold": item.low_stock_threshold,
         "color": item.color, "variations": variations,
         "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
         "is_bestseller": bool(item.is_bestseller), "is_popular": bool(item.is_popular),
-        "image_url": item.image_url or "", "image_type": item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url"),
+        "image_url": persisted_image_url, "image_type": "url" if persisted_image_url.startswith("/api/uploads/") else (item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url")),
         "description": item.description or "",
         "related_item_ids": list(item.related_item_ids or []),
         "is_outsourced": bool(item.is_outsourced),
@@ -770,6 +774,13 @@ async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request)
     user = await get_current_user(request)
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     ud = {k: v for k, v in item.model_dump().items() if v is not None}
+    # If the admin re-uploaded a photo as a base64 data: URL, persist it to disk
+    # before saving, so we never store inline image bytes in MongoDB.
+    if "image_url" in ud and isinstance(ud["image_url"], str) and ud["image_url"].startswith("data:"):
+        new_url = _persist_data_url_image(ud["image_url"], kind="menu")
+        if new_url.startswith("/api/uploads/"):
+            ud["image_url"] = new_url
+            ud["image_type"] = "url"
     # variations should be replaced wholesale, including with empty list — model_dump() drops only None
     if ud: await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": ud})
     updated = await db.menu_items.find_one({"_id": ObjectId(item_id)}, {"_id": 0})
@@ -5229,7 +5240,149 @@ from fastapi.responses import Response
 OBJ_STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = os.environ.get("APP_NAME", "karachi-naseeb")
 _obj_storage_key = None
-LOCAL_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+LOCAL_UPLOAD_DIR = os.environ.get(
+    "LOCAL_UPLOAD_DIR",
+    # Auto-detect the persistent Fly.io volume mount when present so uploaded files
+    # survive every redeploy. Falls back to a folder next to server.py for local dev.
+    "/app/uploads" if os.path.isdir("/app/uploads") else os.path.join(os.path.dirname(__file__), "uploads"),
+)
+
+# =============================================================================
+# Inline-image migration helpers
+#
+# Historic menu items stored their photo as a base64 `data:` URL inside the
+# `image_url` MongoDB field. With 50+ items × ~120 KB each, every public menu
+# request shipped ~6 MB of JSON which made the menu visibly slow (~60s on
+# cold Cloudflare cache). The helpers below convert those data URLs into real
+# files on the persistent volume and serve them via /api/uploads/* with
+# long-lived Cache-Control. Content-hashed filenames make cache invalidation
+# automatic when the image changes.
+# =============================================================================
+
+import hashlib as _hashlib
+import base64 as _b64lib
+import re as _re_img
+
+_DATA_URL_RE = _re_img.compile(
+    r"^data:(image/(jpeg|jpg|png|webp|gif));base64,(.+)$", _re_img.IGNORECASE | _re_img.DOTALL
+)
+
+
+def _persist_data_url_image(image_url: str, kind: str = "menu") -> str:
+    """If `image_url` is a base64 data: URL, decode it, write it to
+    LOCAL_UPLOAD_DIR/{kind}/<sha16>.<ext>, and return the public URL
+    (/api/uploads/{kind}/<sha16>.<ext>). Otherwise return the input unchanged.
+    Idempotent: same bytes → same path → no extra writes."""
+    if not image_url or not isinstance(image_url, str) or not image_url.startswith("data:"):
+        return image_url or ""
+    m = _DATA_URL_RE.match(image_url)
+    if not m:
+        return image_url  # unrecognised data: shape — leave for manual review
+    ext_raw = m.group(2).lower()
+    b64data = m.group(3)
+    ext = "jpg" if ext_raw == "jpeg" else ext_raw
+    try:
+        binary = _b64lib.b64decode(b64data, validate=False)
+    except Exception as e:
+        logger.warning(f"_persist_data_url_image: base64 decode failed ({e}); keeping data URL")
+        return image_url
+    digest = _hashlib.sha256(binary).hexdigest()[:16]
+    rel_path = f"{kind}/{digest}.{ext}"
+    abs_dir = os.path.abspath(LOCAL_UPLOAD_DIR)
+    abs_target = os.path.join(abs_dir, rel_path)
+    try:
+        os.makedirs(os.path.dirname(abs_target), exist_ok=True)
+        if not os.path.exists(abs_target):
+            with open(abs_target, "wb") as f:
+                f.write(binary)
+    except Exception as e:
+        logger.error(f"_persist_data_url_image: write failed for {rel_path}: {e}")
+        return image_url
+    return f"/api/uploads/{rel_path}"
+
+
+@api_router.get("/uploads/{path:path}")
+async def serve_public_upload(path: str):
+    """Public, unauthenticated read of LOCAL_UPLOAD_DIR contents.
+    Used for menu/category images that were migrated out of inline base64.
+    Browser/CDN cacheable for 1 year because URLs are content-hashed."""
+    abs_dir = os.path.abspath(LOCAL_UPLOAD_DIR)
+    abs_target = os.path.abspath(os.path.join(abs_dir, path))
+    # Block path traversal — abs_target MUST be inside abs_dir.
+    if not (abs_target == abs_dir or abs_target.startswith(abs_dir + os.sep)):
+        raise HTTPException(status_code=404, detail="Not found")
+    if not os.path.isfile(abs_target):
+        raise HTTPException(status_code=404, detail="Not found")
+    ext = abs_target.rsplit(".", 1)[-1].lower() if "." in abs_target else ""
+    ctype = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+        "webp": "image/webp", "gif": "image/gif", "pdf": "application/pdf",
+    }.get(ext, "application/octet-stream")
+    try:
+        with open(abs_target, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        logger.error(f"serve_public_upload: read failed for {path}: {e}")
+        raise HTTPException(status_code=500, detail="Read failed")
+    return Response(
+        content=data,
+        media_type=ctype,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@api_router.post("/admin/migrate-menu-images")
+async def migrate_menu_images(request: Request, limit: int = 1000, dry_run: bool = False):
+    """One-shot migration: every menu_item whose image_url is a base64 data URL
+    gets persisted to LOCAL_UPLOAD_DIR/menu/<sha16>.<ext> and its image_url is
+    rewritten to /api/uploads/menu/<sha16>.<ext>. Idempotent — re-running is
+    safe; already-migrated docs are excluded by the query. Admin only.
+
+    Query params:
+      - limit:   max docs to process this call (default 1000)
+      - dry_run: when true, report changes without writing
+    """
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    migrated, skipped, failed = 0, 0, 0
+    examples: list = []
+    try:
+        cursor = db.menu_items.find({"image_url": {"$regex": "^data:"}}).limit(int(limit))
+        async for doc in cursor:
+            try:
+                new_url = _persist_data_url_image(doc.get("image_url", ""), kind="menu")
+                if isinstance(new_url, str) and new_url.startswith("/api/uploads/"):
+                    if not dry_run:
+                        await db.menu_items.update_one(
+                            {"_id": doc["_id"]},
+                            {"$set": {"image_url": new_url, "image_type": "url"}},
+                        )
+                    migrated += 1
+                    if len(examples) < 5:
+                        examples.append({
+                            "id": str(doc["_id"]),
+                            "name": doc.get("name", ""),
+                            "new_url": new_url,
+                        })
+                else:
+                    skipped += 1
+            except Exception as e:
+                failed += 1
+                logger.exception(f"migrate_menu_images: failed for {doc.get('_id')}: {e}")
+    except Exception as e:
+        logger.exception(f"migrate_menu_images: cursor failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Migration cursor failed: {str(e)[:120]}")
+    return {
+        "migrated": migrated,
+        "skipped": skipped,
+        "failed": failed,
+        "examples": examples,
+        "dry_run": dry_run,
+        "upload_dir": LOCAL_UPLOAD_DIR,
+    }
+
+
 
 def _init_obj_storage():
     global _obj_storage_key
@@ -6057,6 +6210,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compression: cuts JSON menu payloads (heavy with base64 images / repetitive
+# text) by 3-5x with zero application-level code change. minimum_size avoids
+# wasting CPU compressing already-small responses.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
