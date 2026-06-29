@@ -3,10 +3,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useCart } from "../contexts/CartContext";
 import { Trash2, Plus, Minus, ShoppingBag, ArrowRight, Truck, Sparkles, Diamond, X as XIcon } from "lucide-react";
-import { API } from "../lib/api";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
+import { API, resolveImageUrl } from "../lib/api";
 import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
 import { toast } from "sonner";
 

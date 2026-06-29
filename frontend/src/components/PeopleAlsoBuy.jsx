@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { useCart } from "../contexts/CartContext";
-import { API } from "../lib/api";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
+import { API, resolveImageUrl } from "../lib/api";
 import { Plus, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 

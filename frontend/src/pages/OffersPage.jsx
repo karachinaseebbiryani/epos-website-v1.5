@@ -1,8 +1,5 @@
 import { useEffect, useState } from "react";
-import api from "../lib/api";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
+import api, { resolveImageUrl } from "../lib/api";
 import { Tag, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";

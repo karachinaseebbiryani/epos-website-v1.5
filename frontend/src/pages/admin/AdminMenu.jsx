@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import api, { formatApiError } from "../../lib/api";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
+import api, { resolveImageUrl } from "../lib/api";
 import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award } from "lucide-react";
 import { toast } from "sonner";
 import {

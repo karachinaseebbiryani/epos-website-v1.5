@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import api from "../lib/api";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
+import api, { resolveImageUrl } from "../lib/api";
 import { fetchCached, getCached } from "../lib/menuCache";
 import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";

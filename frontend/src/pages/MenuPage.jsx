@@ -1,11 +1,9 @@
 import { useEffect, useMemo, useRef, useState, memo, useCallback } from "react";
 import { fetchCached, getCached } from "../lib/menuCache";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
 import { useCart } from "../contexts/CartContext";
 import { Plus, Search, LayoutGrid, Rows3, X } from "lucide-react";
 import { toast } from "sonner";
-import { resolveImageUrl } from "../lib/api";        // for files in /pages
-// or
-import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 const DENSITY_KEY = "knb_menu_density_v1"; // "compact" | "comfortable"
 
 export default function MenuPage() {
