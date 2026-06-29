@@ -39,6 +39,57 @@ db = client[db_name]
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
+# ---------------------------------------------------------------------------
+# Read-mostly menu cache (perf).
+# The customer site (/menu), the admin POS (/menu-items + /categories) and
+# every page transition between Home → Menu → Home repeatedly request the
+# same large JSON payload. Without a cache layer Mongo gets hammered + the
+# whole document set is re-serialized for every single hit.
+#
+# This in-memory TTL cache (per backend process) plus ETag/Cache-Control on
+# the responses gives:
+#   • DB hit ratio drops to ~1 per 30 s instead of 1 per request.
+#   • Repeat browser navigations short-circuit at 304 Not Modified (no body).
+#   • Cache is busted instantly on any menu/category mutation so admins never
+#     see stale data after their own edits — TTL only matters cross-process.
+#
+# Functionality, response shape and DB schema are untouched.
+# ---------------------------------------------------------------------------
+import time as _time
+import hashlib as _hashlib
+_MENU_CACHE_TTL = float(os.environ.get("MENU_CACHE_TTL_SEC", "30"))
+_menu_cache: Dict[str, dict] = {}
+
+def _cache_get(key: str):
+    e = _menu_cache.get(key)
+    if not e:
+        return None
+    if _time.time() - e["ts"] > _MENU_CACHE_TTL:
+        _menu_cache.pop(key, None)
+        return None
+    return e
+
+def _cache_set(key: str, value):
+    try:
+        etag = '"' + _hashlib.md5(json.dumps(value, default=str, sort_keys=True).encode()).hexdigest() + '"'
+    except Exception:
+        etag = '"' + str(_time.time()) + '"'
+    entry = {"ts": _time.time(), "value": value, "etag": etag}
+    _menu_cache[key] = entry
+    return entry
+
+def _cache_bust(*keys: str):
+    if not keys:
+        _menu_cache.clear()
+        return
+    for k in keys:
+        _menu_cache.pop(k, None)
+
+def _menu_cache_bust_all():
+    """Invalidate every cached menu/category/items response. Called from every
+    mutation endpoint that can change what the menu looks like."""
+    _cache_bust("menu", "menu-items", "categories")
+
 # Liveness/readiness probe for Fly.io health checks.
 # Intentionally performs NO database I/O so the app stays "healthy" from the
 # load-balancer's perspective even when MongoDB is degraded. The rest of the
@@ -681,9 +732,21 @@ def _can_edit_menu(user):
     return user.get("role") == "admin" or "menu_edit" in (user.get("permissions") or [])
 
 @api_router.get("/categories")
-async def get_categories():
+async def get_categories(request: Request, response: Response):
+    cached = _cache_get("categories")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(100)
-    return [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color"), "sort_order": c.get("sort_order", 0)} for c in cats]
+    out = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color"), "sort_order": c.get("sort_order", 0)} for c in cats]
+    entry = _cache_set("categories", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.post("/categories")
 async def create_category(cat: CategoryCreate, request: Request):
@@ -691,6 +754,7 @@ async def create_category(cat: CategoryCreate, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     count = await db.categories.count_documents({})
     result = await db.categories.insert_one({"name": cat.name, "color": cat.color, "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat()})
+    _menu_cache_bust_all()
     return {"id": str(result.inserted_id), "name": cat.name, "color": cat.color, "sort_order": count}
 
 @api_router.put("/categories/{cat_id}")
@@ -701,6 +765,7 @@ async def update_category(cat_id: str, cat: CategoryUpdate, request: Request):
     if ud: await db.categories.update_one({"_id": ObjectId(cat_id)}, {"$set": ud})
     updated = await db.categories.find_one({"_id": ObjectId(cat_id)}, {"_id": 0})
     if not updated: raise HTTPException(status_code=404, detail="Not found")
+    _menu_cache_bust_all()
     return {"id": cat_id, "name": updated.get("name"), "color": updated.get("color"), "sort_order": updated.get("sort_order", 0)}
 
 @api_router.delete("/categories/{cat_id}")
@@ -709,6 +774,7 @@ async def delete_category(cat_id: str, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     await db.categories.delete_one({"_id": ObjectId(cat_id)})
     await db.menu_items.delete_many({"category_id": cat_id})
+    _menu_cache_bust_all()
     return {"message": "Deleted"}
 
 @api_router.post("/categories/reorder")
@@ -721,13 +787,22 @@ async def reorder_categories(payload: dict, request: Request):
             await db.categories.update_one({"_id": ObjectId(cid)}, {"$set": {"sort_order": idx}})
         except Exception:
             pass
+    _menu_cache_bust_all()
     return {"message": "Reordered", "count": len(order)}
 
 # --- Menu Items ---
 @api_router.get("/menu-items")
-async def get_menu_items():
+async def get_menu_items(request: Request, response: Response):
+    cached = _cache_get("menu-items")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
-    return [{
+    out = [{
         "id": str(i["_id"]), "name": i["name"], "price": i["price"],
         "price_fp1": i.get("price_fp1"), "price_fp2": i.get("price_fp2"),
         "category_id": i["category_id"], "stock": i.get("stock", 0),
@@ -742,6 +817,10 @@ async def get_menu_items():
         "outsourced_vendor_id": i.get("outsourced_vendor_id"),
         "outsourced_unit_cost": i.get("outsourced_unit_cost"),
     } for i in items]
+    entry = _cache_set("menu-items", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.post("/menu-items")
 async def create_menu_item(item: MenuItemCreate, request: Request):
@@ -767,6 +846,7 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
         "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.menu_items.insert_one(doc)
+    _menu_cache_bust_all()
     return {**{k: v for k, v in doc.items() if k not in ("created_at", "_id")}, "id": str(result.inserted_id)}
 
 @api_router.put("/menu-items/{item_id}")
@@ -787,6 +867,7 @@ async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request)
     if not updated: raise HTTPException(status_code=404, detail="Not found")
     updated["id"] = item_id
     updated.setdefault("variations", [])
+    _menu_cache_bust_all()
     return updated
 
 @api_router.delete("/menu-items/{item_id}")
@@ -794,6 +875,7 @@ async def delete_menu_item(item_id: str, request: Request):
     user = await get_current_user(request)
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     await db.menu_items.delete_one({"_id": ObjectId(item_id)})
+    _menu_cache_bust_all()
     return {"message": "Deleted"}
 
 @api_router.post("/menu-items/reorder")
@@ -806,6 +888,7 @@ async def reorder_menu_items(payload: dict, request: Request):
             await db.menu_items.update_one({"_id": ObjectId(iid)}, {"$set": {"sort_order": idx}})
         except Exception:
             pass
+    _menu_cache_bust_all()
     return {"message": "Reordered", "count": len(order)}
 
 # --- Inventory ---
@@ -813,13 +896,14 @@ async def reorder_menu_items(payload: dict, request: Request):
 async def get_inventory(request: Request):
     await get_current_user(request)
     items = await db.menu_items.find({}).to_list(500)
+    # Fix N+1: load ALL categories once and index by id, instead of one
+    # find_one() per menu item (was scaling linearly with menu size).
+    cats = await db.categories.find({}).to_list(500)
+    cat_by_id = {str(c["_id"]): c for c in cats}
     result = []
     for i in items:
-        cat = None
         cid = i.get("category_id")
-        if cid:
-            try: cat = await db.categories.find_one({"_id": ObjectId(cid)})
-            except: cat = None
+        cat = cat_by_id.get(cid) if cid else None
         result.append({"id": str(i["_id"]), "name": i["name"], "price": i["price"], "category_name": cat["name"] if cat else "Uncategorized", "stock": i.get("stock", 0), "low_stock_threshold": i.get("low_stock_threshold", 10), "is_low_stock": i.get("stock", 0) <= i.get("low_stock_threshold", 10)})
     return result
 
@@ -828,6 +912,7 @@ async def update_stock(item_id: str, su: StockUpdate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": {"stock": su.stock}})
+    _menu_cache_bust_all()
     return {"message": "Stock updated", "stock": su.stock}
 
 # --- Orders ---
@@ -859,6 +944,10 @@ async def create_order(order: OrderCreate, request: Request):
         except Exception:
             pass
     now = datetime.now(timezone.utc)
+    # Stock just changed on the items above — bust the menu cache so the next
+    # /menu or /menu-items call sees the new stock figures instead of stale.
+    if order.items:
+        _menu_cache_bust_all()
     doc = {"items": [{"item_id": oi.item_id, "name": oi.name, "price": oi.price, "original_price": oi.original_price or oi.price, "quantity": oi.quantity} for oi in order.items], "payment_type": order.payment_type, "subtotal": order.subtotal, "tax": order.tax, "total": order.total, "discount_type": order.discount_type, "discount_value": order.discount_value or 0, "discount_amount": order.discount_amount or 0, "cashier_id": user["_id"], "cashier_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
     result = await db.orders.insert_one(doc)
     order_id = str(result.inserted_id)
@@ -2282,6 +2371,10 @@ async def _do_startup():
         await db.orders.create_index("payment_type")
         await db.orders.create_index([("created_at", -1)])
         await db.menu_items.create_index([("sort_order", 1), ("created_at", 1)])
+        # `category_id` is used both as a filter in the POS (when a tab is
+        # clicked) and as the join key in /inventory. Cheap to add, big win
+        # once the menu has dozens of items.
+        await db.menu_items.create_index("category_id")
         await db.categories.create_index([("sort_order", 1), ("created_at", 1)])
         await db.expenses.create_index([("date", -1)])
         await db.refunds.create_index([("date", -1)])
@@ -2788,7 +2881,15 @@ async def menu_upsell(req: UpsellRequest):
 
 
 @api_router.get("/menu")
-async def get_public_menu():
+async def get_public_menu(request: Request, response: Response):
+    cached = _cache_get("menu")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(200)
     items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
     cat_list = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color")} for c in cats]
@@ -2837,7 +2938,11 @@ async def get_public_menu():
             "is_bestseller": i.get("is_bestseller", False),
             "variations": variations_out,
         })
-    return {"categories": cat_list, "items": item_list}
+    out = {"categories": cat_list, "items": item_list}
+    entry = _cache_set("menu", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.get("/menu/{item_id}")
 async def get_menu_item(item_id: str):

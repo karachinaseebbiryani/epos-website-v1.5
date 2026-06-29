@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../lib/api";
+import { fetchCached, getCached } from "../lib/menuCache";
 import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
@@ -8,14 +9,16 @@ import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 import TrustStrip from "../components/TrustStrip";
 
 export default function HomePage() {
-    const [menuData, setMenuData] = useState({ categories: [], items: [] });
+    const [menuData, setMenuData] = useState(() => getCached("/menu")?.data || { categories: [], items: [] });
     const [offers, setOffers] = useState([]);
     const [reviews, setReviews] = useState([]);
     const [picker, setPicker] = useState(null); // { item } when a variation-required item is being chosen
     const { addItem } = useCart();
 
     useEffect(() => {
-        api.get("/menu").then((r) => setMenuData(r.data)).catch(() => { });
+        // /menu is the heaviest payload on the page — use the shared cache so
+        // navigating Home → Menu → Home doesn't refetch the same JSON every time.
+        fetchCached("/menu", { allowStale: false }).then((d) => setMenuData(d)).catch(() => { });
         api.get("/offers").then((r) => setOffers(r.data)).catch(() => { });
         api.get("/reviews").then((r) => setReviews(r.data)).catch(() => { });
     }, []);

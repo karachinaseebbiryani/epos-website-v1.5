@@ -37,6 +37,25 @@ api.interceptors.request.use((config) => {
     return config;
 });
 
+// Bust the shared menu cache whenever an admin mutates the menu, a category
+// or stock. Done on the RESPONSE so we only invalidate after a confirmed
+// success. The hook is registered on `window` by menuCache.js to avoid a
+// circular import between this file and menuCache.js.
+api.interceptors.response.use((res) => {
+    try {
+        const m = (res.config?.method || "get").toLowerCase();
+        if (m !== "get") {
+            const u = res.config?.url || "";
+            if (u.startsWith("/menu-items") || u.startsWith("/categories") || u.startsWith("/inventory") || u === "/menu") {
+                if (typeof window !== "undefined" && typeof window.__knb_menu_cache_bust === "function") {
+                    window.__knb_menu_cache_bust();
+                }
+            }
+        }
+    } catch (e) { /* never fail a real response because of cache plumbing */ }
+    return res;
+});
+
 export function formatApiError(detail) {
     if (detail == null) return "Something went wrong. Please try again.";
     if (typeof detail === "string") return detail;
