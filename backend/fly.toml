@@ -25,7 +25,7 @@ primary_region = 'lhr'
     timeout = '5s'
     grace_period = '20s'
     method = 'GET'
-    path = '/api/public/restaurant-info'
+    path = '/api/health'
 
 [[vm]]
   size = 'shared-cpu-1x'
