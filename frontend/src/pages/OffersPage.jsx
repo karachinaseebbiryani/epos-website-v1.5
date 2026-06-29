@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import api from "../lib/api";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
+// or
+import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 import { Tag, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
@@ -117,7 +120,7 @@ export default function OffersPage() {
                         <article key={o.id} data-testid={`offer-${o.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
                             <div className="aspect-[4/3] overflow-hidden bg-neutral-100 relative">
                                 {o.image_url && o.image_url.trim() ? (
-                                    <img src={o.image_url} loading="lazy" alt={o.title} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                                    <img src={resolveImageUrl(o.image_url)} loading="lazy" alt={o.title} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                                 ) : (
                                     <div className="w-full h-full bg-gradient-to-br from-brand-red to-brand-yellow" />
                                 )}

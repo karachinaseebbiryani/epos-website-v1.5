@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useCart } from "../contexts/CartContext";
 import { API } from "../lib/api";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
+// or
+import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 import { Plus, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -78,7 +81,7 @@ function UpsellCard({ item, compact, onAdd }) {
         <div data-testid={`upsell-item-${item.id}`} className={`shrink-0 snap-start ${w} bg-neutral-50 rounded-2xl overflow-hidden border border-neutral-100 hover:border-brand-red transition-colors`}>
             <div className="aspect-square bg-neutral-100 relative">
                 {item.image_url
-                    ? <img src={item.image_url} alt={item.name} loading="lazy" className="w-full h-full object-cover" />
+                    ? <img src={resolveImageUrl(item.image_url)} alt={item.name} loading="lazy" className="w-full h-full object-cover" />
                     : <div className="w-full h-full bg-gradient-to-br from-brand-yellow/30 to-brand-red/20" />}
                 <div className="absolute top-1.5 right-1.5 flex flex-col gap-0.5 items-end">
                     {item.discount_percent > 0 && (

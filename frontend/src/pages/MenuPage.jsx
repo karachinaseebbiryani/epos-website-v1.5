@@ -3,7 +3,9 @@ import { fetchCached, getCached } from "../lib/menuCache";
 import { useCart } from "../contexts/CartContext";
 import { Plus, Search, LayoutGrid, Rows3, X } from "lucide-react";
 import { toast } from "sonner";
-
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
+// or
+import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 const DENSITY_KEY = "knb_menu_density_v1"; // "compact" | "comfortable"
 
 export default function MenuPage() {
@@ -309,7 +311,7 @@ const CompactCard = memo(function CompactCard({ item, onAdd }) {
         <article data-testid={`menu-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all">
             <div className="aspect-square overflow-hidden bg-neutral-100 relative">
                 {item.image_url
-                    ? <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                    ? <img src={resolveImageUrl(item.image_url)} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                     : <div className="w-full h-full bg-gradient-to-br from-brand-yellow/30 to-brand-red/20" />}
                 {item.is_popular && !item.is_bestseller && (
                     <span className="absolute top-2 left-2 bg-brand-yellow text-brand-ink text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full">
@@ -350,7 +352,7 @@ const ComfortableCard = memo(function ComfortableCard({ item, onAdd }) {
         <article data-testid={`menu-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
             <div className="aspect-[4/3] overflow-hidden bg-neutral-100 relative">
                 {item.image_url
-                    ? <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                    ? <img src={resolveImageUrl(item.image_url)} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                     : <div className="w-full h-full bg-gradient-to-br from-brand-yellow/30 to-brand-red/20" />}
                 {item.is_popular && !item.is_bestseller && (
                     <span className="absolute top-3 left-3 bg-brand-yellow text-brand-ink text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-full">

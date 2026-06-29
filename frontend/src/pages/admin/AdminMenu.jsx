@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import api, { formatApiError } from "../../lib/api";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
+// or
+import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -224,7 +227,7 @@ export default function AdminMenu() {
                                 )}
                                 {form.image_url && (
                                     <div className="mt-2 flex items-start gap-2">
-                                        <img src={form.image_url} alt="preview" className="w-16 h-16 rounded-lg object-cover border border-neutral-200" />
+                                        <img src={resolveImageUrl(form.image_url)} alt="preview" className="w-16 h-16 rounded-lg object-cover border border-neutral-200" />
                                         <button type="button" onClick={() => setForm({ ...form, image_url: "" })} className="text-xs text-red-500 underline">Remove</button>
                                     </div>
                                 )}
@@ -340,7 +343,7 @@ function SortableMenuItem({ item, category, onEdit, onDelete }) {
                     className="absolute top-2 left-2 z-10 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm hover:bg-white text-neutral-700 inline-flex items-center justify-center cursor-grab active:cursor-grabbing shadow-sm">
                     <GripVertical className="w-4 h-4" />
                 </button>
-                {item.image_url && item.image_url.trim() && <img src={item.image_url} alt={item.name} className="w-full h-full object-cover" />}
+                {item.image_url && item.image_url.trim() && <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-full h-full object-cover" />}
                 <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
                     {item.is_bestseller && <span className="bg-brand-red text-white text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Bestseller</span>}
                     {item.is_popular && <span className="bg-brand-yellow text-brand-ink text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Popular</span>}

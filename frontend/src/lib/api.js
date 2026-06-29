@@ -2,7 +2,19 @@ import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
-
+// Resolves a possibly-relative image URL coming from the backend
+// (e.g. "/api/uploads/menu/abc.jpg") to an absolute URL on the Fly backend,
+// so that <img src> works when the SPA is hosted on a different origin
+// (Vercel) than the API (Fly). Idempotent: absolute URLs and data: URLs
+// are returned unchanged. Empty / null values return "" so React renders
+// nothing instead of triggering a broken-image request.
+export function resolveImageUrl(u) {
+    if (!u || typeof u !== "string") return "";
+    if (u.startsWith("data:") || u.startsWith("blob:")) return u;
+    if (/^https?:\/\//i.test(u)) return u;
+    if (u.startsWith("/api/")) return `${BACKEND_URL}${u}`;
+    return u;
+}
 const api = axios.create({ baseURL: API });
 
 api.interceptors.request.use((config) => {

@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import api, { formatApiError } from "../../lib/api";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
+// or
+import { resolveImageUrl } from "../../lib/api";    // for files in /pages/admin and /components
 import { Plus, Trash2, Pencil, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -60,7 +63,7 @@ export default function AdminOffers() {
                 {offers.map((o) => (
                     <div key={o.id} data-testid={`admin-offer-${o.id}`} className="bg-white border border-neutral-200 rounded-2xl overflow-hidden">
                         <div className="aspect-[4/3] bg-neutral-100 overflow-hidden">
-                            {o.image_url && o.image_url.trim() && <img src={o.image_url} alt={o.title} className="w-full h-full object-cover" />}
+                            {o.image_url && o.image_url.trim() && <img src={resolveImageUrl(o.image_url)} alt={o.title} className="w-full h-full object-cover" />}
                         </div>
                         <div className="p-4">
                             <div className="flex items-start justify-between gap-2">
