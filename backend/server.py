@@ -5841,6 +5841,45 @@ async def _startup_twilio_background():
     except Exception as e:
         logger.exception(f"Twilio settings load failed (server still listening): {e}")
 
+
+@app.on_event("startup")
+async def _startup_menu_image_migration():
+    """Self-healing: any menu_item whose image_url is an inline base64 data URL
+    gets persisted to the volume and rewritten to a short /api/uploads/... URL.
+    Idempotent — items already migrated are excluded by the query. Runs in
+    the background after a small delay so it never blocks Fly's port binding
+    or the first health check."""
+    asyncio.create_task(_auto_migrate_menu_images_background())
+
+async def _auto_migrate_menu_images_background():
+    try:
+        # Brief wait so primary connection is healthy and indexes are warm.
+        await asyncio.sleep(2)
+        migrated = 0
+        skipped = 0
+        failed = 0
+        cursor = db.menu_items.find({"image_url": {"$regex": "^data:"}}).limit(2000)
+        async for doc in cursor:
+            try:
+                new_url = _persist_data_url_image(doc.get("image_url", ""), kind="menu")
+                if isinstance(new_url, str) and new_url.startswith("/api/uploads/"):
+                    await db.menu_items.update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {"image_url": new_url, "image_type": "url"}},
+                    )
+                    migrated += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                failed += 1
+                logger.warning(f"auto-migrate item {doc.get('_id')} failed: {e}")
+        if migrated or failed:
+            logger.info(
+                f"Auto-migrated menu images: migrated={migrated} skipped={skipped} failed={failed}"
+            )
+    except Exception as e:
+        logger.exception(f"Auto-migration of menu images crashed (server still listening): {e}")
+
 # =============================================================================
 # END OBJECT STORAGE / WHATSAPP / TRACKING
 # =============================================================================
