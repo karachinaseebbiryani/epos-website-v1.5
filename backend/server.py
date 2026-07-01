@@ -710,14 +710,27 @@ DEFAULT_SETTINGS = {"tax_rate": 5.0, "online_tax_rate": 0.0, "foodpanda1_tax_rat
 async def get_settings(request: Request):
     await get_current_user(request)
     s = await db.settings.find_one({"key": "global"}, {"_id": 0})
-    if not s: return DEFAULT_SETTINGS
-    return {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()}
+    if not s: return {**DEFAULT_SETTINGS, "restaurant_logo": ""}
+    # Migrate base64 logo to a file (one-shot, idempotent) so it never ships inline again
+    logo_val = s.get("restaurant_logo") or ""
+    if isinstance(logo_val, str) and logo_val.startswith("data:"):
+        new_url = _persist_data_url_image(logo_val, kind="logo")
+        if new_url.startswith("/api/uploads/"):
+            await db.settings.update_one({"key": "global"}, {"$set": {"restaurant_logo": new_url}})
+            s["restaurant_logo"] = new_url
+    return {k: (s.get(k, v) if k != "restaurant_logo" else "") for k, v in DEFAULT_SETTINGS.items()}
 
 @api_router.put("/settings")
 async def update_settings(req: SettingsUpdate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     ud = {k: v for k, v in req.model_dump().items() if v is not None}
+    # If admin uploaded a new logo as a base64 data URL, persist it to disk first
+    # so we never store inline image bytes in MongoDB.
+    if "restaurant_logo" in ud and isinstance(ud["restaurant_logo"], str) and ud["restaurant_logo"].startswith("data:"):
+        new_url = _persist_data_url_image(ud["restaurant_logo"], kind="logo")
+        if new_url.startswith("/api/uploads/"):
+            ud["restaurant_logo"] = new_url
     if ud: await db.settings.update_one({"key": "global"}, {"$set": ud}, upsert=True)
     s = await db.settings.find_one({"key": "global"}, {"_id": 0})
     schedule_keys = ("daily_report_time", "daily_report_timezone", "auto_email_daily", "auto_whatsapp_daily")
@@ -725,8 +738,16 @@ async def update_settings(req: SettingsUpdate, request: Request):
         logger.info(f"Settings: schedule fields changed: {[k for k in schedule_keys if k in ud]}")
         try: await _reschedule_daily_job()
         except Exception as e: logger.exception(f"Reschedule failed: {e}")
-    return {k: s.get(k, v) for k, v in DEFAULT_SETTINGS.items()} if s else DEFAULT_SETTINGS
-
+    if not s: return {**DEFAULT_SETTINGS, "restaurant_logo": ""}
+    return {k: (s.get(k, v) if k != "restaurant_logo" else "") for k, v in DEFAULT_SETTINGS.items()}
+@api_router.get("/settings/logo")
+async def get_settings_logo(request: Request):
+    """Return only the restaurant logo URL/data. Separated from /settings so
+    the main settings payload stays small (was ~411 KB when the logo was
+    stored as a base64 data URL)."""
+    await get_current_user(request)
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+    return {"restaurant_logo": s.get("restaurant_logo") or ""}
 # --- Categories ---
 def _can_edit_menu(user):
     return user.get("role") == "admin" or "menu_edit" in (user.get("permissions") or [])

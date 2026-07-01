@@ -23,7 +23,18 @@ export default function ReceiptModal({ open, onClose, order, settings, currency 
   const rAddr = settings?.restaurant_address || "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore";
   const rPhone = settings?.restaurant_phone || "+923004928411";
   const rEmail = settings?.restaurant_email || "";
-  const rLogo = settings?.restaurant_logo || "";
+  const [rLogo, setRLogo] = React.useState(settings?.restaurant_logo || "");
+  React.useEffect(() => {
+    if (rLogo) return; // already have it (either inline or fetched)
+    // Lazy-load the logo from the small dedicated endpoint
+    const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+    let cancelled = false;
+    fetch(`${API}/settings/logo`, { credentials: "include" })
+      .then((r) => r.ok ? r.json() : { restaurant_logo: "" })
+      .then((d) => { if (!cancelled) setRLogo(d.restaurant_logo || ""); })
+      .catch(() => { /* ignore — receipt just prints without logo */ });
+    return () => { cancelled = true; };
+  }, [rLogo]);
   const c = currency;
   const labels = { cash: "CASH", credit: "CARD", foodpanda1: "FOODPANDA 1", foodpanda2: "FOODPANDA 2", cod: "COD", pay_at_restaurant: "PAY AT RESTAURANT", bank_transfer: "BANK TRANSFER", card: "CARD" };
 
