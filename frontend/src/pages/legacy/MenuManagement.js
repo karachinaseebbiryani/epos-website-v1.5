@@ -121,7 +121,7 @@ export default function MenuManagement() {
         name: itemForm.name, price: parseFloat(itemForm.price), category_id: itemForm.category_id,
         price_fp1: itemForm.price_fp1 === "" ? null : parseFloat(itemForm.price_fp1),
         price_fp2: itemForm.price_fp2 === "" ? null : parseFloat(itemForm.price_fp2),
-        stock: parseInt(itemForm.stock) || 100, low_stock_threshold: parseInt(itemForm.low_stock_threshold) || 10,
+        stock: Number.isFinite(parseInt(itemForm.stock)) ? parseInt(itemForm.stock) : 100, low_stock_threshold: Number.isFinite(parseInt(itemForm.low_stock_threshold)) ? parseInt(itemForm.low_stock_threshold) : 10,
         color: itemForm.color,
         is_outsourced: !!itemForm.is_outsourced,
         outsourced_vendor_id: itemForm.is_outsourced ? itemForm.outsourced_vendor_id : null,

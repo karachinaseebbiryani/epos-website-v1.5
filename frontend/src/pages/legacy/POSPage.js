@@ -85,16 +85,16 @@ export default function POSPage() {
       // the POS for the second time skips the network entirely (until a menu
       // edit elsewhere busts the cache).
       const [cats, items, settingsRes] = await Promise.all([
-        fetchCached("/categories", { allowStale: false }),
-        fetchCached("/menu-items", { allowStale: false }),
+        fetchCached("/categories", { allowStale: true }),
+        fetchCached("/menu-items", { allowStale: true }),
         axios.get(`${API}/settings`, { withCredentials: true }),
       ]);
       setCategories(cats);
       setMenuItems(items);
       const s = settingsRes.data;
       setSettings(s);
-      setTaxRate(s.tax_rate || 5);
-      setOnlineTaxRate(s.online_tax_rate || 0);
+      setTaxRate(s.tax_rate ?? 5);
+      setOnlineTaxRate(s.online_tax_rate ?? 0);
       // Per-FoodPanda commission rates; fall back to legacy online_tax_rate
       setFp1TaxRate(s.foodpanda1_tax_rate != null ? s.foodpanda1_tax_rate : (s.online_tax_rate || 0));
       setFp2TaxRate(s.foodpanda2_tax_rate != null ? s.foodpanda2_tax_rate : (s.online_tax_rate || 0));
@@ -406,6 +406,7 @@ export default function POSPage() {
         open={voiceOpen}
         onClose={setVoiceOpen}
         currency={currency}
+        menuItems={menuItems}
         onConfirm={(items) => {
           // Merge voice-parsed items into cart
           setCart((prev) => {
