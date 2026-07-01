@@ -2,7 +2,19 @@ import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
-
+// Resolves a possibly-relative image URL coming from the backend
+// (e.g. "/api/uploads/menu/abc.jpg") to an absolute URL on the Fly backend,
+// so that <img src> works when the SPA is hosted on a different origin
+// (Vercel) than the API (Fly). Idempotent: absolute URLs and data: URLs
+// are returned unchanged. Empty / null values return "" so React renders
+// nothing instead of triggering a broken-image request.
+export function resolveImageUrl(u) {
+    if (!u || typeof u !== "string") return "";
+    if (u.startsWith("data:") || u.startsWith("blob:")) return u;
+    if (/^https?:\/\//i.test(u)) return u;
+    if (u.startsWith("/api/")) return `${BACKEND_URL}${u}`;
+    return u;
+}
 const api = axios.create({ baseURL: API });
 
 api.interceptors.request.use((config) => {
@@ -35,6 +47,25 @@ api.interceptors.request.use((config) => {
         config.headers.Authorization = `Bearer ${adminToken}`;
     }
     return config;
+});
+
+// Bust the shared menu cache whenever an admin mutates the menu, a category
+// or stock. Done on the RESPONSE so we only invalidate after a confirmed
+// success. The hook is registered on `window` by menuCache.js to avoid a
+// circular import between this file and menuCache.js.
+api.interceptors.response.use((res) => {
+    try {
+        const m = (res.config?.method || "get").toLowerCase();
+        if (m !== "get") {
+            const u = res.config?.url || "";
+            if (u.startsWith("/menu-items") || u.startsWith("/categories") || u.startsWith("/inventory") || u === "/menu") {
+                if (typeof window !== "undefined" && typeof window.__knb_menu_cache_bust === "function") {
+                    window.__knb_menu_cache_bust();
+                }
+            }
+        }
+    } catch (e) { /* never fail a real response because of cache plumbing */ }
+    return res;
 });
 
 export function formatApiError(detail) {

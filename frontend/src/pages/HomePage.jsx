@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import api from "../lib/api";
+import api, { resolveImageUrl } from "../lib/api";
+import { fetchCached, getCached } from "../lib/menuCache";
 import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
@@ -8,14 +9,16 @@ import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 import TrustStrip from "../components/TrustStrip";
 
 export default function HomePage() {
-    const [menuData, setMenuData] = useState({ categories: [], items: [] });
+    const [menuData, setMenuData] = useState(() => getCached("/menu")?.data || { categories: [], items: [] });
     const [offers, setOffers] = useState([]);
     const [reviews, setReviews] = useState([]);
     const [picker, setPicker] = useState(null); // { item } when a variation-required item is being chosen
     const { addItem } = useCart();
 
     useEffect(() => {
-        api.get("/menu").then((r) => setMenuData(r.data)).catch(() => { });
+        // /menu is the heaviest payload on the page — use the shared cache so
+        // navigating Home → Menu → Home doesn't refetch the same JSON every time.
+        fetchCached("/menu", { allowStale: false }).then((d) => setMenuData(d)).catch(() => { });
         api.get("/offers").then((r) => setOffers(r.data)).catch(() => { });
         api.get("/reviews").then((r) => setReviews(r.data)).catch(() => { });
     }, []);
@@ -103,7 +106,7 @@ export default function HomePage() {
                     {popular.map((item) => (
                         <article key={item.id} data-testid={`popular-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
                             <div className="aspect-[4/3] overflow-hidden bg-neutral-100 relative">
-                                <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                                <img src={resolveImageUrl(item.image_url)} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                                 <Badges item={item} compact />
                             </div>
                             <div className="p-3 sm:p-4 md:p-5">
@@ -138,7 +141,7 @@ export default function HomePage() {
                             {offers.slice(0, 3).map((offer) => (
                                 <div key={offer.id} className="relative rounded-2xl overflow-hidden bg-brand-ink text-white aspect-[4/3] group" data-testid={`offer-card-${offer.id}`}>
                                     {offer.image_url && offer.image_url.trim() && (
-                                        <img src={offer.image_url} alt={offer.title} className="absolute inset-0 w-full h-full object-cover opacity-50 group-hover:scale-110 transition-transform duration-700" />
+                                        <img src={resolveImageUrl(offer.image_url)} alt={offer.title} className="absolute inset-0 w-full h-full object-cover opacity-50 group-hover:scale-110 transition-transform duration-700" />
                                     )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-brand-ink via-brand-ink/60 to-transparent" />
                                     <div className="relative h-full flex flex-col justify-end p-6">

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import api from "../lib/api";
+import { useEffect, useMemo, useRef, useState, memo, useCallback } from "react";
+import { fetchCached, getCached } from "../lib/menuCache";
+import { resolveImageUrl } from "../lib/api";        // for files in /pages
 import { useCart } from "../contexts/CartContext";
 import { Plus, Search, LayoutGrid, Rows3, X } from "lucide-react";
 import { toast } from "sonner";
-
 const DENSITY_KEY = "knb_menu_density_v1"; // "compact" | "comfortable"
 
 export default function MenuPage() {
@@ -23,14 +23,22 @@ export default function MenuPage() {
 
     useEffect(() => {
         let cancelled = false;
-        api.get("/menu")
-            .then((r) => {
+        // Show a previously-cached menu instantly (no network) so navigating
+        // back to /menu feels instantaneous. Then revalidate in the background.
+        const cached = getCached("/menu");
+        if (cached && cached.data) {
+            setData(cached.data);
+            if (cached.data.categories?.length) setActiveCat((c) => c || cached.data.categories[0].id);
+            setLoading(false);
+        }
+        fetchCached("/menu", { allowStale: false })
+            .then((d) => {
                 if (cancelled) return;
-                setData(r.data);
-                if (r.data.categories?.length) setActiveCat(r.data.categories[0].id);
+                setData(d);
+                if (d.categories?.length) setActiveCat((c) => c || d.categories[0].id);
                 setLoading(false);
             })
-            .catch(() => { if (!cancelled) { toast.error("Failed to load menu"); setLoading(false); } });
+            .catch(() => { if (!cancelled) { if (!cached) toast.error("Failed to load menu"); setLoading(false); } });
         return () => { cancelled = true; };
     }, []);
 
@@ -89,14 +97,14 @@ export default function MenuPage() {
         }
     }, [activeCat]);
 
-    const handleAdd = (item) => {
+    const handleAdd = useCallback((item) => {
         if (item.variations && item.variations.length > 0) {
             setPicker({ item });
         } else {
             addItem(item);
             toast.success(`${item.name} added`);
         }
-    };
+    }, [addItem]);
 
     const jumpToCategory = (catId) => {
         const el = sectionRefs.current[catId];
@@ -210,8 +218,8 @@ export default function MenuPage() {
                             <div className={gridCls}>
                                 {items.map((item) => (
                                     density === "compact"
-                                        ? <CompactCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
-                                        : <ComfortableCard key={item.id} item={item} onAdd={() => handleAdd(item)} />
+                                        ? <CompactCard key={item.id} item={item} onAdd={handleAdd} />
+                                        : <ComfortableCard key={item.id} item={item} onAdd={handleAdd} />
                                 ))}
                             </div>
                         </section>
@@ -295,13 +303,13 @@ function SkeletonCard({ density }) {
     );
 }
 
-function CompactCard({ item, onAdd }) {
+const CompactCard = memo(function CompactCard({ item, onAdd }) {
     const hasVar = item.variations && item.variations.length > 0;
     return (
         <article data-testid={`menu-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all">
             <div className="aspect-square overflow-hidden bg-neutral-100 relative">
                 {item.image_url
-                    ? <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                    ? <img src={resolveImageUrl(item.image_url)} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                     : <div className="w-full h-full bg-gradient-to-br from-brand-yellow/30 to-brand-red/20" />}
                 {item.is_popular && !item.is_bestseller && (
                     <span className="absolute top-2 left-2 bg-brand-yellow text-brand-ink text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full">
@@ -324,7 +332,7 @@ function CompactCard({ item, onAdd }) {
                     <PriceBlock item={item} />
                     <button
                         data-testid={`menu-add-${item.id}`}
-                        onClick={onAdd}
+                        onClick={() => onAdd(item)}
                         aria-label={hasVar ? `Choose size for ${item.name}` : `Add ${item.name}`}
                         className="bg-brand-ink hover:bg-brand-red text-white rounded-full w-8 h-8 inline-flex items-center justify-center transition-colors shrink-0"
                     >
@@ -334,15 +342,15 @@ function CompactCard({ item, onAdd }) {
             </div>
         </article>
     );
-}
+});
 
-function ComfortableCard({ item, onAdd }) {
+const ComfortableCard = memo(function ComfortableCard({ item, onAdd }) {
     const hasVar = item.variations && item.variations.length > 0;
     return (
         <article data-testid={`menu-item-${item.id}`} className="group bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
             <div className="aspect-[4/3] overflow-hidden bg-neutral-100 relative">
                 {item.image_url
-                    ? <img src={item.image_url} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                    ? <img src={resolveImageUrl(item.image_url)} loading="lazy" alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                     : <div className="w-full h-full bg-gradient-to-br from-brand-yellow/30 to-brand-red/20" />}
                 {item.is_popular && !item.is_bestseller && (
                     <span className="absolute top-3 left-3 bg-brand-yellow text-brand-ink text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-full">
@@ -363,7 +371,7 @@ function ComfortableCard({ item, onAdd }) {
                     <PriceBlock item={item} />
                     <button
                         data-testid={`menu-add-${item.id}`}
-                        onClick={onAdd}
+                        onClick={() => onAdd(item)}
                         className="bg-brand-ink hover:bg-brand-red text-white rounded-full px-4 py-2 text-sm font-semibold inline-flex items-center gap-1 transition-colors"
                     >
                         <Plus className="w-4 h-4" /> {hasVar ? "Choose" : "Add"}
@@ -372,7 +380,7 @@ function ComfortableCard({ item, onAdd }) {
             </div>
         </article>
     );
-}
+});
 
 export function VariationPicker({ item, onClose, onPick }) {
     const [selected, setSelected] = useState(item.variations[0]?.name || "");

@@ -7,6 +7,7 @@ load_dotenv(ROOT_DIR / '.env')
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os, logging, bcrypt, jwt, secrets, json
 from pydantic import BaseModel, field_validator
@@ -21,11 +22,81 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME')
+if not mongo_url or not db_name:
+    import sys as _sys
+    _sys.stderr.write(
+        f"[FATAL] Required env vars missing: "
+        f"MONGO_URL={'SET' if mongo_url else 'MISSING'}, "
+        f"DB_NAME={'SET' if db_name else 'MISSING'}\n"
+    )
+    _sys.exit(1)
+# serverSelectionTimeoutMS=5000 makes motor fail fast if Mongo is unreachable,
+# instead of hanging the default 30s on every DB call.
+client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+db = client[db_name]
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
+
+# ---------------------------------------------------------------------------
+# Read-mostly menu cache (perf).
+# The customer site (/menu), the admin POS (/menu-items + /categories) and
+# every page transition between Home → Menu → Home repeatedly request the
+# same large JSON payload. Without a cache layer Mongo gets hammered + the
+# whole document set is re-serialized for every single hit.
+#
+# This in-memory TTL cache (per backend process) plus ETag/Cache-Control on
+# the responses gives:
+#   • DB hit ratio drops to ~1 per 30 s instead of 1 per request.
+#   • Repeat browser navigations short-circuit at 304 Not Modified (no body).
+#   • Cache is busted instantly on any menu/category mutation so admins never
+#     see stale data after their own edits — TTL only matters cross-process.
+#
+# Functionality, response shape and DB schema are untouched.
+# ---------------------------------------------------------------------------
+import time as _time
+import hashlib as _hashlib
+_MENU_CACHE_TTL = float(os.environ.get("MENU_CACHE_TTL_SEC", "30"))
+_menu_cache: Dict[str, dict] = {}
+
+def _cache_get(key: str):
+    e = _menu_cache.get(key)
+    if not e:
+        return None
+    if _time.time() - e["ts"] > _MENU_CACHE_TTL:
+        _menu_cache.pop(key, None)
+        return None
+    return e
+
+def _cache_set(key: str, value):
+    try:
+        etag = '"' + _hashlib.md5(json.dumps(value, default=str, sort_keys=True).encode()).hexdigest() + '"'
+    except Exception:
+        etag = '"' + str(_time.time()) + '"'
+    entry = {"ts": _time.time(), "value": value, "etag": etag}
+    _menu_cache[key] = entry
+    return entry
+
+def _cache_bust(*keys: str):
+    if not keys:
+        _menu_cache.clear()
+        return
+    for k in keys:
+        _menu_cache.pop(k, None)
+
+def _menu_cache_bust_all():
+    """Invalidate every cached menu/category/items response. Called from every
+    mutation endpoint that can change what the menu looks like."""
+    _cache_bust("menu", "menu-items", "categories")
+
+# Liveness/readiness probe for Fly.io health checks.
+# Intentionally performs NO database I/O so the app stays "healthy" from the
+# load-balancer's perspective even when MongoDB is degraded. The rest of the
+# routes will still return their own errors. Used by fly.toml [[http_service.checks]].
+@api_router.get("/health")
+async def health():
+    return {"ok": True}
 JWT_ALGORITHM = "HS256"
 # Cross-domain deploys (e.g. Vercel frontend + Fly.io backend) need samesite=none + secure=true.
 # Defaults preserve existing same-origin behavior (lax / not-secure).
@@ -661,9 +732,21 @@ def _can_edit_menu(user):
     return user.get("role") == "admin" or "menu_edit" in (user.get("permissions") or [])
 
 @api_router.get("/categories")
-async def get_categories():
+async def get_categories(request: Request, response: Response):
+    cached = _cache_get("categories")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(100)
-    return [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color"), "sort_order": c.get("sort_order", 0)} for c in cats]
+    out = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color"), "sort_order": c.get("sort_order", 0)} for c in cats]
+    entry = _cache_set("categories", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.post("/categories")
 async def create_category(cat: CategoryCreate, request: Request):
@@ -671,6 +754,7 @@ async def create_category(cat: CategoryCreate, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     count = await db.categories.count_documents({})
     result = await db.categories.insert_one({"name": cat.name, "color": cat.color, "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat()})
+    _menu_cache_bust_all()
     return {"id": str(result.inserted_id), "name": cat.name, "color": cat.color, "sort_order": count}
 
 @api_router.put("/categories/{cat_id}")
@@ -681,6 +765,7 @@ async def update_category(cat_id: str, cat: CategoryUpdate, request: Request):
     if ud: await db.categories.update_one({"_id": ObjectId(cat_id)}, {"$set": ud})
     updated = await db.categories.find_one({"_id": ObjectId(cat_id)}, {"_id": 0})
     if not updated: raise HTTPException(status_code=404, detail="Not found")
+    _menu_cache_bust_all()
     return {"id": cat_id, "name": updated.get("name"), "color": updated.get("color"), "sort_order": updated.get("sort_order", 0)}
 
 @api_router.delete("/categories/{cat_id}")
@@ -689,6 +774,7 @@ async def delete_category(cat_id: str, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     await db.categories.delete_one({"_id": ObjectId(cat_id)})
     await db.menu_items.delete_many({"category_id": cat_id})
+    _menu_cache_bust_all()
     return {"message": "Deleted"}
 
 @api_router.post("/categories/reorder")
@@ -701,13 +787,22 @@ async def reorder_categories(payload: dict, request: Request):
             await db.categories.update_one({"_id": ObjectId(cid)}, {"$set": {"sort_order": idx}})
         except Exception:
             pass
+    _menu_cache_bust_all()
     return {"message": "Reordered", "count": len(order)}
 
 # --- Menu Items ---
 @api_router.get("/menu-items")
-async def get_menu_items():
+async def get_menu_items(request: Request, response: Response):
+    cached = _cache_get("menu-items")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
-    return [{
+    out = [{
         "id": str(i["_id"]), "name": i["name"], "price": i["price"],
         "price_fp1": i.get("price_fp1"), "price_fp2": i.get("price_fp2"),
         "category_id": i["category_id"], "stock": i.get("stock", 0),
@@ -722,6 +817,10 @@ async def get_menu_items():
         "outsourced_vendor_id": i.get("outsourced_vendor_id"),
         "outsourced_unit_cost": i.get("outsourced_unit_cost"),
     } for i in items]
+    entry = _cache_set("menu-items", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.post("/menu-items")
 async def create_menu_item(item: MenuItemCreate, request: Request):
@@ -729,13 +828,16 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     count = await db.menu_items.count_documents({})
     variations = [v.model_dump() for v in (item.variations or [])]
+    # If the admin uploaded the photo as a base64 data: URL, persist it to disk
+    # immediately so the document keeps only a small URL — never inline bytes.
+    persisted_image_url = _persist_data_url_image(item.image_url or "", kind="menu")
     doc = {
         "name": item.name, "price": item.price, "price_fp1": item.price_fp1, "price_fp2": item.price_fp2,
         "category_id": item.category_id, "stock": item.stock, "low_stock_threshold": item.low_stock_threshold,
         "color": item.color, "variations": variations,
         "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
         "is_bestseller": bool(item.is_bestseller), "is_popular": bool(item.is_popular),
-        "image_url": item.image_url or "", "image_type": item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url"),
+        "image_url": persisted_image_url, "image_type": "url" if persisted_image_url.startswith("/api/uploads/") else (item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url")),
         "description": item.description or "",
         "related_item_ids": list(item.related_item_ids or []),
         "is_outsourced": bool(item.is_outsourced),
@@ -744,6 +846,7 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
         "sort_order": count, "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.menu_items.insert_one(doc)
+    _menu_cache_bust_all()
     return {**{k: v for k, v in doc.items() if k not in ("created_at", "_id")}, "id": str(result.inserted_id)}
 
 @api_router.put("/menu-items/{item_id}")
@@ -751,12 +854,20 @@ async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request)
     user = await get_current_user(request)
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     ud = {k: v for k, v in item.model_dump().items() if v is not None}
+    # If the admin re-uploaded a photo as a base64 data: URL, persist it to disk
+    # before saving, so we never store inline image bytes in MongoDB.
+    if "image_url" in ud and isinstance(ud["image_url"], str) and ud["image_url"].startswith("data:"):
+        new_url = _persist_data_url_image(ud["image_url"], kind="menu")
+        if new_url.startswith("/api/uploads/"):
+            ud["image_url"] = new_url
+            ud["image_type"] = "url"
     # variations should be replaced wholesale, including with empty list — model_dump() drops only None
     if ud: await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": ud})
     updated = await db.menu_items.find_one({"_id": ObjectId(item_id)}, {"_id": 0})
     if not updated: raise HTTPException(status_code=404, detail="Not found")
     updated["id"] = item_id
     updated.setdefault("variations", [])
+    _menu_cache_bust_all()
     return updated
 
 @api_router.delete("/menu-items/{item_id}")
@@ -764,6 +875,7 @@ async def delete_menu_item(item_id: str, request: Request):
     user = await get_current_user(request)
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     await db.menu_items.delete_one({"_id": ObjectId(item_id)})
+    _menu_cache_bust_all()
     return {"message": "Deleted"}
 
 @api_router.post("/menu-items/reorder")
@@ -776,6 +888,7 @@ async def reorder_menu_items(payload: dict, request: Request):
             await db.menu_items.update_one({"_id": ObjectId(iid)}, {"$set": {"sort_order": idx}})
         except Exception:
             pass
+    _menu_cache_bust_all()
     return {"message": "Reordered", "count": len(order)}
 
 # --- Inventory ---
@@ -783,13 +896,14 @@ async def reorder_menu_items(payload: dict, request: Request):
 async def get_inventory(request: Request):
     await get_current_user(request)
     items = await db.menu_items.find({}).to_list(500)
+    # Fix N+1: load ALL categories once and index by id, instead of one
+    # find_one() per menu item (was scaling linearly with menu size).
+    cats = await db.categories.find({}).to_list(500)
+    cat_by_id = {str(c["_id"]): c for c in cats}
     result = []
     for i in items:
-        cat = None
         cid = i.get("category_id")
-        if cid:
-            try: cat = await db.categories.find_one({"_id": ObjectId(cid)})
-            except: cat = None
+        cat = cat_by_id.get(cid) if cid else None
         result.append({"id": str(i["_id"]), "name": i["name"], "price": i["price"], "category_name": cat["name"] if cat else "Uncategorized", "stock": i.get("stock", 0), "low_stock_threshold": i.get("low_stock_threshold", 10), "is_low_stock": i.get("stock", 0) <= i.get("low_stock_threshold", 10)})
     return result
 
@@ -798,6 +912,7 @@ async def update_stock(item_id: str, su: StockUpdate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin": raise HTTPException(status_code=403, detail="Admin only")
     await db.menu_items.update_one({"_id": ObjectId(item_id)}, {"$set": {"stock": su.stock}})
+    _menu_cache_bust_all()
     return {"message": "Stock updated", "stock": su.stock}
 
 # --- Orders ---
@@ -829,6 +944,10 @@ async def create_order(order: OrderCreate, request: Request):
         except Exception:
             pass
     now = datetime.now(timezone.utc)
+    # Stock just changed on the items above — bust the menu cache so the next
+    # /menu or /menu-items call sees the new stock figures instead of stale.
+    if order.items:
+        _menu_cache_bust_all()
     doc = {"items": [{"item_id": oi.item_id, "name": oi.name, "price": oi.price, "original_price": oi.original_price or oi.price, "quantity": oi.quantity} for oi in order.items], "payment_type": order.payment_type, "subtotal": order.subtotal, "tax": order.tax, "total": order.total, "discount_type": order.discount_type, "discount_value": order.discount_value or 0, "discount_amount": order.discount_amount or 0, "cashier_id": user["_id"], "cashier_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
     result = await db.orders.insert_one(doc)
     order_id = str(result.inserted_id)
@@ -2231,6 +2350,18 @@ async def seed_admin():
 
 @app.on_event("startup")
 async def startup():
+    # Non-blocking: schedule heavy DB init so uvicorn binds 0.0.0.0:8080 immediately.
+    # Without this, every `await db.x` below blocks the ASGI lifespan; if Mongo is
+    # slow/unreachable, Fly health checks fail before the socket is ever opened.
+    asyncio.create_task(_startup_background())
+
+async def _startup_background():
+    try:
+        await _do_startup()
+    except Exception as e:
+        logger.exception(f"Background startup failed (server still listening): {e}")
+
+async def _do_startup():
     global scheduler
     await db.users.create_index("email", unique=True)
     # Performance indexes – critical as data grows.
@@ -2240,6 +2371,10 @@ async def startup():
         await db.orders.create_index("payment_type")
         await db.orders.create_index([("created_at", -1)])
         await db.menu_items.create_index([("sort_order", 1), ("created_at", 1)])
+        # `category_id` is used both as a filter in the POS (when a tab is
+        # clicked) and as the join key in /inventory. Cheap to add, big win
+        # once the menu has dozens of items.
+        await db.menu_items.create_index("category_id")
         await db.categories.create_index([("sort_order", 1), ("created_at", 1)])
         await db.expenses.create_index([("date", -1)])
         await db.refunds.create_index([("date", -1)])
@@ -2746,7 +2881,15 @@ async def menu_upsell(req: UpsellRequest):
 
 
 @api_router.get("/menu")
-async def get_public_menu():
+async def get_public_menu(request: Request, response: Response):
+    cached = _cache_get("menu")
+    inm = request.headers.get("if-none-match", "")
+    if cached:
+        if inm and inm == cached["etag"]:
+            return Response(status_code=304, headers={"ETag": cached["etag"], "Cache-Control": "public, max-age=30"})
+        response.headers["ETag"] = cached["etag"]
+        response.headers["Cache-Control"] = "public, max-age=30"
+        return cached["value"]
     cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(200)
     items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
     cat_list = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color")} for c in cats]
@@ -2795,7 +2938,11 @@ async def get_public_menu():
             "is_bestseller": i.get("is_bestseller", False),
             "variations": variations_out,
         })
-    return {"categories": cat_list, "items": item_list}
+    out = {"categories": cat_list, "items": item_list}
+    entry = _cache_set("menu", out)
+    response.headers["ETag"] = entry["etag"]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    return out
 
 @api_router.get("/menu/{item_id}")
 async def get_menu_item(item_id: str):
@@ -4670,7 +4817,14 @@ async def seed_online_data():
 
 @app.on_event("startup")
 async def startup_online_seed():
-    await seed_online_data()
+    # Non-blocking: schedule online seeding so uvicorn binds 0.0.0.0:8080 immediately.
+    asyncio.create_task(_startup_online_seed_background())
+
+async def _startup_online_seed_background():
+    try:
+        await seed_online_data()
+    except Exception as e:
+        logger.exception(f"Online seed failed (server still listening): {e}")
 
 # =============================================================================
 # END CUSTOMER ENDPOINTS
@@ -5191,7 +5345,149 @@ from fastapi.responses import Response
 OBJ_STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 APP_NAME = os.environ.get("APP_NAME", "karachi-naseeb")
 _obj_storage_key = None
-LOCAL_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+LOCAL_UPLOAD_DIR = os.environ.get(
+    "LOCAL_UPLOAD_DIR",
+    # Auto-detect the persistent Fly.io volume mount when present so uploaded files
+    # survive every redeploy. Falls back to a folder next to server.py for local dev.
+    "/app/uploads" if os.path.isdir("/app/uploads") else os.path.join(os.path.dirname(__file__), "uploads"),
+)
+
+# =============================================================================
+# Inline-image migration helpers
+#
+# Historic menu items stored their photo as a base64 `data:` URL inside the
+# `image_url` MongoDB field. With 50+ items × ~120 KB each, every public menu
+# request shipped ~6 MB of JSON which made the menu visibly slow (~60s on
+# cold Cloudflare cache). The helpers below convert those data URLs into real
+# files on the persistent volume and serve them via /api/uploads/* with
+# long-lived Cache-Control. Content-hashed filenames make cache invalidation
+# automatic when the image changes.
+# =============================================================================
+
+import hashlib as _hashlib
+import base64 as _b64lib
+import re as _re_img
+
+_DATA_URL_RE = _re_img.compile(
+    r"^data:(image/(jpeg|jpg|png|webp|gif));base64,(.+)$", _re_img.IGNORECASE | _re_img.DOTALL
+)
+
+
+def _persist_data_url_image(image_url: str, kind: str = "menu") -> str:
+    """If `image_url` is a base64 data: URL, decode it, write it to
+    LOCAL_UPLOAD_DIR/{kind}/<sha16>.<ext>, and return the public URL
+    (/api/uploads/{kind}/<sha16>.<ext>). Otherwise return the input unchanged.
+    Idempotent: same bytes → same path → no extra writes."""
+    if not image_url or not isinstance(image_url, str) or not image_url.startswith("data:"):
+        return image_url or ""
+    m = _DATA_URL_RE.match(image_url)
+    if not m:
+        return image_url  # unrecognised data: shape — leave for manual review
+    ext_raw = m.group(2).lower()
+    b64data = m.group(3)
+    ext = "jpg" if ext_raw == "jpeg" else ext_raw
+    try:
+        binary = _b64lib.b64decode(b64data, validate=False)
+    except Exception as e:
+        logger.warning(f"_persist_data_url_image: base64 decode failed ({e}); keeping data URL")
+        return image_url
+    digest = _hashlib.sha256(binary).hexdigest()[:16]
+    rel_path = f"{kind}/{digest}.{ext}"
+    abs_dir = os.path.abspath(LOCAL_UPLOAD_DIR)
+    abs_target = os.path.join(abs_dir, rel_path)
+    try:
+        os.makedirs(os.path.dirname(abs_target), exist_ok=True)
+        if not os.path.exists(abs_target):
+            with open(abs_target, "wb") as f:
+                f.write(binary)
+    except Exception as e:
+        logger.error(f"_persist_data_url_image: write failed for {rel_path}: {e}")
+        return image_url
+    return f"/api/uploads/{rel_path}"
+
+
+@api_router.get("/uploads/{path:path}")
+async def serve_public_upload(path: str):
+    """Public, unauthenticated read of LOCAL_UPLOAD_DIR contents.
+    Used for menu/category images that were migrated out of inline base64.
+    Browser/CDN cacheable for 1 year because URLs are content-hashed."""
+    abs_dir = os.path.abspath(LOCAL_UPLOAD_DIR)
+    abs_target = os.path.abspath(os.path.join(abs_dir, path))
+    # Block path traversal — abs_target MUST be inside abs_dir.
+    if not (abs_target == abs_dir or abs_target.startswith(abs_dir + os.sep)):
+        raise HTTPException(status_code=404, detail="Not found")
+    if not os.path.isfile(abs_target):
+        raise HTTPException(status_code=404, detail="Not found")
+    ext = abs_target.rsplit(".", 1)[-1].lower() if "." in abs_target else ""
+    ctype = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+        "webp": "image/webp", "gif": "image/gif", "pdf": "application/pdf",
+    }.get(ext, "application/octet-stream")
+    try:
+        with open(abs_target, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        logger.error(f"serve_public_upload: read failed for {path}: {e}")
+        raise HTTPException(status_code=500, detail="Read failed")
+    return Response(
+        content=data,
+        media_type=ctype,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@api_router.post("/admin/migrate-menu-images")
+async def migrate_menu_images(request: Request, limit: int = 1000, dry_run: bool = False):
+    """One-shot migration: every menu_item whose image_url is a base64 data URL
+    gets persisted to LOCAL_UPLOAD_DIR/menu/<sha16>.<ext> and its image_url is
+    rewritten to /api/uploads/menu/<sha16>.<ext>. Idempotent — re-running is
+    safe; already-migrated docs are excluded by the query. Admin only.
+
+    Query params:
+      - limit:   max docs to process this call (default 1000)
+      - dry_run: when true, report changes without writing
+    """
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    migrated, skipped, failed = 0, 0, 0
+    examples: list = []
+    try:
+        cursor = db.menu_items.find({"image_url": {"$regex": "^data:"}}).limit(int(limit))
+        async for doc in cursor:
+            try:
+                new_url = _persist_data_url_image(doc.get("image_url", ""), kind="menu")
+                if isinstance(new_url, str) and new_url.startswith("/api/uploads/"):
+                    if not dry_run:
+                        await db.menu_items.update_one(
+                            {"_id": doc["_id"]},
+                            {"$set": {"image_url": new_url, "image_type": "url"}},
+                        )
+                    migrated += 1
+                    if len(examples) < 5:
+                        examples.append({
+                            "id": str(doc["_id"]),
+                            "name": doc.get("name", ""),
+                            "new_url": new_url,
+                        })
+                else:
+                    skipped += 1
+            except Exception as e:
+                failed += 1
+                logger.exception(f"migrate_menu_images: failed for {doc.get('_id')}: {e}")
+    except Exception as e:
+        logger.exception(f"migrate_menu_images: cursor failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Migration cursor failed: {str(e)[:120]}")
+    return {
+        "migrated": migrated,
+        "skipped": skipped,
+        "failed": failed,
+        "examples": examples,
+        "dry_run": dry_run,
+        "upload_dir": LOCAL_UPLOAD_DIR,
+    }
+
+
 
 def _init_obj_storage():
     global _obj_storage_key
@@ -5298,7 +5594,14 @@ def _get_object(path: str):
 
 @app.on_event("startup")
 async def _startup_storage():
-    _init_obj_storage()
+    # Non-blocking: object-storage probe should never block the listener.
+    asyncio.create_task(_startup_storage_background())
+
+async def _startup_storage_background():
+    try:
+        _init_obj_storage()
+    except Exception as e:
+        logger.exception(f"Object storage init failed (server still listening): {e}")
 
 ALLOWED_UPLOAD_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"}
 ALLOWED_UPLOAD_EXTS = {"jpg", "jpeg", "png", "webp", "pdf"}
@@ -5634,7 +5937,53 @@ async def _ensure_twilio_setting():
 
 @app.on_event("startup")
 async def _startup_twilio_setting():
-    await _ensure_twilio_setting()
+    # Non-blocking: Twilio settings load should never block the listener.
+    asyncio.create_task(_startup_twilio_background())
+
+async def _startup_twilio_background():
+    try:
+        await _ensure_twilio_setting()
+    except Exception as e:
+        logger.exception(f"Twilio settings load failed (server still listening): {e}")
+
+
+@app.on_event("startup")
+async def _startup_menu_image_migration():
+    """Self-healing: any menu_item whose image_url is an inline base64 data URL
+    gets persisted to the volume and rewritten to a short /api/uploads/... URL.
+    Idempotent — items already migrated are excluded by the query. Runs in
+    the background after a small delay so it never blocks Fly's port binding
+    or the first health check."""
+    asyncio.create_task(_auto_migrate_menu_images_background())
+
+async def _auto_migrate_menu_images_background():
+    try:
+        # Brief wait so primary connection is healthy and indexes are warm.
+        await asyncio.sleep(2)
+        migrated = 0
+        skipped = 0
+        failed = 0
+        cursor = db.menu_items.find({"image_url": {"$regex": "^data:"}}).limit(2000)
+        async for doc in cursor:
+            try:
+                new_url = _persist_data_url_image(doc.get("image_url", ""), kind="menu")
+                if isinstance(new_url, str) and new_url.startswith("/api/uploads/"):
+                    await db.menu_items.update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {"image_url": new_url, "image_type": "url"}},
+                    )
+                    migrated += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                failed += 1
+                logger.warning(f"auto-migrate item {doc.get('_id')} failed: {e}")
+        if migrated or failed:
+            logger.info(
+                f"Auto-migrated menu images: migrated={migrated} skipped={skipped} failed={failed}"
+            )
+    except Exception as e:
+        logger.exception(f"Auto-migration of menu images crashed (server still listening): {e}")
 
 # =============================================================================
 # END OBJECT STORAGE / WHATSAPP / TRACKING
@@ -6005,6 +6354,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compression: cuts JSON menu payloads (heavy with base64 images / repetitive
+# text) by 3-5x with zero application-level code change. minimum_size avoids
+# wasting CPU compressing already-small responses.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):

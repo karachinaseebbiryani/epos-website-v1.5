@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { useCart } from "../contexts/CartContext";
 import { Trash2, Plus, Minus, ShoppingBag, ArrowRight, Truck, Sparkles, Diamond, X as XIcon } from "lucide-react";
-import { API } from "../lib/api";
+import { API, resolveImageUrl } from "../lib/api";
 import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
 import { toast } from "sonner";
 
@@ -66,7 +66,7 @@ export default function CartPage() {
                         const key = lineKey(item);
                         return (
                         <div key={key} data-testid={`cart-item-${key}`} className="bg-white border border-neutral-100 rounded-2xl p-4 flex gap-4 items-center shadow-sm">
-                            <img src={item.image_url} alt={item.name} className="w-20 h-20 rounded-xl object-cover bg-neutral-100" />
+                            <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-20 h-20 rounded-xl object-cover bg-neutral-100" />
                             <div className="flex-1 min-w-0">
                                 <h3 className="font-display font-semibold text-brand-ink text-sm md:text-base leading-tight break-words">{item.base_name || item.name}</h3>
                                 {item.variation_name && <p className="text-[11px] text-neutral-500 mt-0.5">Size: {item.variation_name}</p>}

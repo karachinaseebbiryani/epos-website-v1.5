@@ -208,7 +208,7 @@ export default function SettingsPage() {
     try {
       const { data } = await axios.get(`${API}/settings`, { withCredentials: true });
       setSettings(data);
-      setSettingsForm({ tax_rate: String(data.tax_rate || 5), online_tax_rate: String(data.online_tax_rate || 0), foodpanda1_tax_rate: String(data.foodpanda1_tax_rate != null ? data.foodpanda1_tax_rate : (data.online_tax_rate || 0)), foodpanda2_tax_rate: String(data.foodpanda2_tax_rate != null ? data.foodpanda2_tax_rate : (data.online_tax_rate || 0)), currency: data.currency || "Rs", restaurant_name: data.restaurant_name || "", restaurant_address: data.restaurant_address || "", restaurant_phone: data.restaurant_phone || "", restaurant_email: data.restaurant_email || "" });
+      setSettingsForm({ tax_rate: String(data.tax_rate ?? 5), online_tax_rate: String(data.online_tax_rate || 0), foodpanda1_tax_rate: String(data.foodpanda1_tax_rate != null ? data.foodpanda1_tax_rate : (data.online_tax_rate || 0)), foodpanda2_tax_rate: String(data.foodpanda2_tax_rate != null ? data.foodpanda2_tax_rate : (data.online_tax_rate || 0)), currency: data.currency || "Rs", restaurant_name: data.restaurant_name || "", restaurant_address: data.restaurant_address || "", restaurant_phone: data.restaurant_phone || "", restaurant_email: data.restaurant_email || "" });
       setEmailForm({
         smtp_host: data.smtp_host || "smtp.gmail.com",
         smtp_port: String(data.smtp_port || 587),

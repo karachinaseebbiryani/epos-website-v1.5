@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, memo } from "react";
 import axios from "axios";
+import { fetchCached, getCached } from "../../lib/menuCache";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -51,8 +52,13 @@ const PosItemTile = memo(function PosItemTile({ item, currency, categoryColor, o
 });
 
 export default function POSPage() {
-  const [categories, setCategories] = useState([]);
-  const [menuItems, setMenuItems] = useState([]);
+  // Seed state from the shared menu cache so the POS grid renders instantly
+  // when the cashier reopens the page (was previously a 1-3 s blank screen
+  // every time they came back from Inventory / Reports).
+  const _seedCats = getCached("/categories")?.data;
+  const _seedItems = getCached("/menu-items")?.data;
+  const [categories, setCategories] = useState(_seedCats || []);
+  const [menuItems, setMenuItems] = useState(_seedItems || []);
   const [activeCategory, setActiveCategory] = useState("all");
   const [cart, setCart] = useState([]);
   const [orderSuccess, setOrderSuccess] = useState(false);
@@ -75,17 +81,20 @@ export default function POSPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [catRes, itemRes, settingsRes] = await Promise.all([
-        axios.get(`${API}/categories`, { withCredentials: true }),
-        axios.get(`${API}/menu-items`, { withCredentials: true }),
+      // Categories + menu-items go through the shared menu cache so opening
+      // the POS for the second time skips the network entirely (until a menu
+      // edit elsewhere busts the cache).
+      const [cats, items, settingsRes] = await Promise.all([
+        fetchCached("/categories", { allowStale: true }),
+        fetchCached("/menu-items", { allowStale: true }),
         axios.get(`${API}/settings`, { withCredentials: true }),
       ]);
-      setCategories(catRes.data);
-      setMenuItems(itemRes.data);
+      setCategories(cats);
+      setMenuItems(items);
       const s = settingsRes.data;
       setSettings(s);
-      setTaxRate(s.tax_rate || 5);
-      setOnlineTaxRate(s.online_tax_rate || 0);
+      setTaxRate(s.tax_rate ?? 5);
+      setOnlineTaxRate(s.online_tax_rate ?? 0);
       // Per-FoodPanda commission rates; fall back to legacy online_tax_rate
       setFp1TaxRate(s.foodpanda1_tax_rate != null ? s.foodpanda1_tax_rate : (s.online_tax_rate || 0));
       setFp2TaxRate(s.foodpanda2_tax_rate != null ? s.foodpanda2_tax_rate : (s.online_tax_rate || 0));
@@ -199,6 +208,11 @@ export default function POSPage() {
         discount_value: appliedDiscount?.value || 0,
         discount_amount: Math.round(effDiscount * 100) / 100,
       }, { withCredentials: true });
+      // Stock changed on the backend → invalidate the shared menu cache so the
+      // post-order fetchData() below pulls fresh stock numbers.
+      if (typeof window !== "undefined" && typeof window.__knb_menu_cache_bust === "function") {
+        window.__knb_menu_cache_bust();
+      }
       setLastOrder({ ...data, currency });
       setOrderSuccess(true);
       const labels = { cash: "CASH", credit: "CARD", foodpanda1: "FOODPANDA 1", foodpanda2: "FOODPANDA 2" };
@@ -392,6 +406,7 @@ export default function POSPage() {
         open={voiceOpen}
         onClose={setVoiceOpen}
         currency={currency}
+        menuItems={menuItems}
         onConfirm={(items) => {
           // Merge voice-parsed items into cart
           setCart((prev) => {
