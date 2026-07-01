@@ -4,7 +4,7 @@ import { Button } from "../ui/button";
 import { Printer, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import axios from "axios";
-
+import { resolveImageUrl } from "../../lib/api";
 export default function ReceiptModal({ open, onClose, order, settings, currency = "Rs" }) {
   const iframeRef = useRef(null);
   const previewRef = useRef(null); // V2: used to scrape the rendered QR SVGs for print
@@ -17,24 +17,26 @@ export default function ReceiptModal({ open, onClose, order, settings, currency 
       .catch(() => {});
   }, []);
   
+  const [rLogo, setRLogo] = useState(settings?.restaurant_logo || "");
+  useEffect(() => {
+    if (rLogo) return; // already have it (either inline or fetched)
+    // Lazy-load the logo from the small dedicated endpoint
+    const API_BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
+    let cancelled = false;
+    fetch(`${API_BASE}/settings/logo`, { credentials: "include" })
+      .then((r) => r.ok ? r.json() : { restaurant_logo: "" })
+      .then((d) => { if (!cancelled) setRLogo(d.restaurant_logo || ""); })
+      .catch(() => { /* ignore — receipt just prints without logo */ });
+    return () => { cancelled = true; };
+  }, [rLogo]);
+
   if (!order) return null;
   const dt = order.created_at ? new Date(order.created_at) : new Date();
   const rName = settings?.restaurant_name || "KARACHI NASEEB BIRYANI AND MURG PULAO";
   const rAddr = settings?.restaurant_address || "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore";
   const rPhone = settings?.restaurant_phone || "+923004928411";
   const rEmail = settings?.restaurant_email || "";
-  const [rLogo, setRLogo] = React.useState(settings?.restaurant_logo || "");
-  React.useEffect(() => {
-    if (rLogo) return; // already have it (either inline or fetched)
-    // Lazy-load the logo from the small dedicated endpoint
-    const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-    let cancelled = false;
-    fetch(`${API}/settings/logo`, { credentials: "include" })
-      .then((r) => r.ok ? r.json() : { restaurant_logo: "" })
-      .then((d) => { if (!cancelled) setRLogo(d.restaurant_logo || ""); })
-      .catch(() => { /* ignore — receipt just prints without logo */ });
-    return () => { cancelled = true; };
-  }, [rLogo]);
+
   const c = currency;
   const labels = { cash: "CASH", credit: "CARD", foodpanda1: "FOODPANDA 1", foodpanda2: "FOODPANDA 2", cod: "COD", pay_at_restaurant: "PAY AT RESTAURANT", bank_transfer: "BANK TRANSFER", card: "CARD" };
 
@@ -82,7 +84,7 @@ export default function ReceiptModal({ open, onClose, order, settings, currency 
         if (!node) return "";
         const xml = new XMLSerializer().serializeToString(node);
         // strip width/height so we can size deterministically in print CSS
-        return xml.replace(/\swidth="\d+"/, ' width="110"').replace(/\sheight="\d+"/, ' height="110"');
+return xml.replace(/\swidth="\d+"/, ' width="90"').replace(/\sheight="\d+"/, ' height="90"');
       } catch { return ""; }
     };
     const findUsQrXml = serializeQrSvg('[data-print-qr="find-us"]');
@@ -103,8 +105,8 @@ export default function ReceiptModal({ open, onClose, order, settings, currency 
       </div>
     ` : "";
     
-    const html = `<html><head><title>Receipt</title><style>body{font-family:${ff};margin:0;padding:20px;font-size:${baseSize}px;color:#000;max-width:${paperWidth}px;font-weight:${fontWeightAll}}.center{text-align:center}.line{border-top:1px dashed #000;margin:8px 0}.row{display:flex;justify-content:space-between;margin:2px 0;font-size:${baseSize}px}@media print{body{margin:0;padding:10px}@page{margin:5mm}}</style></head><body>
-      <div class="center">${rLogo ? `<img src="${rLogo}" alt="logo" style="max-width:80px;max-height:80px;margin:0 auto 4px;display:block"/>` : ""}<h2 style="margin:4px 0;font-size:${headerSize}px;font-weight:bold">${rName}</h2><p style="margin:2px 0;font-size:${baseSize-2}px">${rAddr}</p><p style="margin:2px 0;font-size:${baseSize-2}px">Tel: ${rPhone}</p>${rEmail ? `<p style="margin:2px 0;font-size:${baseSize-3}px">${rEmail}</p>` : ""}</div><div class="line"></div>
+    const html = `<html><head><title>Receipt</title><style>@page{size:80mm auto;margin:0}html,body{margin:0;padding:0}body{font-family:${ff};padding:3mm;font-size:${baseSize}px;color:#000;width:74mm;font-weight:${fontWeightAll};-webkit-print-color-adjust:exact;print-color-adjust:exact}.center{text-align:center}.line{border-top:1px dashed #000;margin:6px 0}.row{display:flex;justify-content:space-between;margin:2px 0;font-size:${baseSize}px}img,svg{max-width:100%!important;height:auto}@media print{body{padding:2mm;width:76mm}}</style></head><body>
+      <div class="center">${rLogo ? `<img src="${resolveImageUrl(rLogo)}" alt="logo" style="max-width:80px;max-height:80px;margin:0 auto 4px;display:block"/>` : ""}<h2 style="margin:4px 0;font-size:${headerSize}px;font-weight:bold">${rName}</h2><p style="margin:2px 0;font-size:${baseSize-2}px">${rAddr}</p><p style="margin:2px 0;font-size:${baseSize-2}px">Tel: ${rPhone}</p>${rEmail ? `<p style="margin:2px 0;font-size:${baseSize-3}px">${rEmail}</p>` : ""}</div><div class="line"></div>
       <div class="row"><span>Receipt #:</span><span style="font-weight:bold">${order.id?.slice(-6)?.toUpperCase() || "------"}</span></div>
       <div class="row"><span>Date:</span><span>${dt.toLocaleDateString()}</span></div><div class="row"><span>Time:</span><span>${dt.toLocaleTimeString()}</span></div>
       ${isOnline ? "" : `<div class="row"><span>Cashier:</span><span>${order.cashier_name || "N/A"}</span></div>`}
@@ -137,7 +139,7 @@ export default function ReceiptModal({ open, onClose, order, settings, currency 
         <div className="flex-1 min-h-0 overflow-y-auto px-6" data-testid="receipt-scroll-body">
           <div ref={previewRef} className="rounded-lg border border-[#E5E2DC] p-4 bg-white" style={{ fontFamily: ff, fontSize: `${baseSize}px`, fontWeight: fontWeightAll }}>
           <div style={{ textAlign: "center", marginBottom: "8px" }}>
-            {rLogo ? <img src={rLogo} alt="logo" style={{ maxWidth: "80px", maxHeight: "80px", margin: "0 auto 4px", display: "block" }} /> : null}
+            {rLogo ? <img src={resolveImageUrl(rLogo)} alt="logo" style={{ maxWidth: "80px", maxHeight: "80px", margin: "0 auto 4px", display: "block" }} /> : null}
             <h2 style={{ margin: "4px 0", fontSize: `${headerSize}px`, fontWeight: "bold" }}>{rName}</h2>
             <p style={{ margin: "2px 0", fontSize: `${baseSize-2}px` }}>{rAddr}</p>
             <p style={{ margin: "2px 0", fontSize: `${baseSize-2}px` }}>Tel: {rPhone}</p>

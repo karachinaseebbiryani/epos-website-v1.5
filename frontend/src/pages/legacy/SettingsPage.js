@@ -15,8 +15,124 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Users, Pencil, Trash2, Shield, Percent, Save, UserPlus, Store, DollarSign, HardDrive, Download, Mail, Send, Plus, Clock, MessageCircle, QrCode, RefreshCw, PlayCircle, Globe, Copy, ExternalLink, Printer, Type, Image as ImageIcon, UploadCloud, Trash } from "lucide-react";
 import { toast } from "sonner";
 import ReceiptModal from "../../components/legacy/ReceiptModal";
-
+import { resolveImageUrl } from "../../lib/api";
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
+code
+Code
+
+preview
+Preview
+
+Deploy
+Loading...
+$ cd /app/review2 && grep -rn "restaurant_logo" fr...
+Jul 1, 04:13 PM
+
+Hey ali, Quick input needed :
+Agent asked for input
+Answered
+Up
+Jul 1, 04:14 PM
+
+Rollback
+
+
+
+even if i change resturant info it does not update and logo i saved but when i go back to settings again it disappear and all info gone on reciept and printer on full print of reciept it does not cut recipet automatically no menu loading ok
+
+Jul 1, 04:51 PM
+
+Hey ali, Quick input needed :
+Agent asked for input
+Answered
+Up
+Jul 1, 04:51 PM
+
+Rollback
+
+
+
+1.admin pass already changed
+
+i did path b before now settings save fast and now tax saving correctly but other settings changed does not saved . logo does not save and not coming on recipet
+reciept not fully printing and does not cut automatically
+Jul 1, 04:59 PM
+
+Great progress. Let me look at the exact areas causing #2 and #3 before giving you fixes.
+
+Viewed
+/app/review2/frontend/src/pages/legacy/SettingsPage.js
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/frontend/src/pages/legacy/SettingsPage.js
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/frontend/src/components/legacy/ReceiptModal.js
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/frontend/src/components/legacy/ReceiptModal.js
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/frontend/src/components/legacy/ReceiptModal.js
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/backend/server.py
+Jul 1, 04:59 PM
+
+Viewed
+/app/review2/frontend/src/pages/legacy/SettingsPage.js
+Jul 1, 05:00 PM
+
+Viewed
+/app/review2/frontend/src/pages/legacy/SettingsPage.js
+Jul 1, 05:00 PM
+
+Hey ali, Quick input needed :
+Agent will continue working after your reply
+Diagnosed all three. Let me give you exact fixes for each.
+
+🔍 Issue 1 — "Restaurant info doesn't save"
+Both the tax button AND the restaurant info button call the same function (saveSettings, line 295) which sends both tax + restaurant fields in one API call. So if tax saves, restaurant info physically is being saved to the DB. What you're seeing is probably one of these:
+
+Please verify with two 30-second checks:
+Check A — Confirm the save actually reaches the DB:
+
+Open Settings → Restaurant Info tab
+Change restaurant name to something obvious, e.g. TEST 123
+Open DevTools (F12) → Network tab → clear
+Click Save
+In Network tab, click the PUT /api/settings request → Payload tab → screenshot / tell me what fields are in the body. It MUST include "restaurant_name":"TEST 123".
+Also tell me its Response status (200 OK?).
+Then in Network tab, find the GET /api/settings (fires right after save) → click Preview/Response → find restaurant_name. Does it show TEST 123?
+If Payload has TEST 123 and Response has TEST 123 → data is 100% saved. UI issue only. If Payload has empty string → frontend bug. If Response has empty string but Payload had TEST 123 → backend not persisting.
+
+Check B — Rule out browser cache:
+
+After saving, close the browser tab fully.
+Open a new incognito window → log in → go to Settings. Is TEST 123 there?
+If YES in incognito but NO in normal tab → your browser is caching the old settings response. Hard-reload (Ctrl+Shift+R) clears it.
+Send me the results of Check A and I'll pinpoint the fix. Do NOT change any code for this yet — I need to see the network trace first, otherwise we'll be guessing.
+
+🖼️ Issue 2 — Logo doesn't save + doesn't show on receipt
+This one I can explain fully. My earlier Path B backend fix does two things:
+
+Migrates the giant base64 logo into a tiny file URL (/api/uploads/logo/xxx.jpg)
+Strips restaurant_logo out of the /api/settings response (that's why /settings is now fast)
+But your frontend BrandingCard and ReceiptModal still read settings.restaurant_logo — which is now always empty because Path B strips it. The logo IS in your database, but the frontend can't see it because it's looking at the wrong field.
+
+Fix: load the logo from the new small endpoint /api/settings/logo and use resolveImageUrl() to make it absolute for Vercel.
+
+File 1 — frontend/src/pages/legacy/SettingsPage.js
+Add this import at the top with the other imports (after line 17):
+
+import { resolveImageUrl } from "../../lib/api";
+Then find lines 21–26:
 
 function BrandingCard({ currentLogo, onSaved }) {
   const [preview, setPreview] = useState(currentLogo || "");
@@ -24,6 +140,26 @@ function BrandingCard({ currentLogo, onSaved }) {
   const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => { setPreview(currentLogo || ""); }, [currentLogo]);
+Replace with:
+
+function BrandingCard({ currentLogo, onSaved }) {
+  const [preview, setPreview] = useState(currentLogo || "");
+  const [saving, setSaving] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  useEffect(() => { setPreview(currentLogo || ""); }, [currentLogo]);
+
+  // Path B backend strips restaurant_logo from /api/settings response.
+  // Load the current saved logo from the small dedicated endpoint so the
+  // preview shows what's actually saved in the DB.
+  useEffect(() => {
+    if (currentLogo) return;
+    let cancelled = false;
+    axios.get(`${API}/settings/logo`, { withCredentials: true })
+      .then(({ data }) => { if (!cancelled) setPreview(data.restaurant_logo || ""); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentLogo]);
 
   const readFile = (file) => new Promise((resolve, reject) => {
     if (!file) return reject(new Error("No file"));
@@ -85,7 +221,7 @@ function BrandingCard({ currentLogo, onSaved }) {
           data-testid="logo-dropzone"
         >
           {preview ? (
-            <img src={preview} alt="Logo preview" style={{ maxWidth: "140px", maxHeight: "140px" }} data-testid="logo-preview" />
+            <img src={resolveImageUrl(preview)} alt="Logo preview" style={{ maxWidth: "140px", maxHeight: "140px" }} data-testid="logo-preview" />
           ) : (
             <>
               <UploadCloud className="w-10 h-10 mb-2 opacity-40" />
