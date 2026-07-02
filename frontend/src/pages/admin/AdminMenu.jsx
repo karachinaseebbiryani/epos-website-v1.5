@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api, { formatApiError, resolveImageUrl } from "../../lib/api";
-import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award } from "lucide-react";
+import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award, Download, FileSpreadsheet, Loader2, Search } from "lucide-react";
 import { toast } from "sonner";
 import {
     DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors,
@@ -22,13 +22,72 @@ export default function AdminMenu() {
     const [data, setData] = useState({ categories: [], items: [] });
     const [editing, setEditing] = useState(null);
     const [form, setForm] = useState(EMPTY_FORM);
+    const [importing, setImporting] = useState(false);
+    // Category tabs + search, mirroring the POS. Lets staff jump to one category or
+    // find an item by name instead of scrolling the whole grid.
+    const [activeCategory, setActiveCategory] = useState("all");
+    const [search, setSearch] = useState("");
     const fileRef = useRef(null);
+    const importRef = useRef(null);
+
+    // Filtered view for display. Reorder still operates on the full data.items list,
+    // so we only allow dragging when no filter/search is narrowing the grid (below).
+    const isFiltering = activeCategory !== "all" || search.trim() !== "";
+    const q = search.trim().toLowerCase();
+    const filteredItems = data.items.filter((i) => {
+        if (activeCategory !== "all" && i.category_id !== activeCategory) return false;
+        if (q && !(`${i.name || ""} ${i.description || ""}`.toLowerCase().includes(q))) return false;
+        return true;
+    });
 
     const load = async () => {
         const { data } = await api.get("/menu");
         setData(data);
     };
     useEffect(() => { load(); }, []);
+
+    // Bulk menu setup via spreadsheet — download the .xlsx template, fill it, re-upload.
+    // Import upserts by item name and auto-creates any new categories server-side.
+    const downloadTemplate = async () => {
+        try {
+            const res = await api.get("/menu-items/template", { responseType: "blob" });
+            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "menu_template.xlsx";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail) || "Could not download template");
+        }
+    };
+
+    const onImportFile = async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = ""; // allow re-selecting the same file
+        if (!file) return;
+        setImporting(true);
+        try {
+            const fd = new FormData();
+            fd.append("file", file);
+            const { data: res } = await api.post("/menu-items/import", fd, { headers: { "Content-Type": "multipart/form-data" } });
+            const parts = [];
+            if (res.created) parts.push(`${res.created} added`);
+            if (res.updated) parts.push(`${res.updated} updated`);
+            if (res.categories_created) parts.push(`${res.categories_created} new categor${res.categories_created > 1 ? "ies" : "y"}`);
+            toast.success(parts.length ? `Import done: ${parts.join(", ")}` : "Import finished — no changes");
+            if (res.error_count > 0) {
+                toast.error(`${res.error_count} row(s) skipped. First: row ${res.errors[0]?.row} — ${res.errors[0]?.message}`);
+            }
+            await load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail) || "Import failed");
+        } finally {
+            setImporting(false);
+        }
+    };
 
     const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
 
@@ -149,19 +208,76 @@ export default function AdminMenu() {
             <div className="flex items-end justify-between flex-wrap gap-3 mb-6">
                 <div>
                     <h1 className="font-display font-black text-3xl md:text-4xl text-brand-ink">Menu Management</h1>
-                    <p className="text-neutral-500 mt-1">{data.items.length} items in {data.categories.length} categories · drag <GripVertical className="inline w-3.5 h-3.5" /> to reorder</p>
+                    <p className="text-neutral-500 mt-1">
+                        {isFiltering
+                            ? `Showing ${filteredItems.length} of ${data.items.length} items`
+                            : <>{data.items.length} items in {data.categories.length} categories · drag <GripVertical className="inline w-3.5 h-3.5" /> to reorder</>}
+                    </p>
                 </div>
-                <button onClick={openCreate} data-testid="menu-add-button"
-                    className="inline-flex items-center gap-2 bg-brand-red text-white rounded-full px-5 py-2.5 font-semibold text-sm hover:bg-brand-red-dark transition-colors">
-                    <Plus className="w-4 h-4" /> Add Item
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                    {/* Bulk import: download the template, fill it in Excel, upload it back.
+                        Lets a new restaurant build its whole menu without adding items one by one. */}
+                    <button onClick={downloadTemplate} data-testid="menu-download-template"
+                        className="inline-flex items-center gap-2 bg-white border border-neutral-200 text-brand-ink rounded-full px-4 py-2.5 font-semibold text-sm hover:bg-neutral-50 transition-colors">
+                        <Download className="w-4 h-4" /> Template
+                    </button>
+                    <button onClick={() => importRef.current?.click()} disabled={importing} data-testid="menu-import-button"
+                        className="inline-flex items-center gap-2 bg-emerald-600 text-white rounded-full px-4 py-2.5 font-semibold text-sm hover:bg-emerald-700 transition-colors disabled:opacity-60">
+                        {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4" />}
+                        {importing ? "Importing…" : "Import Excel"}
+                    </button>
+                    <input ref={importRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={onImportFile} data-testid="menu-import-input" />
+                    <button onClick={openCreate} data-testid="menu-add-button"
+                        className="inline-flex items-center gap-2 bg-brand-red text-white rounded-full px-5 py-2.5 font-semibold text-sm hover:bg-brand-red-dark transition-colors">
+                        <Plus className="w-4 h-4" /> Add Item
+                    </button>
+                </div>
             </div>
 
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-                <SortableContext items={data.items.map((i) => i.id)} strategy={rectSortingStrategy}>
+            {/* Filter bar: search box + category tabs (POS-style). */}
+            <div className="mb-5 space-y-3">
+                <div className="relative max-w-sm">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" />
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Search items by name…"
+                        data-testid="menu-search-input"
+                        className="w-full pl-9 pr-9 py-2.5 rounded-full border border-neutral-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-red/30 focus:border-brand-red"
+                    />
+                    {search && (
+                        <button onClick={() => setSearch("")} data-testid="menu-search-clear"
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700">
+                            <X className="w-4 h-4" />
+                        </button>
+                    )}
+                </div>
+                <div className="flex flex-wrap gap-2" data-testid="menu-category-tabs">
+                    <button data-testid="menu-category-tab-all" onClick={() => setActiveCategory("all")}
+                        className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-colors ${activeCategory === "all" ? "bg-brand-red text-white" : "bg-white border border-neutral-200 text-brand-ink hover:bg-neutral-50"}`}>
+                        All Items
+                    </button>
+                    {data.categories.map((cat) => (
+                        <button key={cat.id} data-testid={`menu-category-tab-${cat.id}`} onClick={() => setActiveCategory(cat.id)}
+                            className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-colors ${activeCategory === cat.id ? "bg-brand-red text-white" : "bg-white border border-neutral-200 text-brand-ink hover:bg-neutral-50"}`}>
+                            {cat.name}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {filteredItems.length === 0 ? (
+                <div className="bg-white border border-neutral-200 rounded-2xl p-10 text-center text-neutral-500" data-testid="menu-empty">
+                    No items match {search ? `"${search}"` : "this category"}.
+                </div>
+            ) : isFiltering ? (
+                // Reordering only makes sense on the full list, so drag is disabled while filtering.
+                <div>
+                    <p className="text-xs text-neutral-400 mb-3">Clear filters to drag and reorder items.</p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {data.items.map((item) => (
-                            <SortableMenuItem
+                        {filteredItems.map((item) => (
+                            <MenuItemCard
                                 key={item.id} item={item}
                                 category={data.categories.find((c) => c.id === item.category_id)}
                                 onEdit={() => openEdit(item)}
@@ -169,8 +285,23 @@ export default function AdminMenu() {
                             />
                         ))}
                     </div>
-                </SortableContext>
-            </DndContext>
+                </div>
+            ) : (
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+                    <SortableContext items={data.items.map((i) => i.id)} strategy={rectSortingStrategy}>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {data.items.map((item) => (
+                                <SortableMenuItem
+                                    key={item.id} item={item}
+                                    category={data.categories.find((c) => c.id === item.category_id)}
+                                    onEdit={() => openEdit(item)}
+                                    onDelete={() => remove(item.id)}
+                                />
+                            ))}
+                        </div>
+                    </SortableContext>
+                </DndContext>
+            )}
 
             {editing && (
                 <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setEditing(null)}>
@@ -327,19 +458,30 @@ export default function AdminMenu() {
     );
 }
 
+// Draggable wrapper — sets up the sortable node and hands the drag handle to the
+// shared card. Used only in the unfiltered view where reordering is meaningful.
 function SortableMenuItem({ item, category, onEdit, onDelete }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
     const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 10 : 1 };
+    const dragHandle = (
+        <button {...attributes} {...listeners} aria-label="Drag to reorder" data-testid={`admin-menu-drag-${item.id}`}
+            className="absolute top-2 left-2 z-10 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm hover:bg-white text-neutral-700 inline-flex items-center justify-center cursor-grab active:cursor-grabbing shadow-sm">
+            <GripVertical className="w-4 h-4" />
+        </button>
+    );
+    return <MenuItemCard item={item} category={category} onEdit={onEdit} onDelete={onDelete} innerRef={setNodeRef} style={style} dragHandle={dragHandle} />;
+}
+
+// Presentational menu card. `dragHandle` is optional so the same markup serves both
+// the draggable grid and the filtered/search grid (which has no drag).
+function MenuItemCard({ item, category, onEdit, onDelete, innerRef, style, dragHandle = null }) {
     const variations = Array.isArray(item.variations) ? item.variations : [];
     const hasDiscount = item.original_price && item.original_price > item.price;
     return (
-        <div ref={setNodeRef} style={style} data-testid={`admin-menu-item-${item.id}`}
+        <div ref={innerRef} style={style} data-testid={`admin-menu-item-${item.id}`}
             className="bg-white border border-neutral-200 rounded-2xl overflow-hidden flex flex-col">
             <div className="aspect-[4/3] bg-neutral-100 overflow-hidden relative">
-                <button {...attributes} {...listeners} aria-label="Drag to reorder" data-testid={`admin-menu-drag-${item.id}`}
-                    className="absolute top-2 left-2 z-10 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm hover:bg-white text-neutral-700 inline-flex items-center justify-center cursor-grab active:cursor-grabbing shadow-sm">
-                    <GripVertical className="w-4 h-4" />
-                </button>
+                {dragHandle}
                 {item.image_url && item.image_url.trim() && <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-full h-full object-cover" />}
                 <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
                     {item.is_bestseller && <span className="bg-brand-red text-white text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Bestseller</span>}

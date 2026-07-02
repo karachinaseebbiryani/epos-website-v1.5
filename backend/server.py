@@ -912,6 +912,223 @@ async def reorder_menu_items(payload: dict, request: Request):
     _menu_cache_bust_all()
     return {"message": "Reordered", "count": len(order)}
 
+# --- Menu bulk import / export (Excel / CSV) ---
+# Lets a restaurant set up its whole menu from a spreadsheet instead of adding items
+# one-by-one. Download the .xlsx template, fill it in, upload it back. Import upserts by
+# item name (case-insensitive) and auto-creates any categories it hasn't seen before.
+MENU_IMPORT_HEADERS = ["name", "category", "price", "description", "variations",
+                       "discount_type", "discount_value", "stock", "is_popular", "is_bestseller"]
+
+def _parse_bool_cell(v) -> bool:
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "yes", "y", "true", "t", "on")
+
+def _parse_variations_cell(v):
+    """Parse a variations cell like 'Half=250; Full=450' into [{name, price}, ...].
+    Accepts ';', ',' or newline separators and '=' or ':' between name and price.
+    Malformed pairs are skipped rather than failing the whole row."""
+    import re as _re_var
+    out = []
+    if v is None:
+        return out
+    text = str(v).strip()
+    if not text:
+        return out
+    for part in _re_var.split(r"[;\n,]", text):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            name, _, price = part.partition("=")
+        elif ":" in part:
+            name, _, price = part.partition(":")
+        else:
+            continue
+        name = name.strip()
+        try:
+            price_f = float(str(price).strip())
+        except (TypeError, ValueError):
+            continue
+        if name:
+            out.append({"name": name, "price": price_f})
+    return out
+
+@api_router.get("/menu-items/template")
+async def download_menu_template(request: Request):
+    user = await get_current_user(request)
+    if not _can_edit_menu(user):
+        raise HTTPException(status_code=403, detail="Menu edit permission required")
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Menu"
+    header_fill = PatternFill(start_color="1E3F20", end_color="1E3F20", fill_type="solid")
+    for col, h in enumerate(MENU_IMPORT_HEADERS, start=1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = header_fill
+    # Two example rows so staff can see the expected format (delete before importing).
+    for r in [
+        ["Chicken Biryani", "Biryani", 400, "Our signature dish", "Half=250; Full=450", "percentage", 10, 100, "yes", "yes"],
+        ["Mineral Water 500ml", "Drinks", 80, "", "", "", "", 200, "no", "no"],
+    ]:
+        ws.append(r)
+    for i, w in enumerate([22, 16, 8, 30, 24, 14, 14, 8, 12, 14], start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    notes = wb.create_sheet("Instructions")
+    for i, line in enumerate([
+        "How to use this template",
+        "1. Fill one row per menu item on the 'Menu' sheet.",
+        "2. Required columns: name, category, price. The rest are optional.",
+        "3. category: just type the category name — new categories are created automatically.",
+        "4. variations: optional sizes. Format 'Half=250; Full=450'. Leave blank for none.",
+        "5. discount_type: 'percentage' or 'fixed' (or blank). discount_value: the number.",
+        "6. is_popular / is_bestseller: type yes or no.",
+        "7. Delete the two example rows before importing your own menu.",
+        "8. Save the file, then upload it with 'Import Excel' on the Menu page.",
+        "Note: importing updates any item whose name already exists, and adds the rest.",
+    ], start=1):
+        notes.cell(row=i, column=1, value=line)
+    notes.column_dimensions["A"].width = 95
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="menu_template.xlsx"'},
+    )
+
+@api_router.post("/menu-items/import")
+async def import_menu_items(request: Request, file: UploadFile = File(...)):
+    import re as _re_imp
+    user = await get_current_user(request)
+    if not _can_edit_menu(user):
+        raise HTTPException(status_code=403, detail="Menu edit permission required")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    fname = (file.filename or "").lower()
+
+    rows = []  # list of {header: value}
+    if fname.endswith(".csv"):
+        import csv as _csv
+        text = raw.decode("utf-8-sig", errors="replace")
+        for r in _csv.DictReader(io.StringIO(text)):
+            rows.append({(k or "").strip().lower(): v for k, v in r.items()})
+    else:
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not read the file. Please upload the .xlsx template or a .csv file.")
+        ws = wb["Menu"] if "Menu" in wb.sheetnames else wb.active
+        header = None
+        for row in ws.iter_rows(values_only=True):
+            if header is None:
+                header = [str(c).strip().lower() if c is not None else "" for c in row]
+                continue
+            if row is None or all(c is None for c in row):
+                continue
+            rec = {}
+            for i, c in enumerate(row):
+                if i < len(header) and header[i]:
+                    rec[header[i]] = c
+            rows.append(rec)
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="No data rows found. Fill in the template and try again.")
+    if len(rows) > 1000:
+        raise HTTPException(status_code=400, detail="Too many rows (max 1000 per import).")
+
+    cats = await db.categories.find({}).to_list(500)
+    cat_by_name = {str(c.get("name", "")).strip().lower(): str(c["_id"]) for c in cats}
+    cat_count = await db.categories.count_documents({})
+
+    created = updated = cats_created = 0
+    errors = []
+
+    for idx, rec in enumerate(rows, start=2):  # row 2 = first data row (row 1 is the header)
+        try:
+            name = str(rec.get("name", "") or "").strip()
+            cat_name = str(rec.get("category", "") or "").strip()
+            if not name:
+                errors.append({"row": idx, "message": "Missing name"}); continue
+            if not cat_name:
+                errors.append({"row": idx, "message": f"'{name}': missing category"}); continue
+            try:
+                price = float(rec.get("price"))
+            except (TypeError, ValueError):
+                errors.append({"row": idx, "message": f"'{name}': invalid or missing price"}); continue
+            if price < 0:
+                errors.append({"row": idx, "message": f"'{name}': price cannot be negative"}); continue
+
+            key = cat_name.lower()
+            cat_id = cat_by_name.get(key)
+            if not cat_id:
+                res = await db.categories.insert_one({"name": cat_name, "color": None, "sort_order": cat_count,
+                                                      "created_at": datetime.now(timezone.utc).isoformat()})
+                cat_id = str(res.inserted_id)
+                cat_by_name[key] = cat_id
+                cat_count += 1
+                cats_created += 1
+
+            d_type = str(rec.get("discount_type", "") or "").strip().lower() or None
+            if d_type not in ("percentage", "fixed"):
+                d_type = None
+            try:
+                d_val = float(rec.get("discount_value") or 0)
+            except (TypeError, ValueError):
+                d_val = 0.0
+            try:
+                stock = int(float(rec.get("stock"))) if rec.get("stock") not in (None, "") else 100
+            except (TypeError, ValueError):
+                stock = 100
+
+            fields = {
+                "name": name,
+                "price": price,
+                "category_id": cat_id,
+                "description": str(rec.get("description", "") or "").strip(),
+                "variations": _parse_variations_cell(rec.get("variations")),
+                "discount_type": d_type,
+                "discount_value": d_val,
+                "stock": stock,
+                "is_popular": _parse_bool_cell(rec.get("is_popular")),
+                "is_bestseller": _parse_bool_cell(rec.get("is_bestseller")),
+            }
+
+            existing = await db.menu_items.find_one({"name": {"$regex": f"^{_re_imp.escape(name)}$", "$options": "i"}})
+            if existing:
+                await db.menu_items.update_one({"_id": existing["_id"]}, {"$set": fields})
+                updated += 1
+            else:
+                sort_order = await db.menu_items.count_documents({})
+                await db.menu_items.insert_one({
+                    **fields,
+                    "price_fp1": None, "price_fp2": None,
+                    "low_stock_threshold": 10, "color": None,
+                    "image_url": "", "image_type": "url",
+                    "related_item_ids": [], "is_outsourced": False,
+                    "outsourced_vendor_id": None, "outsourced_unit_cost": None,
+                    "sort_order": sort_order, "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                created += 1
+        except Exception as e:
+            errors.append({"row": idx, "message": f"Unexpected error ({type(e).__name__})"})
+
+    _menu_cache_bust_all()
+    return {
+        "created": created,
+        "updated": updated,
+        "categories_created": cats_created,
+        "total_rows": len(rows),
+        "error_count": len(errors),
+        "errors": errors[:50],
+    }
+
 # --- Inventory ---
 @api_router.get("/inventory")
 async def get_inventory(request: Request):

@@ -505,6 +505,20 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     </button>
                 )}
 
+                {/* Cancel an already-accepted / in-flight order. Missing before, so once an
+                    order left "pending" there was no way to stop it. Guarded by a confirm so
+                    it isn't a one-tap mistake; backend accepts "cancelled" on the status route. */}
+                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "cancelled" && (
+                    <button
+                        onClick={() => { if (window.confirm("Cancel this order? The customer will be notified.")) onUpdateStatus("cancelled"); }}
+                        disabled={busyId === o.id}
+                        data-testid={`order-cancel-${o.id}`}
+                        className="inline-flex items-center gap-2 bg-white border border-red-300 text-red-700 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider hover:bg-red-50 transition-colors disabled:opacity-60"
+                    >
+                        <XCircle className="w-4 h-4" /> Cancel Order
+                    </button>
+                )}
+
                 {/* Rider handoff — once the order is "out for delivery" we have a rider_token.
                     This copies a WhatsApp-ready link the manager can text to the rider. The
                     rider opens it on their phone and gets a single-screen delivery view
