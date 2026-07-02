@@ -2991,6 +2991,24 @@ def _serialize_online_order(o: dict) -> dict:
     o["receipt_no"] = o["id"][-6:].upper()
     return o
 
+def _discounted_price(base, d_type, d_val) -> float:
+    """Apply an item-level admin discount to a base price.
+
+    MUST mirror the sale-price logic in GET /menu (percentage / fixed) so the price a
+    customer sees on the menu is exactly the price charged at checkout. Returns the
+    rounded sale price and never goes negative. Falls back to the base price on bad input.
+    """
+    try:
+        base = float(base or 0)
+        d_val = float(d_val or 0)
+    except (TypeError, ValueError):
+        return round(float(base or 0), 2)
+    if d_type == "percentage" and d_val > 0:
+        return round(max(0, base * (1 - d_val / 100.0)), 2)
+    if d_type == "fixed" and d_val > 0:
+        return round(max(0, base - d_val), 2)
+    return round(base, 2)
+
 @api_router.post("/online-orders")
 async def create_online_order(order: OnlineOrderCreate, request: Request):
     cust = await get_optional_customer(request)
@@ -3047,6 +3065,11 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         # against the item's server-side variation list so BOTH the price and the
         # display name come from the DB — never trust the client's price. This keeps
         # the anti-manipulation guarantee while preserving the chosen variation.
+        # Item-level admin discount (percentage / fixed). Applied the SAME way GET /menu
+        # applies it, so the discounted price the customer saw on the menu is exactly what
+        # they're charged here — for both the base item and its variations.
+        d_type = db_item.get("discount_type")
+        d_val = db_item.get("discount_value", 0)
         base_name = db_item.get("name", "")
         line_name = base_name
         variation_name = (getattr(line, "variation_name", None) or "").strip() or None
@@ -3057,10 +3080,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                 raise HTTPException(status_code=400, detail=f"'{variation_name}' is not a valid option for {base_name}.")
             # Normalise to the DB's exact casing/spelling for the stored name.
             variation_name = str(match.get("name", "")).strip()
-            server_price = float(match.get("price", 0))
+            server_price = _discounted_price(match.get("price", 0), d_type, d_val)
             line_name = f"{base_name} ({variation_name})"
         else:
-            server_price = float(db_item.get("price", 0))
+            server_price = _discounted_price(db_item.get("price", 0), d_type, d_val)
         if server_price < 0:
             logger.error(f"Negative price on menu_items {db_item['_id']}: {server_price}")
             raise HTTPException(status_code=500, detail="Pricing error — please contact support.")
