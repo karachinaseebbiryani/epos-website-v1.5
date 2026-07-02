@@ -298,7 +298,7 @@ export default function CheckoutPage() {
             const rewardId = selectedReward ? JSON.parse(selectedReward).id : null;
             
             const { data: order } = await api.post("/online-orders", {
-                items: items.map((i) => ({ item_id: i.item_id, name: i.name, price: i.price, quantity: i.quantity })),
+                items: items.map((i) => ({ item_id: i.item_id, name: i.name, variation_name: i.variation_name || null, price: i.price, quantity: i.quantity })),
                 total_price: subtotal,
                 customer_name: form.customer_name,
                 phone: form.phone,

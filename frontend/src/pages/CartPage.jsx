@@ -68,8 +68,7 @@ export default function CartPage() {
                         <div key={key} data-testid={`cart-item-${key}`} className="bg-white border border-neutral-100 rounded-2xl p-4 flex gap-4 items-center shadow-sm">
                             <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-20 h-20 rounded-xl object-cover bg-neutral-100" />
                             <div className="flex-1 min-w-0">
-                                <h3 className="font-display font-semibold text-brand-ink text-sm md:text-base leading-tight break-words">{item.base_name || item.name}</h3>
-                                {item.variation_name && <p className="text-[11px] text-neutral-500 mt-0.5">Size: {item.variation_name}</p>}
+                                <h3 className="font-display font-semibold text-brand-ink text-sm md:text-base leading-tight break-words">{item.name}</h3>
                                 <p className="text-brand-red font-bold mt-1 text-sm">Rs. {item.price}</p>
                             </div>
                             <div className="flex items-center gap-1.5 bg-neutral-100 rounded-full p-1">

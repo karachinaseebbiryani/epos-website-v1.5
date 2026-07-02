@@ -2503,6 +2503,7 @@ class OnlineOrderItem(BaseModel):
     name: str
     price: float
     quantity: int
+    variation_name: Optional[str] = None  # e.g. "Half" / "Full" when the item has size variations
 
 class OnlineOrderCreate(BaseModel):
     items: List[OnlineOrderItem]
@@ -3042,14 +3043,32 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             raise HTTPException(status_code=400, detail=f"'{db_item.get('name', 'Item')}' is no longer available.")
         # Server-side price. Negative DB price = data corruption, not customer's
         # fault — refuse with a 500 so it surfaces in logs / alerts.
-        server_price = float(db_item.get("price", 0))
+        # Variation handling: if the client picked a size (e.g. "Half"), resolve it
+        # against the item's server-side variation list so BOTH the price and the
+        # display name come from the DB — never trust the client's price. This keeps
+        # the anti-manipulation guarantee while preserving the chosen variation.
+        base_name = db_item.get("name", "")
+        line_name = base_name
+        variation_name = (getattr(line, "variation_name", None) or "").strip() or None
+        if variation_name:
+            db_variations = db_item.get("variations") or []
+            match = next((v for v in db_variations if str(v.get("name", "")).strip().lower() == variation_name.lower()), None)
+            if not match:
+                raise HTTPException(status_code=400, detail=f"'{variation_name}' is not a valid option for {base_name}.")
+            # Normalise to the DB's exact casing/spelling for the stored name.
+            variation_name = str(match.get("name", "")).strip()
+            server_price = float(match.get("price", 0))
+            line_name = f"{base_name} ({variation_name})"
+        else:
+            server_price = float(db_item.get("price", 0))
         if server_price < 0:
             logger.error(f"Negative price on menu_items {db_item['_id']}: {server_price}")
             raise HTTPException(status_code=500, detail="Pricing error — please contact support.")
         server_subtotal += server_price * qty
         validated_items.append({
             "item_id": str(db_item["_id"]),
-            "name": db_item.get("name", ""),
+            "name": line_name,
+            "variation_name": variation_name,
             "price": server_price,
             "quantity": qty,
         })
