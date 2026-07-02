@@ -35,32 +35,6 @@ function BrandingCard({ currentLogo, onSaved }) {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [currentLogo]);
-function BrandingCard({ currentLogo, onSaved }) {
-  const [preview, setPreview] = useState(currentLogo || "");
-  const [saving, setSaving] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-
-  useEffect(() => { setPreview(currentLogo || ""); }, [currentLogo]);
-Replace with:
-
-function BrandingCard({ currentLogo, onSaved }) {
-  const [preview, setPreview] = useState(currentLogo || "");
-  const [saving, setSaving] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-
-  useEffect(() => { setPreview(currentLogo || ""); }, [currentLogo]);
-
-  // Path B backend strips restaurant_logo from /api/settings response.
-  // Load the current saved logo from the small dedicated endpoint so the
-  // preview shows what's actually saved in the DB.
-  useEffect(() => {
-    if (currentLogo) return;
-    let cancelled = false;
-    axios.get(`${API}/settings/logo`, { withCredentials: true })
-      .then(({ data }) => { if (!cancelled) setPreview(data.restaurant_logo || ""); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [currentLogo]);
 
   const readFile = (file) => new Promise((resolve, reject) => {
     if (!file) return reject(new Error("No file"));
