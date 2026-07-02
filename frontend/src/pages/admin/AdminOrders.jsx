@@ -282,6 +282,55 @@ export default function AdminOrders() {
     );
 }
 
+// Forward-only status flow, rendered as a row of separate colored buttons instead of a
+// dropdown. Each stage has a FIXED colour so floor staff can be taught the press-sequence
+// ("press the orange one, then the blue one…"). An order can only move to the NEXT stage —
+// past and current stages are locked, so it can never go backwards.
+const STATUS_FLOW = [
+    { key: "accepted",         label: "Accepted",         color: "bg-green-600 hover:bg-green-700",   ring: "ring-green-400" },
+    { key: "preparing",        label: "Preparing",        color: "bg-orange-500 hover:bg-orange-600", ring: "ring-orange-400" },
+    { key: "ready",            label: "Ready",            color: "bg-blue-600 hover:bg-blue-700",     ring: "ring-blue-400" },
+    { key: "out_for_delivery", label: "Out for Delivery", color: "bg-purple-600 hover:bg-purple-700", ring: "ring-purple-400" },
+    { key: "delivered",        label: "Delivered",        color: "bg-teal-600 hover:bg-teal-700",     ring: "ring-teal-400" },
+];
+
+function StatusStepper({ order, onUpdateStatus, busy }) {
+    const currentIndex = STATUS_FLOW.findIndex((s) => s.key === order.status);
+    // Off-flow / terminal (delivered, cancelled, unknown): nothing is pressable.
+    const terminal = currentIndex === -1 || order.status === "delivered";
+    return (
+        <div className="flex flex-wrap items-center gap-2" data-testid={`order-status-stepper-${order.id}`}>
+            {STATUS_FLOW.map((s, i) => {
+                const isNext = !terminal && i === currentIndex + 1;
+                const clickable = isNext && !busy;
+                let cls, showCheck = false;
+                if (currentIndex >= 0 && i < currentIndex) {
+                    cls = `${s.color} text-white opacity-50 cursor-not-allowed`; showCheck = true;   // completed
+                } else if (i === currentIndex) {
+                    cls = `${s.color} text-white ring-2 ring-offset-1 ${s.ring} cursor-not-allowed`; // current — "you are here"
+                } else if (isNext) {
+                    cls = `${s.color} text-white shadow-md ring-2 ring-offset-1 ${s.ring} animate-pulse`; // press this next
+                } else {
+                    cls = "bg-neutral-100 text-neutral-400 cursor-not-allowed"; // future preview
+                }
+                return (
+                    <button
+                        key={s.key}
+                        type="button"
+                        disabled={!clickable}
+                        onClick={() => clickable && onUpdateStatus(s.key)}
+                        data-testid={`order-status-btn-${s.key}-${order.id}`}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-wider transition-all ${cls}`}
+                    >
+                        {showCheck && <CheckCircle2 className="w-3.5 h-3.5" />}
+                        {s.label}
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, onVerifyPayment, onViewScreenshot, onPrint }) {
     const isPending = o.status === "pending";
     const isRejected = o.status === "rejected";
@@ -405,7 +454,14 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
             )}
 
             {/* Action row */}
-            <div className="mt-4 flex flex-wrap gap-2 items-center">
+            <div className="mt-4 space-y-3">
+                {/* Status progress — colored, forward-only stepper (replaces the old status
+                    dropdown). Locked past/current stages + one pressable "next" stage. */}
+                {!isPending && !isRejected && (
+                    <StatusStepper order={o} onUpdateStatus={onUpdateStatus} busy={busyId === o.id} />
+                )}
+
+                <div className="flex flex-wrap gap-2 items-center">
                 {isPending && (
                     <>
                         <button
@@ -433,15 +489,6 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                             <Pencil className="w-4 h-4" /> Modify Order
                         </button>
                     </>
-                )}
-
-                {!isPending && !isRejected && (
-                    <div className={`inline-block rounded-full status-pulse-${o.status}`}>
-                        <select value={o.status} onChange={(e) => onUpdateStatus(e.target.value)} data-testid={`order-status-${o.id}`}
-                            className="bg-neutral-50 border border-neutral-200 rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-wider outline-none focus:border-brand-red">
-                            {STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
-                        </select>
-                    </div>
                 )}
 
                 {/* One-tap "Mark Delivered" — designed for staff who don't want to fiddle with
@@ -507,6 +554,7 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     <Printer className="w-3.5 h-3.5" /> Print Invoice
                 </button>
                 {o.printed && <span className="text-xs text-green-700 bg-green-50 rounded-full px-3 py-1 font-semibold">✓ Printed</span>}
+                </div>
             </div>
 
             {/* V2: live operations (prep time + delivery fee override) for accepted/in-flight orders */}
