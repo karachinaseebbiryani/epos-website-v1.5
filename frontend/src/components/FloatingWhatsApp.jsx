@@ -1,12 +1,16 @@
 import { MessageCircle } from "lucide-react";
 import { useLocation } from "react-router-dom";
+import { useRestaurantInfo } from "../lib/restaurantInfo";
 
 export default function FloatingWhatsApp() {
     const location = useLocation();
+    const info = useRestaurantInfo();
     if (location.pathname.startsWith("/admin")) return null;
 
-    const phone = "923004928411";
-    const text = encodeURIComponent("Hello! I'd like to order from Karachi Naseeb Biryani.");
+    // WhatsApp number from Admin → Settings (falls back to the original hard-coded number).
+    const phone = ((info?.whatsapp || info?.phone) || "923004928411").replace(/[^0-9]/g, "");
+    const name = info?.name || "Karachi Naseeb Biryani";
+    const text = encodeURIComponent(`Hello! I'd like to order from ${name}.`);
     const url = `https://wa.me/${phone}?text=${text}`;
 
     return (

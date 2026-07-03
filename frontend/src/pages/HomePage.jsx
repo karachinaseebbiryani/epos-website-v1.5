@@ -7,8 +7,10 @@ import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react
 import { toast } from "sonner";
 import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 import TrustStrip from "../components/TrustStrip";
+import { useRestaurantInfo } from "../lib/restaurantInfo";
 
 export default function HomePage() {
+    const info = useRestaurantInfo();
     const [menuData, setMenuData] = useState(() => getCached("/menu")?.data || { categories: [], items: [] });
     const [offers, setOffers] = useState([]);
     const [reviews, setReviews] = useState([]);
@@ -70,7 +72,7 @@ export default function HomePage() {
                         <div className="mt-12 flex flex-wrap gap-6 text-white/80 text-sm">
                             <div className="flex items-center gap-2"><Clock className="w-4 h-4 text-brand-yellow" /> <span>30–45 min delivery</span></div>
                             <div className="flex items-center gap-2"><Award className="w-4 h-4 text-brand-yellow" /> <span>15+ years tradition</span></div>
-                            <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-brand-yellow" /> <a href="tel:+923014117048" className="hover:text-white">+92 300 4928411</a></div>
+                            <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-brand-yellow" /> <a href={`tel:${(info?.phone || "+923004928411").replace(/\s/g, "")}`} className="hover:text-white">{info?.phone || "+92 300 4928411"}</a></div>
                         </div>
                     </div>
                 </div>

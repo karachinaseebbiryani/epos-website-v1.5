@@ -19,6 +19,9 @@ const REJECT_REASONS = [
 ];
 
 const POLL_MS = 4000; // 4-second polling per requirement (3-5s)
+// Refetch the full order list only every Nth poll (safety net for edits made elsewhere);
+// new orders still refresh it immediately via latest_id. 5 × 4s ≈ every 20s.
+const LIST_REFRESH_EVERY = 5;
 const ALERT_AUDIO_SRC = "/order-alert.wav";
 
 export default function AdminOrders() {
@@ -35,6 +38,7 @@ export default function AdminOrders() {
     const audioRef = useRef(null);
     const lastPendingIdRef = useRef(null);
     const pendingCountRef = useRef(0);
+    const tickCountRef = useRef(0);
     const [printSettings, setPrintSettings] = useState({});
     const [receiptOpen, setReceiptOpen] = useState(false);
 
@@ -66,20 +70,21 @@ export default function AdminOrders() {
 
     useEffect(() => { setLoading(true); load(); }, [load]);
 
-    // Continuous polling (every 4s) for both order list AND pending count alert.
+    // Continuous polling (every 4s) for the pending-count alert. The pending-count call is
+    // tiny (~165 B); the full order list is not. Re-fetching + re-rendering the whole list
+    // every 4s was the cause of the sluggishness, so we only reload the list when a new order
+    // actually arrives (latest_id changes) or on a periodic safety refresh — this still catches
+    // status changes made on another device without thrashing the UI every tick.
     useEffect(() => {
         const tick = async () => {
             try {
                 const { data } = await api.get("/online-orders/pending-count");
                 const count = data.pending_count || 0;
                 pendingCountRef.current = count;
-                // Trigger refresh whenever the latest pending changes (new order arrived) OR every tick.
-                if (data.latest_id && data.latest_id !== lastPendingIdRef.current) {
-                    lastPendingIdRef.current = data.latest_id;
-                    load();
-                } else {
-                    load();
-                }
+                tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
+                const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
+                if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
+                if (newOrderArrived || tickCountRef.current === 0) load();
                 manageAlertSound(count);
             } catch (e) { /* silent — keep polling */ }
         };

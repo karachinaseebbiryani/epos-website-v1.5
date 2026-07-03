@@ -27,6 +27,10 @@ export default function GlobalOrderAlert() {
   const [audioBlocked, setAudioBlocked] = useState(false);
 
   useEffect(() => {
+    // The orders page runs its own pending-count poller and owns the alert sound there,
+    // so polling here too would just double every pending-count request. Skip it entirely
+    // on /admin/orders (we still render the <audio> element below, just don't poll).
+    if (onOrdersPage) return;
     let cancelled = false;
     const tick = async () => {
       try {

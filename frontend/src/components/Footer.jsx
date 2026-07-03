@@ -1,7 +1,16 @@
 import { Link } from "react-router-dom";
 import { Phone, MapPin, Mail, Instagram, Facebook, Clock, ShieldCheck, Banknote, CreditCard, Wallet, Smartphone } from "lucide-react";
+import { useRestaurantInfo } from "../lib/restaurantInfo";
 
 export default function Footer() {
+    // Live restaurant info from Admin → Settings; hard-coded strings kept as fallbacks.
+    const info = useRestaurantInfo();
+    const phone = info?.phone || "+92 300 4928411";
+    const email = info?.email || "karachinaseebbiryani599@gmail.com";
+    const address = info?.address || "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore";
+    const hours = info?.opening_hours || "Daily · 11:30 AM – 11:30 PM";
+    const instagram = info?.instagram_url || "https://instagram.com";
+    const facebook = info?.facebook_url || "https://facebook.com";
     return (
         <footer className="bg-brand-ink text-white mt-20" data-testid="site-footer">
             <div className="max-w-7xl mx-auto px-4 md:px-8 py-16 grid grid-cols-2 md:grid-cols-5 gap-8 md:gap-10">
@@ -9,8 +18,8 @@ export default function Footer() {
                     <div className="flex items-center gap-3 mb-4">
                         <div className="w-12 h-12 rounded-full bg-brand-red flex items-center justify-center font-display font-black text-xl">K</div>
                         <div>
-                            <div className="font-display font-bold text-lg">Karachi Naseeb</div>
-                            <div className="text-brand-yellow text-sm font-semibold">Biryani &amp; Murg Pulao</div>
+                            <div className="font-display font-bold text-lg leading-tight">{info?.name || "Karachi Naseeb"}</div>
+                            {!info?.name && <div className="text-brand-yellow text-sm font-semibold">Biryani &amp; Murg Pulao</div>}
                         </div>
                     </div>
                     <p className="text-white/60 max-w-md text-sm leading-relaxed mb-4">
@@ -49,28 +58,28 @@ export default function Footer() {
                     <ul className="space-y-3 text-white/70 text-sm">
                         <li className="flex items-start gap-2">
                             <MapPin className="w-4 h-4 mt-0.5 flex-shrink-0 text-brand-red" />
-                            <span>68 Chatri Chowk, Punjab Small Industry, D Block, Lahore</span>
+                            <span>{address}</span>
                         </li>
                         <li>
-                            <a href="tel:+923004928411" data-testid="footer-phone-link" className="flex items-center gap-2 hover:text-white">
-                                <Phone className="w-4 h-4 text-brand-red" /> +92 300 4928411
+                            <a href={`tel:${phone.replace(/\s/g, "")}`} data-testid="footer-phone-link" className="flex items-center gap-2 hover:text-white">
+                                <Phone className="w-4 h-4 text-brand-red" /> {phone}
                             </a>
                         </li>
                         <li>
-                            <a href="mailto:karachinaseebbiryani599@gmail.com" data-testid="footer-email-link" className="flex items-center gap-2 hover:text-white break-all">
-                                <Mail className="w-4 h-4 text-brand-red shrink-0" /> karachinaseebbiryani599@gmail.com
+                            <a href={`mailto:${email}`} data-testid="footer-email-link" className="flex items-center gap-2 hover:text-white break-all">
+                                <Mail className="w-4 h-4 text-brand-red shrink-0" /> {email}
                             </a>
                         </li>
                         <li className="flex items-center gap-2">
-                            <Clock className="w-4 h-4 text-brand-red" /> Daily · 11:30 AM – 11:30 PM
+                            <Clock className="w-4 h-4 text-brand-red" /> {hours}
                         </li>
                     </ul>
 
                     <div className="flex gap-3 mt-5">
-                        <a href="https://instagram.com" target="_blank" rel="noopener noreferrer" data-testid="footer-instagram-link" className="w-10 h-10 rounded-full bg-white/10 hover:bg-brand-red flex items-center justify-center transition-colors" aria-label="Instagram">
+                        <a href={instagram} target="_blank" rel="noopener noreferrer" data-testid="footer-instagram-link" className="w-10 h-10 rounded-full bg-white/10 hover:bg-brand-red flex items-center justify-center transition-colors" aria-label="Instagram">
                             <Instagram className="w-4 h-4" />
                         </a>
-                        <a href="https://facebook.com" target="_blank" rel="noopener noreferrer" data-testid="footer-facebook-link" className="w-10 h-10 rounded-full bg-white/10 hover:bg-brand-red flex items-center justify-center transition-colors" aria-label="Facebook">
+                        <a href={facebook} target="_blank" rel="noopener noreferrer" data-testid="footer-facebook-link" className="w-10 h-10 rounded-full bg-white/10 hover:bg-brand-red flex items-center justify-center transition-colors" aria-label="Facebook">
                             <Facebook className="w-4 h-4" />
                         </a>
                     </div>
@@ -96,7 +105,7 @@ export default function Footer() {
             </div>
 
             <div className="border-t border-white/10 py-5 text-center text-white/40 text-xs">
-                &copy; {new Date().getFullYear()} Karachi Naseeb Biryani &amp; Murg Pulao. All rights reserved.
+                &copy; {new Date().getFullYear()} {info?.name || "Karachi Naseeb Biryani & Murg Pulao"}. All rights reserved.
             </div>
         </footer>
     );
