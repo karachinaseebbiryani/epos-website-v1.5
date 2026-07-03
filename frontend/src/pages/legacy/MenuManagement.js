@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -11,6 +11,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import {
   Plus, Pencil, Trash2, FolderPlus, UtensilsCrossed, Package, GripVertical, Lock, Search, X,
+  Download, Upload, FileSpreadsheet, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import ColorPicker from "../../components/legacy/ColorPicker";
@@ -53,6 +54,8 @@ export default function MenuManagement() {
   const [deleteConfirm, setDeleteConfirm] = useState({ open: false, type: "", id: "", name: "" });
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef(null);
 
   // Sensors: hold-and-drag (smartphone-like) for both mouse & touch.
   const sensors = useSensors(
@@ -75,6 +78,66 @@ export default function MenuManagement() {
   }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // --- Bulk menu import / export (shared with the online-store menu screen) ---
+  // Download the .xlsx template, fill it in Excel, upload to add/update items in bulk;
+  // or export the whole live menu, edit prices/items, and re-import to update at once.
+  const downloadBlob = (data, filename) => {
+    const url = window.URL.createObjectURL(new Blob([data]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const downloadTemplate = async () => {
+    try {
+      const res = await axios.get(`${API}/menu-items/template`, { withCredentials: true, responseType: "blob" });
+      downloadBlob(res.data, "menu_template.xlsx");
+    } catch (err) {
+      toast.error("Could not download template");
+    }
+  };
+
+  const exportMenu = async () => {
+    try {
+      const res = await axios.get(`${API}/menu-items/export`, { withCredentials: true, responseType: "blob" });
+      downloadBlob(res.data, "menu_export.xlsx");
+    } catch (err) {
+      toast.error("Could not export menu");
+    }
+  };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data: res } = await axios.post(`${API}/menu-items/import`, fd, {
+        withCredentials: true,
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const parts = [];
+      if (res.created) parts.push(`${res.created} added`);
+      if (res.updated) parts.push(`${res.updated} updated`);
+      if (res.categories_created) parts.push(`${res.categories_created} new categor${res.categories_created > 1 ? "ies" : "y"}`);
+      toast.success(parts.length ? `Import done: ${parts.join(", ")}` : "Import finished — no changes");
+      if (res.error_count > 0) {
+        toast.error(`${res.error_count} row(s) skipped. First: row ${res.errors[0]?.row} — ${res.errors[0]?.message}`);
+      }
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const saveCategory = async () => {
     if (!catName.trim()) return;
@@ -206,11 +269,33 @@ export default function MenuManagement() {
             {canEdit ? "Click & hold any tile to drag-reorder, like apps on a phone." : "View only — ask an admin for the Edit Menu permission to modify."}
           </p>
         </div>
-        {!canEdit && (
-          <Badge data-testid="readonly-badge" className="text-xs flex items-center gap-1" style={{ background: "#FCECEB", color: "#A63D31", border: "none" }}>
-            <Lock className="w-3 h-3" /> Read-only
-          </Badge>
-        )}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Bulk import / export — same spreadsheet flow as the online-store menu.
+              Export the live menu, edit in Excel, re-import to update everything at once. */}
+          <Button onClick={downloadTemplate} data-testid="menu-download-template" variant="outline"
+            className="flex items-center gap-2 border-[#E5E2DC]">
+            <Download className="w-4 h-4" /> Template
+          </Button>
+          <Button onClick={exportMenu} data-testid="menu-export-button" variant="outline"
+            className="flex items-center gap-2 border-[#E5E2DC]">
+            <FileSpreadsheet className="w-4 h-4" /> Export
+          </Button>
+          {canEdit && (
+            <>
+              <Button onClick={() => importRef.current?.click()} disabled={importing} data-testid="menu-import-button"
+                className="flex items-center gap-2 text-white font-semibold" style={{ background: "#1E3F20" }}>
+                {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                {importing ? "Importing…" : "Import Excel"}
+              </Button>
+              <input ref={importRef} type="file" accept=".xlsx,.csv" className="hidden" onChange={onImportFile} data-testid="menu-import-input" />
+            </>
+          )}
+          {!canEdit && (
+            <Badge data-testid="readonly-badge" className="text-xs flex items-center gap-1" style={{ background: "#FCECEB", color: "#A63D31", border: "none" }}>
+              <Lock className="w-3 h-3" /> Read-only
+            </Badge>
+          )}
+        </div>
       </div>
 
       <Tabs defaultValue="items" className="space-y-4">

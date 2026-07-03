@@ -64,6 +64,24 @@ export default function AdminMenu() {
         }
     };
 
+    // Export the whole live menu as .xlsx (same layout as the template) so it can be
+    // edited in Excel and re-imported to update every item at once.
+    const exportMenu = async () => {
+        try {
+            const res = await api.get("/menu-items/export", { responseType: "blob" });
+            const url = window.URL.createObjectURL(new Blob([res.data]));
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "menu_export.xlsx";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail) || "Could not export menu");
+        }
+    };
+
     const onImportFile = async (e) => {
         const file = e.target.files?.[0];
         e.target.value = ""; // allow re-selecting the same file
@@ -220,6 +238,10 @@ export default function AdminMenu() {
                     <button onClick={downloadTemplate} data-testid="menu-download-template"
                         className="inline-flex items-center gap-2 bg-white border border-neutral-200 text-brand-ink rounded-full px-4 py-2.5 font-semibold text-sm hover:bg-neutral-50 transition-colors">
                         <Download className="w-4 h-4" /> Template
+                    </button>
+                    <button onClick={exportMenu} data-testid="menu-export-button"
+                        className="inline-flex items-center gap-2 bg-white border border-neutral-200 text-brand-ink rounded-full px-4 py-2.5 font-semibold text-sm hover:bg-neutral-50 transition-colors">
+                        <FileSpreadsheet className="w-4 h-4" /> Export
                     </button>
                     <button onClick={() => importRef.current?.click()} disabled={importing} data-testid="menu-import-button"
                         className="inline-flex items-center gap-2 bg-emerald-600 text-white rounded-full px-4 py-2.5 font-semibold text-sm hover:bg-emerald-700 transition-colors disabled:opacity-60">

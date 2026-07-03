@@ -1129,6 +1129,61 @@ async def import_menu_items(request: Request, file: UploadFile = File(...)):
         "errors": errors[:50],
     }
 
+@api_router.get("/menu-items/export")
+async def export_menu_items(request: Request):
+    """Export the whole live menu as an .xlsx in the exact same column layout as the
+    import template, so staff can download it, tweak prices/items in Excel, and upload
+    it back to update everything at once (import upserts by name)."""
+    user = await get_current_user(request)
+    if not _can_edit_menu(user):
+        raise HTTPException(status_code=403, detail="Menu edit permission required")
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    cats = await db.categories.find({}).to_list(500)
+    cat_name_by_id = {str(c["_id"]): str(c.get("name", "")) for c in cats}
+    items = await db.menu_items.find({}).sort("sort_order", 1).to_list(5000)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Menu"
+    header_fill = PatternFill(start_color="1E3F20", end_color="1E3F20", fill_type="solid")
+    for col, h in enumerate(MENU_IMPORT_HEADERS, start=1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = header_fill
+
+    for it in items:
+        variations = it.get("variations") or []
+        var_str = "; ".join(
+            f"{v.get('name')}={v.get('price')}" for v in variations
+            if isinstance(v, dict) and v.get("name") is not None
+        )
+        ws.append([
+            it.get("name", ""),
+            cat_name_by_id.get(str(it.get("category_id", "")), ""),
+            it.get("price", 0),
+            it.get("description", "") or "",
+            var_str,
+            it.get("discount_type") or "",
+            it.get("discount_value") or 0,
+            it.get("stock") if it.get("stock") is not None else 100,
+            "yes" if it.get("is_popular") else "no",
+            "yes" if it.get("is_bestseller") else "no",
+        ])
+
+    for i, w in enumerate([22, 16, 8, 30, 24, 14, 14, 8, 12, 14], start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="menu_export.xlsx"'},
+    )
+
 # --- Inventory ---
 @api_router.get("/inventory")
 async def get_inventory(request: Request):
