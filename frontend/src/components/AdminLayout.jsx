@@ -35,6 +35,7 @@ const ONLINE_NAV = [
   { to: "/admin/events",     label: "Events",        icon: CalendarDays, perm: "online_events" },
   { to: "/admin/reviews",    label: "Reviews",       icon: MessageSquare, perm: "online_settings" },
   { to: "/admin/faqs",       label: "FAQs",          icon: HelpCircle, perm: "online_settings" },
+  { to: "/admin/delivery-areas", label: "Delivery Areas", icon: Truck, perm: "online_settings" },
   { to: "/admin/loyalty-settings", label: "Loyalty Settings", icon: Diamond, perm: "online_settings" },
   { to: "/admin/rewards",    label: "Rewards",       icon: Gift, perm: "online_settings" },
   { to: "/admin/notifications", label: "Notifications", icon: Bell, perm: "online_settings" },

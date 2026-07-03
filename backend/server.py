@@ -2862,6 +2862,25 @@ class FAQReorder(BaseModel):
     ids: list[str]
 
 
+class DeliveryAreaCreate(BaseModel):
+    """Admin-managed list of areas the restaurant delivers to (e.g. "Johar Town").
+    Shown on the public /delivery page and used for local-SEO area coverage.
+    `note` is an optional free-text detail (e.g. "Free delivery" or a fee/time)."""
+    name: str
+    note: str = ""
+    sort_order: int = 0
+    enabled: bool = True
+
+class DeliveryAreaUpdate(BaseModel):
+    name: Optional[str] = None
+    note: Optional[str] = None
+    sort_order: Optional[int] = None
+    enabled: Optional[bool] = None
+
+class DeliveryAreaReorder(BaseModel):
+    ids: list[str]
+
+
 class EventBookingCreate(BaseModel):
     name: str
     phone: str
@@ -4896,6 +4915,122 @@ async def reorder_faqs(body: FAQReorder, request: Request):
         except Exception:
             continue  # skip malformed ids — don't fail the whole batch
         await db.faqs.update_one({"_id": oid}, {"$set": {"sort_order": idx, "updated_at": now_iso}})
+    return {"message": "Reordered", "count": len(body.ids)}
+
+
+# ===== DELIVERY AREA ENDPOINTS =====
+# Mirrors the FAQ pattern: public list (enabled only) drives the /delivery page;
+# admin endpoints (full CRUD + reorder) live behind get_current_user role=admin.
+# Listing real area names (Johar Town, DHA, Model Town, ...) on a crawlable page
+# helps rank for "biryani delivery in <area>" local searches.
+
+def _serialize_area(a: dict) -> dict:
+    return {
+        "id": str(a["_id"]),
+        "name": a.get("name", ""),
+        "note": a.get("note", ""),
+        "sort_order": int(a.get("sort_order", 0)),
+        "enabled": bool(a.get("enabled", True)),
+        "created_at": a.get("created_at", ""),
+        "updated_at": a.get("updated_at", ""),
+    }
+
+
+@api_router.get("/delivery-areas")
+async def list_delivery_areas_public():
+    """Public delivery-area feed — only enabled entries, ordered for display.
+    Backs the /delivery page grid of areas served."""
+    areas = await db.delivery_areas.find({"enabled": True}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    return [_serialize_area(a) for a in areas]
+
+
+@api_router.get("/admin/delivery-areas")
+async def list_delivery_areas_admin(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    areas = await db.delivery_areas.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(1000)
+    return [_serialize_area(a) for a in areas]
+
+
+@api_router.post("/admin/delivery-areas")
+async def create_delivery_area(body: DeliveryAreaCreate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Area name is required.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if body.sort_order == 0:
+        last = await db.delivery_areas.find({}).sort("sort_order", -1).limit(1).to_list(1)
+        next_order = (int(last[0].get("sort_order", 0)) + 1) if last else 0
+    else:
+        next_order = int(body.sort_order)
+    doc = {
+        "name": name,
+        "note": (body.note or "").strip(),
+        "sort_order": next_order,
+        "enabled": bool(body.enabled),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    result = await db.delivery_areas.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _serialize_area(doc)
+
+
+@api_router.put("/admin/delivery-areas/{area_id}")
+async def update_delivery_area(area_id: str, body: DeliveryAreaUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(area_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Delivery area not found")
+    ud = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not ud:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    ud["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.delivery_areas.update_one({"_id": oid}, {"$set": ud})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Delivery area not found")
+    refreshed = await db.delivery_areas.find_one({"_id": oid})
+    return _serialize_area(refreshed)
+
+
+@api_router.delete("/admin/delivery-areas/{area_id}")
+async def delete_delivery_area(area_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(area_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Delivery area not found")
+    res = await db.delivery_areas.delete_one({"_id": oid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Delivery area not found")
+    return {"message": "Deleted"}
+
+
+@api_router.post("/admin/delivery-areas/reorder")
+async def reorder_delivery_areas(body: DeliveryAreaReorder, request: Request):
+    """Persist a new ordering for all delivery areas in one call — mirrors
+    /admin/faqs/reorder. Each id's sort_order is set to its index."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not body.ids or not isinstance(body.ids, list):
+        raise HTTPException(status_code=400, detail="ids list required")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for idx, area_id in enumerate(body.ids):
+        try:
+            oid = ObjectId(area_id)
+        except Exception:
+            continue
+        await db.delivery_areas.update_one({"_id": oid}, {"$set": {"sort_order": idx, "updated_at": now_iso}})
     return {"message": "Reordered", "count": len(body.ids)}
 
 

@@ -8,8 +8,15 @@ import { toast } from "sonner";
 import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 import TrustStrip from "../components/TrustStrip";
 import { useRestaurantInfo } from "../lib/restaurantInfo";
+import { useSeo } from "../lib/seo";
 
 export default function HomePage() {
+    useSeo({
+        title: "Karachi Naseeb Biryani & Murg Pulao — Order Online in Lahore",
+        description:
+            "Order authentic Karachi-style biryani, Murg Pulao, BBQ and karahi online in Lahore. Free delivery, live order tracking and Cash on Delivery. Earn Diamonds on every order.",
+        path: "/",
+    });
     const info = useRestaurantInfo();
     const [menuData, setMenuData] = useState(() => getCached("/menu")?.data || { categories: [], items: [] });
     const [offers, setOffers] = useState([]);

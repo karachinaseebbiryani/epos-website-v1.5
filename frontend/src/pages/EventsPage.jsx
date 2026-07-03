@@ -3,9 +3,17 @@ import api, { formatApiError } from "../lib/api";
 import { toast } from "sonner";
 import { Calendar, Users, Phone, User, MessageSquare, PartyPopper, Mail } from "lucide-react";
 
+import { useSeo } from "../lib/seo";
+
 const EVENT_TYPES = ["Wedding", "Birthday", "Corporate Event", "Mehndi", "Aqeeqa", "Family Gathering", "Other"];
 
 export default function EventsPage() {
+    useSeo({
+        title: "Biryani Catering for Weddings & Events in Lahore | Karachi Naseeb",
+        description:
+            "Book Karachi Naseeb for weddings, mehndi, aqeeqa, birthdays and corporate catering in Lahore. Authentic biryani, pulao and BBQ for large events — request a quote online.",
+        path: "/events",
+    });
     const [form, setForm] = useState({
         name: "", phone: "", email: "", event_type: "Wedding", guests: 50, event_date: "", message: "",
     });

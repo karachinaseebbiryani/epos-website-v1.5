@@ -4,9 +4,32 @@ import { resolveImageUrl } from "../lib/api";        // for files in /pages
 import { useCart } from "../contexts/CartContext";
 import { Plus, Search, LayoutGrid, Rows3, X } from "lucide-react";
 import { toast } from "sonner";
+import { useSeo } from "../lib/seo";
 const DENSITY_KEY = "knb_menu_density_v1"; // "compact" | "comfortable"
 
+const SITE = "https://www.karachinaseebbiryani.com";
+
+// Extract a plain numeric price from an item regardless of how the backend
+// shapes it (flat `price`, or a list of `variations` with their own prices).
+// Returns the lowest available price, or null if none is parseable.
+function itemPrice(item) {
+    const nums = [];
+    if (item.price != null && !Number.isNaN(Number(item.price))) nums.push(Number(item.price));
+    if (Array.isArray(item.variations)) {
+        item.variations.forEach((v) => {
+            if (v && v.price != null && !Number.isNaN(Number(v.price))) nums.push(Number(v.price));
+        });
+    }
+    return nums.length ? Math.min(...nums) : null;
+}
+
 export default function MenuPage() {
+    useSeo({
+        title: "Order Biryani, Pulao & BBQ Online in Lahore | Karachi Naseeb Menu",
+        description:
+            "Browse the full Karachi Naseeb menu — Karachi-style biryani, Murg Pulao, BBQ, karahi and more. Order online in Lahore with free delivery and Cash on Delivery.",
+        path: "/menu",
+    });
     const [data, setData] = useState({ categories: [], items: [] });
     const [loading, setLoading] = useState(true);
     const [activeCat, setActiveCat] = useState(null);
@@ -41,6 +64,51 @@ export default function MenuPage() {
             .catch(() => { if (!cancelled) { if (!cached) toast.error("Failed to load menu"); setLoading(false); } });
         return () => { cancelled = true; };
     }, []);
+
+    // Inject a schema.org Menu / MenuItem block built from the REAL menu data so
+    // the page is eligible for Google's menu rich results and AI assistants can
+    // read the actual dishes + prices. Rebuilt whenever the menu changes; the
+    // previous block is removed on cleanup so we never leave stale content.
+    useEffect(() => {
+        if (!data.categories?.length || !data.items?.length) return undefined;
+        try {
+            const schema = {
+                "@context": "https://schema.org",
+                "@type": "Menu",
+                "name": "Karachi Naseeb Biryani Menu",
+                "url": `${SITE}/menu`,
+                "hasMenuSection": data.categories.map((c) => ({
+                    "@type": "MenuSection",
+                    "name": c.name,
+                    "hasMenuItem": data.items
+                        .filter((i) => i.category_id === c.id)
+                        .map((i) => {
+                            const price = itemPrice(i);
+                            const node = { "@type": "MenuItem", "name": i.name };
+                            if (i.description) node.description = i.description;
+                            if (price != null) {
+                                node.offers = {
+                                    "@type": "Offer",
+                                    "price": String(price),
+                                    "priceCurrency": "PKR",
+                                };
+                            }
+                            return node;
+                        }),
+                })).filter((s) => s.hasMenuItem.length),
+            };
+            const tag = document.createElement("script");
+            tag.type = "application/ld+json";
+            tag.setAttribute("data-menu-jsonld", "1");
+            tag.textContent = JSON.stringify(schema);
+            document.head.appendChild(tag);
+            return () => {
+                document.querySelectorAll('script[data-menu-jsonld="1"]').forEach((n) => n.remove());
+            };
+        } catch {
+            return undefined;
+        }
+    }, [data]);
 
     // Group items per category (preserves the order returned by the backend).
     // When a search query is active we still split by category so the sticky

@@ -44,7 +44,9 @@ import RewardsManagement from "./pages/admin/RewardsManagement";
 import AdminNotifications from "./pages/admin/AdminNotifications";
 import ReviewManagement from "./pages/admin/ReviewManagement";
 import AdminFAQs from "./pages/admin/AdminFAQs";
+import AdminDeliveryAreas from "./pages/admin/AdminDeliveryAreas";
 import FAQPage from "./pages/FAQPage";
+import DeliveryPage from "./pages/DeliveryPage";
 import AboutPage from "./pages/AboutPage";
 import ContactPage from "./pages/ContactPage";
 import PolicyPage from "./pages/PolicyPage";
@@ -112,7 +114,7 @@ function App() {
                   <Route path="/contact" element={<ContactPage />} />
                   <Route path="/privacy" element={<PolicyPage />} />
                   <Route path="/terms" element={<PolicyPage />} />
-                  <Route path="/delivery" element={<PolicyPage />} />
+                  <Route path="/delivery" element={<DeliveryPage />} />
                   <Route path="/rewards-program" element={<PolicyPage />} />
                   <Route path="/profile" element={<ProfilePage />} />
                   <Route path="/orders" element={<OrdersPage />} />
@@ -154,6 +156,7 @@ function App() {
                   <Route path="/admin/events" element={<AdminEvents />} />
                   <Route path="/admin/reviews" element={<ReviewManagement />} />
                   <Route path="/admin/faqs" element={<AdminFAQs />} />
+                  <Route path="/admin/delivery-areas" element={<AdminDeliveryAreas />} />
                   <Route path="/admin/loyalty-settings" element={<LoyaltySettings />} />
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
                   <Route path="/admin/notifications" element={<AdminNotifications />} />

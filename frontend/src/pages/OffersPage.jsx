@@ -4,8 +4,15 @@ import { Tag, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 import GuestGateSheet from "../components/GuestGateSheet";
+import { useSeo } from "../lib/seo";
 
 export default function OffersPage() {
+    useSeo({
+        title: "Deals & Discounts on Biryani in Lahore | Karachi Naseeb",
+        description:
+            "Today's deals on Karachi Naseeb biryani, pulao, BBQ and family deals in Lahore. Grab coupon codes, combo offers and Diamond rewards — order online with free delivery.",
+        path: "/offers",
+    });
     const [offers, setOffers] = useState([]);
     const [personalCoupons, setPersonalCoupons] = useState([]);
     const [gateOpen, setGateOpen] = useState(false);
