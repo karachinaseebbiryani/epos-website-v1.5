@@ -1,0 +1,26 @@
+name: knb_customer
+description: Karachi Naseeb — customer ordering app (Flutter)
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1      # state management (no codegen)
+  dio: ^5.4.0                   # HTTP client + interceptors
+  flutter_secure_storage: ^9.0.0 # encrypted token storage
+  go_router: ^13.2.0            # declarative routing / redirects
+  cached_network_image: ^3.3.1  # menu images
+  intl: ^0.19.0                 # currency / date formatting
+  connectivity_plus: ^6.0.3     # offline detection
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

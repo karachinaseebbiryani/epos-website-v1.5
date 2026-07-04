@@ -2975,6 +2975,35 @@ async def customer_logout(response: Response):
     response.delete_cookie("customer_token", path="/")
     return {"message": "Logged out"}
 
+# --- Mobile: FCM push-token registration (native app; web still uses VAPID web-push) ---
+class FcmTokenRequest(BaseModel):
+    token: str
+    platform: Optional[str] = "android"
+
+@api_router.post("/customer/fcm-token")
+async def register_fcm_token(req: FcmTokenRequest, request: Request):
+    """Register a device's FCM token so we can push order-status updates to the native app.
+    Idempotent — the same token is stored at most once per customer ($addToSet)."""
+    cust = await get_current_customer(request)
+    tok = (req.token or "").strip()
+    if not tok:
+        raise HTTPException(status_code=400, detail="Missing FCM token")
+    await db.customers.update_one(
+        {"_id": ObjectId(cust["_id"])},
+        {"$addToSet": {"fcm_tokens": tok}},
+    )
+    return {"ok": True}
+
+@api_router.delete("/customer/fcm-token")
+async def unregister_fcm_token(req: FcmTokenRequest, request: Request):
+    """Remove a device's FCM token (logout / uninstall / token refresh)."""
+    cust = await get_current_customer(request)
+    await db.customers.update_one(
+        {"_id": ObjectId(cust["_id"])},
+        {"$pull": {"fcm_tokens": (req.token or "").strip()}},
+    )
+    return {"ok": True}
+
 # --- V2: Social Login (Google + Facebook) ---
 # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
 # Frontend uses window.location.origin for any OAuth redirect. Backend just verifies the
