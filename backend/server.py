@@ -5260,6 +5260,35 @@ async def seed_online_data():
         for o in SAMPLE_OFFERS:
             await db.offers.insert_one({**o, "created_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"Seeded {len(SAMPLE_OFFERS)} offers")
+    # Seed a starter list of Lahore delivery areas only if empty. Admin can then
+    # edit / reorder / disable these under Admin → Delivery Areas; because we only
+    # seed when the collection is empty, we never overwrite the operator's edits.
+    if await db.delivery_areas.count_documents({}) == 0:
+        _starter_areas = [
+            ("Johar Town", "Free delivery · ~35 min"),
+            ("Model Town", "Free delivery · ~35 min"),
+            ("Faisal Town", "~30 min"),
+            ("Garden Town", "~30 min"),
+            ("Iqbal Town (Allama Iqbal Town)", "~35 min"),
+            ("Township", "~40 min"),
+            ("Gulberg", "~40 min"),
+            ("Muslim Town", "~30 min"),
+            ("Samanabad", "~40 min"),
+            ("Wapda Town", "~40 min"),
+            ("Valencia Town", "~45 min"),
+            ("DHA (Defence)", "Delivery fee may apply"),
+        ]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for idx, (name, note) in enumerate(_starter_areas):
+            await db.delivery_areas.insert_one({
+                "name": name,
+                "note": note,
+                "sort_order": idx,
+                "enabled": True,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            })
+        logger.info(f"Seeded {len(_starter_areas)} delivery areas")
     # Backfill: any pre-existing offer whose code starts with WELCOME or FIRST is treated
     # as one-time-per-customer by default. Without this, the WELCOME100 code in production
     # could be reused indefinitely by the same customer — straight revenue leak.

@@ -1,8 +1,8 @@
 {
   "backend/server.py": {
-    "mtime": 1783030999.036619,
-    "ast_hash": "19f5f5a6fcad31e2a7e0be9733f3cbbf",
-    "semantic_hash": "19f5f5a6fcad31e2a7e0be9733f3cbbf"
+    "mtime": 1783104325.8208537,
+    "ast_hash": "014f6b1b11cdadc9835aa56383fec4ad",
+    "semantic_hash": "014f6b1b11cdadc9835aa56383fec4ad"
   },
   "backend/set_vapid.py": {
     "mtime": 1782751237.440741,
@@ -150,14 +150,14 @@
     "semantic_hash": "a7f2c5bdb67940324191ac5c4cda7256"
   },
   "frontend/src/App.js": {
-    "mtime": 1782751237.4519083,
-    "ast_hash": "b5212bf38bf616e6bf450a89abde4af6",
-    "semantic_hash": "b5212bf38bf616e6bf450a89abde4af6"
+    "mtime": 1783103684.3880126,
+    "ast_hash": "e112d2f6e753e4238402eae3145c4480",
+    "semantic_hash": "e112d2f6e753e4238402eae3145c4480"
   },
   "frontend/src/components/AdminLayout.jsx": {
-    "mtime": 1782751237.4519083,
-    "ast_hash": "155e35ea6d590489fda62e1de29c8494",
-    "semantic_hash": "155e35ea6d590489fda62e1de29c8494"
+    "mtime": 1783103698.7193663,
+    "ast_hash": "6315aea2505d8f027234c06c8ddc4a1c",
+    "semantic_hash": "6315aea2505d8f027234c06c8ddc4a1c"
   },
   "frontend/src/components/AndroidInstallPrompt.jsx": {
     "mtime": 1782751237.4519083,
@@ -585,9 +585,9 @@
     "semantic_hash": "d582bda9df9b59c563e88a68107ea8e4"
   },
   "frontend/src/pages/EventsPage.jsx": {
-    "mtime": 1782751237.463627,
-    "ast_hash": "b65b6354ca0095f0c46eff03001d6a84",
-    "semantic_hash": "b65b6354ca0095f0c46eff03001d6a84"
+    "mtime": 1783092852.8607032,
+    "ast_hash": "d20e7bb802bfdc0e8eb929ad4e0b7163",
+    "semantic_hash": "d20e7bb802bfdc0e8eb929ad4e0b7163"
   },
   "frontend/src/pages/FAQPage.jsx": {
     "mtime": 1782751237.463627,
@@ -600,9 +600,9 @@
     "semantic_hash": "bf071c51dbd2ec50ce691f565e17f054"
   },
   "frontend/src/pages/HomePage.jsx": {
-    "mtime": 1783077244.908405,
-    "ast_hash": "43b74cc58eb9c40ffcfb73a8508a7ea6",
-    "semantic_hash": "43b74cc58eb9c40ffcfb73a8508a7ea6"
+    "mtime": 1783092821.8433084,
+    "ast_hash": "06761e72b8fa684d05cca7cafa5023d8",
+    "semantic_hash": "06761e72b8fa684d05cca7cafa5023d8"
   },
   "frontend/src/pages/LoginPage.jsx": {
     "mtime": 1782751237.4649925,
@@ -610,14 +610,14 @@
     "semantic_hash": "f75f1307813d71cfda058b1396c5ef33"
   },
   "frontend/src/pages/MenuPage.jsx": {
-    "mtime": 1782756323.289787,
-    "ast_hash": "7462b424c3cc3d884d712ac60e304e6f",
-    "semantic_hash": "7462b424c3cc3d884d712ac60e304e6f"
+    "mtime": 1783092901.7080839,
+    "ast_hash": "b8f1b0cb7bfb69caac0f10205725a15d",
+    "semantic_hash": "b8f1b0cb7bfb69caac0f10205725a15d"
   },
   "frontend/src/pages/OffersPage.jsx": {
-    "mtime": 1782756354.563394,
-    "ast_hash": "cbfb45494ee2079785dd68e702af93c5",
-    "semantic_hash": "cbfb45494ee2079785dd68e702af93c5"
+    "mtime": 1783092836.5864115,
+    "ast_hash": "fc999068f487decd7645ccb7f11216b5",
+    "semantic_hash": "fc999068f487decd7645ccb7f11216b5"
   },
   "frontend/src/pages/OrderSuccessPage.jsx": {
     "mtime": 1782751237.4649925,
@@ -965,9 +965,9 @@
     "semantic_hash": "47731d5d79e63873f27a86d4c4933a47"
   },
   "frontend/public/index.html": {
-    "mtime": 1782751237.448578,
-    "ast_hash": "bd8c2593b7d275e6d6186de2005e1e5f",
-    "semantic_hash": "bd8c2593b7d275e6d6186de2005e1e5f"
+    "mtime": 1783104344.6748931,
+    "ast_hash": "0e2b14bc0968c207f46c6e85d2eb9963",
+    "semantic_hash": "0e2b14bc0968c207f46c6e85d2eb9963"
   },
   "frontend/public/robots.txt": {
     "mtime": 1782751237.450901,
@@ -988,5 +988,10 @@
     "mtime": 1782751238.3576367,
     "ast_hash": "aabf1f950a4d388f7432a45225e10827",
     "semantic_hash": "aabf1f950a4d388f7432a45225e10827"
+  },
+  "SEO_CHECKLIST.md": {
+    "mtime": 1783104669.5466647,
+    "ast_hash": "27179c8f6c0a857f26c2259e45fd4d7f",
+    "semantic_hash": "27179c8f6c0a857f26c2259e45fd4d7f"
   }
 }

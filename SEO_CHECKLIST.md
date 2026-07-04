@@ -60,6 +60,56 @@ Faisal Town, Iqbal Town, Township, DHA…) with optional notes like "Free delive
 
 ---
 
+## ✅ Also done (session 3)
+
+- **Logo in search results** — added your 192px + 512px logos as favicon `<link rel="icon">`
+  options in `frontend/public/index.html`. Google prefers a large square favicon (multiple
+  of 48px); you previously only declared 16/32, which Google often drops. **Note:** Google
+  only refreshes the favicon on its next crawl of your homepage, and the site must be indexed
+  (submit it in Search Console) — so this can take days to weeks to appear.
+- **Delivery areas seeded** — 12 starter Lahore areas (Johar Town, Model Town, Faisal Town,
+  Garden Town, Iqbal Town, Township, Gulberg, Muslim Town, Samanabad, Wapda Town, Valencia
+  Town, DHA) auto-seed on your **next backend deploy** (only if the list is empty — it never
+  overwrites your edits). Edit/reorder/remove them in **Admin → Delivery Areas**.
+
+## 🔲 Pre-rendering — needs YOU to deploy + test (not auto-applied)
+
+react-snap does **not** work on React 19, so I did not use it. Instead I added a
+React-19-safe social-crawler pre-render: **`frontend/api/prerender.js`** (a Vercel function
+that returns correct per-page Open Graph tags to WhatsApp/Facebook/etc. — real users and
+Google keep the normal app).
+
+**It is NOT wired up yet** — to activate it, replace `frontend/vercel.json` with:
+
+```json
+{
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "has": [
+        { "type": "header", "key": "user-agent", "value": ".*(facebookexternalhit|Facebot|Twitterbot|WhatsApp|LinkedInBot|Slackbot|Slack-ImgProxy|Discordbot|TelegramBot|Pinterest|redditbot|Applebot).*" }
+      ],
+      "destination": "/api/prerender?path=/:path*"
+    },
+    { "source": "/((?!static/|api/).*)", "destination": "/index.html" }
+  ]
+}
+```
+
+Then:
+1. Deploy to a **Vercel preview** first (not production).
+2. Test: `curl -A "WhatsApp/2.0" https://YOUR-PREVIEW-URL/menu` → should return the **menu**
+   title/OG tags. `curl https://YOUR-PREVIEW-URL/menu` (no bot UA) → should return the normal
+   app `index.html`.
+3. Also paste a deep link (e.g. `/delivery`) into Facebook's Sharing Debugger and WhatsApp to
+   confirm the preview shows that page.
+4. If good, promote to production. **To revert:** restore the original one-line `vercel.json`.
+
+_Honest note: this only improves social link previews for deep links. Your Google ranking
+does not depend on it — Google already renders your React app + reads the per-page meta._
+
+---
+
 ## 📍 Off-page checklist — the real ranking drivers (do these yourself)
 
 ### 1. Google Business Profile (HIGHEST PRIORITY — free)
