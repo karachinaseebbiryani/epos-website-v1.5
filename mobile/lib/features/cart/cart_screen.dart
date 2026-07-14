@@ -34,8 +34,18 @@ class CartScreen extends ConsumerWidget {
                 final line = lines[i];
                 return ListTile(
                   contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                  isThreeLine: line.modifiers.isNotEmpty ||
+                      line.removals.isNotEmpty ||
+                      (line.note?.isNotEmpty ?? false),
                   title: Text(line.displayName),
-                  subtitle: Text(money(line.unitPrice)),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(money(line.unitPrice)),
+                      _CustomizationDetail(line: line),
+                    ],
+                  ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -83,6 +93,41 @@ class CartScreen extends ConsumerWidget {
                 ),
               ),
             ),
+    );
+  }
+}
+
+/// Small grey lines under a cart item summarising its modifiers, removals, and
+/// note. Renders nothing when the line has no customization.
+class _CustomizationDetail extends StatelessWidget {
+  const _CustomizationDetail({required this.line});
+  final CartLine line;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = <String>[
+      for (final m in line.modifiers) m.name,
+      for (final r in line.removals) 'No $r',
+    ];
+    final hasNote = line.note != null && line.note!.isNotEmpty;
+    if (parts.isEmpty && !hasNote) return const SizedBox.shrink();
+
+    final style = TextStyle(
+      fontSize: 12,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
+    );
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (parts.isNotEmpty) Text(parts.join(' · '), style: style),
+          if (hasNote)
+            Text('Note: ${line.note}',
+                style: style.copyWith(fontStyle: FontStyle.italic)),
+        ],
+      ),
     );
   }
 }

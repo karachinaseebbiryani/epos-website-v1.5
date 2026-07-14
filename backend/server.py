@@ -417,6 +417,26 @@ class MenuItemVariation(BaseModel):
     name: str
     price: float
 
+class ModifierOption(BaseModel):
+    id: Optional[str] = None
+    name: str
+    price: float = 0
+
+class ModifierGroup(BaseModel):
+    id: Optional[str] = None
+    name: str
+    type: str = "multi"
+    required: bool = False
+    min_select: int = 0
+    max_select: int = 0
+    active: bool = True
+    options: List[ModifierOption] = []
+
+class MenuIngredient(BaseModel):
+    id: Optional[str] = None
+    name: str
+    removable: bool = True
+
 class MenuItemCreate(BaseModel):
     name: str
     price: float
@@ -427,6 +447,9 @@ class MenuItemCreate(BaseModel):
     low_stock_threshold: int = 10
     color: Optional[str] = None
     variations: Optional[List[MenuItemVariation]] = None
+    variations_active: Optional[bool] = True
+    modifier_groups: Optional[List[ModifierGroup]] = None
+    ingredients: Optional[List[MenuIngredient]] = None
     discount_type: Optional[str] = None
     discount_value: Optional[float] = 0
     is_bestseller: Optional[bool] = False
@@ -450,6 +473,9 @@ class MenuItemUpdate(BaseModel):
     low_stock_threshold: Optional[int] = None
     color: Optional[str] = None
     variations: Optional[List[MenuItemVariation]] = None
+    variations_active: Optional[bool] = None
+    modifier_groups: Optional[List[ModifierGroup]] = None
+    ingredients: Optional[List[MenuIngredient]] = None
     discount_type: Optional[str] = None
     discount_value: Optional[float] = None
     is_bestseller: Optional[bool] = None
@@ -843,6 +869,36 @@ async def get_menu_items(request: Request, response: Response):
     response.headers["Cache-Control"] = "public, max-age=30"
     return out
 
+def _norm_modifier_groups(groups):
+    """Assign stable ids to modifier groups + their options and coerce types."""
+    out = []
+    for g in (groups or []):
+        gid = (str(g.get("id") or "").strip()) or ("g_" + _uuid.uuid4().hex[:8])
+        opts = []
+        for o in (g.get("options") or []):
+            oid = (str(o.get("id") or "").strip()) or ("o_" + _uuid.uuid4().hex[:8])
+            opts.append({"id": oid, "name": str(o.get("name", "")).strip(),
+                         "price": float(o.get("price", 0) or 0)})
+        out.append({
+            "id": gid,
+            "name": str(g.get("name", "")).strip(),
+            "type": "single" if g.get("type") == "single" else "multi",
+            "required": bool(g.get("required", False)),
+            "min_select": int(g.get("min_select", 0) or 0),
+            "max_select": int(g.get("max_select", 0) or 0),
+            "active": bool(g.get("active", True)),
+            "options": opts,
+        })
+    return out
+
+def _norm_ingredients(ings):
+    out = []
+    for ing in (ings or []):
+        iid = (str(ing.get("id") or "").strip()) or ("i_" + _uuid.uuid4().hex[:8])
+        out.append({"id": iid, "name": str(ing.get("name", "")).strip(),
+                    "removable": bool(ing.get("removable", True))})
+    return out
+
 @api_router.post("/menu-items")
 async def create_menu_item(item: MenuItemCreate, request: Request):
     user = await get_current_user(request)
@@ -856,6 +912,9 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
         "name": item.name, "price": item.price, "price_fp1": item.price_fp1, "price_fp2": item.price_fp2,
         "category_id": item.category_id, "stock": item.stock, "low_stock_threshold": item.low_stock_threshold,
         "color": item.color, "variations": variations,
+        "variations_active": True if item.variations_active is None else bool(item.variations_active),
+        "modifier_groups": _norm_modifier_groups([g.model_dump() for g in (item.modifier_groups or [])]),
+        "ingredients": _norm_ingredients([ing.model_dump() for ing in (item.ingredients or [])]),
         "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
         "is_bestseller": bool(item.is_bestseller), "is_popular": bool(item.is_popular),
         "image_url": persisted_image_url, "image_type": "url" if persisted_image_url.startswith("/api/uploads/") else (item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url")),
@@ -875,6 +934,8 @@ async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request)
     user = await get_current_user(request)
     if not _can_edit_menu(user): raise HTTPException(status_code=403, detail="Menu edit permission required")
     ud = {k: v for k, v in item.model_dump().items() if v is not None}
+    if "modifier_groups" in ud: ud["modifier_groups"] = _norm_modifier_groups(ud["modifier_groups"])
+    if "ingredients" in ud: ud["ingredients"] = _norm_ingredients(ud["ingredients"])
     # If the admin re-uploaded a photo as a base64 data: URL, persist it to disk
     # before saving, so we never store inline image bytes in MongoDB.
     if "image_url" in ud and isinstance(ud["image_url"], str) and ud["image_url"].startswith("data:"):
@@ -2770,12 +2831,19 @@ class CustomerLoginRequest(BaseModel):
     email: str
     password: str
 
+class SelectedModifier(BaseModel):
+    group_id: str
+    option_id: str
+
 class OnlineOrderItem(BaseModel):
     item_id: str
     name: str
     price: float
     quantity: int
     variation_name: Optional[str] = None  # e.g. "Half" / "Full" when the item has size variations
+    selected_modifiers: Optional[List[SelectedModifier]] = None
+    removed_ingredients: Optional[List[str]] = None  # ingredient ids or names to omit
+    line_note: Optional[str] = None
 
 class OnlineOrderCreate(BaseModel):
     items: List[OnlineOrderItem]
@@ -2968,7 +3036,22 @@ async def customer_login(req: CustomerLoginRequest, request: Request, response: 
 @api_router.get("/customer/me")
 async def customer_me(request: Request):
     cust = await get_current_customer(request)
-    return {"id": cust["_id"], "email": cust["email"], "name": cust.get("name", ""), "phone": cust.get("phone", "")}
+    return {"id": cust["_id"], "email": cust["email"], "name": cust.get("name", ""),
+            "phone": cust.get("phone", ""), "allergens": cust.get("allergens", [])}
+
+class AllergensUpdate(BaseModel):
+    allergens: List[str] = []
+
+@api_router.put("/customer/allergens")
+async def update_customer_allergens(req: AllergensUpdate, request: Request):
+    cust = await get_current_customer(request)
+    cleaned = []
+    for a in (req.allergens or [])[:40]:
+        a = str(a).strip()
+        if a and a not in cleaned:
+            cleaned.append(a)
+    await db.customers.update_one({"_id": cust["_id"]}, {"$set": {"allergens": cleaned}})
+    return {"allergens": cleaned}
 
 @api_router.post("/customer/logout")
 async def customer_logout(response: Response):
@@ -3279,6 +3362,9 @@ async def get_public_menu(request: Request, response: Response):
             "is_popular": i.get("is_popular", False),
             "is_bestseller": i.get("is_bestseller", False),
             "variations": variations_out,
+            "variations_active": i.get("variations_active", True),
+            "modifier_groups": i.get("modifier_groups", []),
+            "ingredients": i.get("ingredients", []),
         })
     out = {"categories": cat_list, "items": item_list}
     entry = _cache_set("menu", out)
@@ -3328,6 +3414,63 @@ def _discounted_price(base, d_type, d_val) -> float:
     if d_type == "fixed" and d_val > 0:
         return round(max(0, base - d_val), 2)
     return round(base, 2)
+
+def _validate_and_price_modifiers(db_item, line):
+    """Authoritatively price a line's modifier selections + validate group rules
+    and ingredient removals against the DB item. Returns
+    (add_price, resolved_modifiers, resolved_removals) or raises HTTPException.
+    Prices ALWAYS come from the DB — never the client."""
+    groups = db_item.get("modifier_groups", []) or []
+    groups_by_id = {g.get("id"): g for g in groups}
+    item_name = db_item.get("name", "item")
+    picks = {}
+    resolved = []
+    add = 0.0
+    for sm in (getattr(line, "selected_modifiers", None) or []):
+        gid = sm.group_id
+        oid = sm.option_id
+        g = groups_by_id.get(gid)
+        if not g or not g.get("active", True):
+            raise HTTPException(status_code=400, detail=f"Invalid option for {item_name}.")
+        opt = next((o for o in (g.get("options") or []) if o.get("id") == oid), None)
+        if not opt:
+            raise HTTPException(status_code=400, detail=f"Invalid choice for {g.get('name', 'option')}.")
+        price = float(opt.get("price", 0) or 0)
+        add += price
+        picks.setdefault(gid, []).append(oid)
+        resolved.append({"group": g.get("name", ""), "name": opt.get("name", ""), "price": price})
+    # enforce each group's rules
+    for g in groups:
+        if not g.get("active", True):
+            continue
+        n = len(picks.get(g.get("id"), []))
+        gname = g.get("name", "option")
+        minsel = int(g.get("min_select", 0) or 0)
+        maxsel = int(g.get("max_select", 0) or 0)
+        required = bool(g.get("required", False))
+        if g.get("type") == "single":
+            if n > 1:
+                raise HTTPException(status_code=400, detail=f"Choose only one for {gname}.")
+            if (required or minsel >= 1) and n < 1:
+                raise HTTPException(status_code=400, detail=f"Please choose {gname}.")
+        else:
+            need = max(minsel, 1) if required else minsel
+            if need and n < need:
+                raise HTTPException(status_code=400, detail=f"Choose at least {need} for {gname}.")
+            if maxsel and n > maxsel:
+                raise HTTPException(status_code=400, detail=f"Choose at most {maxsel} for {gname}.")
+    # ingredient removals
+    ings = db_item.get("ingredients", []) or []
+    ing_by_id = {i.get("id"): i for i in ings}
+    ing_by_name = {str(i.get("name", "")).strip().lower(): i for i in ings}
+    resolved_removals = []
+    for r in (getattr(line, "removed_ingredients", None) or []):
+        key = str(r).strip()
+        ing = ing_by_id.get(key) or ing_by_name.get(key.lower())
+        if not ing or not ing.get("removable", True):
+            raise HTTPException(status_code=400, detail=f"Cannot remove '{key}' from {item_name}.")
+        resolved_removals.append(str(ing.get("name", "")).strip())
+    return round(add, 2), resolved, resolved_removals
 
 @api_router.post("/online-orders")
 async def create_online_order(order: OnlineOrderCreate, request: Request):
@@ -3407,13 +3550,22 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         if server_price < 0:
             logger.error(f"Negative price on menu_items {db_item['_id']}: {server_price}")
             raise HTTPException(status_code=500, detail="Pricing error — please contact support.")
-        server_subtotal += server_price * qty
+        # Modifiers (add-ons / required choices) + ingredient removals — priced and
+        # validated server-side so the client can never inflate/deflate the total.
+        mod_add, resolved_mods, resolved_removals = _validate_and_price_modifiers(db_item, line)
+        unit_price = round(server_price + mod_add, 2)
+        line_note = (getattr(line, "line_note", None) or "").strip() or None
+        server_subtotal += unit_price * qty
         validated_items.append({
             "item_id": str(db_item["_id"]),
             "name": line_name,
             "variation_name": variation_name,
-            "price": server_price,
+            "price": unit_price,          # effective unit price incl. modifiers
+            "base_price": server_price,   # item/variation price before modifiers
             "quantity": qty,
+            "modifiers": resolved_mods,           # [{group, name, price}]
+            "removed_ingredients": resolved_removals,  # [name]
+            "line_note": line_note,
         })
     # Round to 2 decimals to avoid floating point drift propagating into discounts.
     server_subtotal = round(server_subtotal, 2)
@@ -4076,6 +4228,85 @@ async def _send_web_push(subscription_doc: dict, title: str, body: str, url: str
         return False, err
 
 
+# --- Native app push (Firebase Cloud Messaging) ----------------------------
+# Inert until configured: set FIREBASE_CREDENTIALS (or GOOGLE_APPLICATION_CREDENTIALS)
+# to a Firebase service-account JSON path AND `pip install firebase-admin`. Without
+# either, _send_fcm_to_customer is a no-op so order-status updates never fail.
+_fcm_app = None
+_fcm_ready: Optional[bool] = None  # None = not yet probed
+
+
+def _init_fcm() -> bool:
+    """Lazily initialise the Firebase Admin app. Returns True when FCM can send."""
+    global _fcm_app, _fcm_ready
+    if _fcm_ready is not None:
+        return _fcm_ready
+    cred_path = os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not cred_path or not os.path.exists(cred_path):
+        logger.info("FCM disabled: no service-account credentials configured.")
+        _fcm_ready = False
+        return False
+    try:
+        import firebase_admin
+        from firebase_admin import credentials as _fb_cred
+        if not firebase_admin._apps:
+            _fcm_app = firebase_admin.initialize_app(_fb_cred.Certificate(cred_path))
+        else:
+            _fcm_app = firebase_admin.get_app()
+        _fcm_ready = True
+        logger.info("FCM initialised for native-app push.")
+    except Exception as e:
+        logger.warning(f"FCM init failed ({type(e).__name__}: {e}); native push disabled.")
+        _fcm_ready = False
+    return _fcm_ready
+
+
+async def _send_fcm_to_customer(customer_id, title: str, body: str, order_id: str):
+    """Fan out an FCM data+notification message to every device token a customer
+    registered via POST /customer/fcm-token. Best-effort; prunes dead tokens."""
+    if not _init_fcm():
+        return
+    try:
+        cust = await db.customers.find_one(
+            {"_id": ObjectId(str(customer_id))}, {"fcm_tokens": 1})
+    except Exception:
+        return
+    tokens = list((cust or {}).get("fcm_tokens") or [])
+    if not tokens:
+        return
+    try:
+        from firebase_admin import messaging as _fcm_msg
+    except Exception:
+        return
+
+    def _send_all():
+        # firebase-admin is synchronous; run it off the event loop.
+        stale: list[str] = []
+        for tok in tokens:
+            try:
+                _fcm_msg.send(_fcm_msg.Message(
+                    token=tok,
+                    notification=_fcm_msg.Notification(title=title, body=body),
+                    data={"order_id": str(order_id), "type": "order_status"},
+                    android=_fcm_msg.AndroidConfig(priority="high"),
+                ))
+            except Exception as e:
+                name = type(e).__name__
+                if "NotRegistered" in name or "InvalidArgument" in name or "Unregistered" in name:
+                    stale.append(tok)
+        return stale
+
+    try:
+        stale = await asyncio.to_thread(_send_all)
+        if stale:
+            await db.customers.update_one(
+                {"_id": ObjectId(str(customer_id))},
+                {"$pull": {"fcm_tokens": {"$in": stale}}},
+            )
+    except Exception as e:
+        logger.warning(f"FCM send failed for customer {customer_id}: {e}")
+
+
 async def _notify_customer_order_status(order_doc: dict, new_status: str):
     """Fan out a web push notification to every device the order's customer subscribed
     from. Best-effort — failures are logged, never raised. Guests (no customer_id)
@@ -4105,6 +4336,12 @@ async def _notify_customer_order_status(order_doc: dict, new_status: str):
             await _send_web_push(s, title, body, url)
     except Exception as e:
         logger.warning(f"_notify_customer_order_status failed: {e}")
+    # Native app (Flutter) devices — Firebase Cloud Messaging. No-op when FCM
+    # is not configured, so this never blocks the status update.
+    try:
+        await _send_fcm_to_customer(customer_id, title, body, str(order_doc.get("_id")))
+    except Exception as e:
+        logger.warning(f"_notify_customer_order_status FCM failed: {e}")
 
 
 @api_router.post("/push/subscribe")
@@ -5802,6 +6039,135 @@ async def stripe_webhook(request: Request):
                 {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
             )
     return {"received": True}
+
+# --- SafePay (Pakistan) hosted-checkout gateway ----------------------------
+# Inert until configured: set SAFEPAY_API_KEY (+ optional SAFEPAY_SECRET,
+# SAFEPAY_ENV=sandbox|production). Without the key both endpoints return 503 and
+# the app hides the "card" option. Mirrors the Stripe flow: server-side amount,
+# a payment_transactions record keyed by tracker, and an idempotent order->paid
+# update once SafePay confirms the charge.
+#   Docs / dashboard: https://sandbox.api.getsafepay.com  (sandbox)
+class SafepaySessionRequest(BaseModel):
+    order_id: str
+    origin_url: str
+
+def _safepay_bases() -> tuple[str, str]:
+    """Return (api_base, checkout_base) for the configured environment."""
+    env = (os.environ.get("SAFEPAY_ENV") or "sandbox").strip().lower()
+    if env in ("production", "prod", "live"):
+        return "https://api.getsafepay.com", "https://getsafepay.com"
+    return "https://sandbox.api.getsafepay.com", "https://sandbox.api.getsafepay.com"
+
+@api_router.post("/payments/safepay/create-session")
+async def create_safepay_session(req: SafepaySessionRequest, http_request: Request):
+    """Create a SafePay tracker for an existing order and return the hosted
+    checkout URL. Amount is taken from server-side order data (never the client)."""
+    api_key = os.environ.get("SAFEPAY_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="SafePay not configured")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(req.order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("payment_status") == "paid":
+        raise HTTPException(status_code=400, detail="Order already paid")
+    amount = float(order.get("total_price", 0))
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+
+    api_base, checkout_base = _safepay_bases()
+    env = (os.environ.get("SAFEPAY_ENV") or "sandbox").strip().lower()
+    env = "production" if env in ("production", "prod", "live") else "sandbox"
+    # 1) Create a payment tracker (SafePay v1 init). PKR amount is in rupees.
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            init = await client.post(
+                f"{api_base}/order/v1/init",
+                json={
+                    "client": api_key,
+                    "amount": round(amount, 2),
+                    "currency": "PKR",
+                    "environment": env,
+                },
+            )
+        if init.status_code >= 400:
+            logger.warning(f"SafePay init failed {init.status_code}: {init.text[:300]}")
+            raise HTTPException(status_code=502, detail="Could not start SafePay checkout")
+        tracker = (((init.json() or {}).get("data") or {}).get("token") or "").strip()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"SafePay init error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach SafePay")
+    if not tracker:
+        raise HTTPException(status_code=502, detail="SafePay did not return a tracker")
+
+    # 2) Build the hosted-checkout URL the app opens in a WebView. On completion
+    #    SafePay redirects to redirect_url — the app watches for our origin.
+    origin = req.origin_url.rstrip("/")
+    from urllib.parse import urlencode
+    qs = urlencode({
+        "beacon": tracker,
+        "env": env,
+        "source": "mobile",
+        "order_id": req.order_id,
+        "redirect_url": f"{origin}/success",
+        "cancel_url": f"{origin}/cancel",
+    })
+    checkout_url = f"{checkout_base}/checkout/pay?{qs}"
+
+    await db.payment_transactions.insert_one({
+        "gateway": "safepay",
+        "tracker": tracker,
+        "order_id": req.order_id,
+        "amount_pkr": amount,
+        "currency": "PKR",
+        "environment": env,
+        "payment_status": "initiated",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"url": checkout_url, "tracker": tracker}
+
+@api_router.get("/payments/safepay/status/{tracker}")
+async def safepay_status(tracker: str):
+    """Report SafePay payment status for a tracker. Best-effort verification with
+    a DB fallback (same shape as the Stripe status endpoint)."""
+    api_key = os.environ.get("SAFEPAY_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="SafePay not configured")
+    txn = await db.payment_transactions.find_one({"tracker": tracker}, {"_id": 0})
+    api_base, _ = _safepay_bases()
+    verified_paid = False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{api_base}/order/v1/{tracker}")
+        if r.status_code < 400:
+            data = (r.json() or {}).get("data") or {}
+            state = str(data.get("state") or data.get("status") or "").lower()
+            verified_paid = state in ("paid", "tracker_ended", "completed", "succeeded")
+    except Exception as e:
+        logger.info(f"SafePay status check fell back to DB: {e}")
+
+    if verified_paid and txn and txn.get("payment_status") != "paid":
+        now = datetime.now(timezone.utc).isoformat()
+        await db.payment_transactions.update_one(
+            {"tracker": tracker, "payment_status": {"$ne": "paid"}},
+            {"$set": {"payment_status": "paid", "paid_at": now}},
+        )
+        order_id = txn.get("order_id")
+        if order_id:
+            await db.online_orders.update_one(
+                {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
+                {"$set": {"payment_status": "paid", "paid_at": now}},
+            )
+    payment_status = "paid" if verified_paid else ((txn or {}).get("payment_status") or "pending")
+    return {
+        "tracker": tracker,
+        "payment_status": payment_status,
+        "order_id": (txn or {}).get("order_id"),
+    }
 
 # --- Bank Transfer manual verification ---
 class BankPaymentReference(BaseModel):

@@ -1,7 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'dart:async';
+
 import '../../core/api_client.dart';
+import '../../core/push.dart';
 import '../../core/session_events.dart';
 import '../../core/token_store.dart';
 import 'auth_repository.dart';
@@ -65,6 +68,12 @@ class AuthController extends StateNotifier<AuthState> {
 
   void _onSessionExpired() => forceLogout();
 
+  /// Register this device for order-status push once signed in. Fire-and-forget;
+  /// inert when FCM isn't configured (see PushService).
+  void _registerPush() {
+    unawaited(PushService.instance.registerWith(_repo));
+  }
+
   @override
   void dispose() {
     sessionEvents.removeListener(_onSessionExpired);
@@ -77,6 +86,7 @@ class AuthController extends StateNotifier<AuthState> {
       state = me == null
           ? state.copyWith(status: AuthStatus.unauthenticated)
           : state.copyWith(status: AuthStatus.authenticated, customer: me);
+      if (me != null) _registerPush();
     } catch (_) {
       state = state.copyWith(status: AuthStatus.unauthenticated);
     }
@@ -90,9 +100,15 @@ class AuthController extends StateNotifier<AuthState> {
         status: AuthStatus.authenticated,
         customer: res.customer,
       );
+      _registerPush();
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
+      return false;
+    } catch (e) {
+      // Any non-API failure (e.g. transport/parse/secure-storage) must still
+      // resolve the caller so the button spinner never hangs.
+      state = state.copyWith(error: 'Could not sign in. Please try again.');
       return false;
     }
   }
@@ -115,9 +131,47 @@ class AuthController extends StateNotifier<AuthState> {
         status: AuthStatus.authenticated,
         customer: res.customer,
       );
+      _registerPush();
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
+      return false;
+    } catch (e) {
+      state = state.copyWith(error: 'Could not create account. Please try again.');
+      return false;
+    }
+  }
+
+  Future<bool> signInWithGoogle(String idToken) async {
+    state = state.copyWith(error: null);
+    try {
+      final res = await _repo.googleLogin(idToken);
+      state = state.copyWith(
+          status: AuthStatus.authenticated, customer: res.customer);
+      _registerPush();
+      return true;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (e) {
+      state = state.copyWith(error: 'Google sign-in failed. Please try again.');
+      return false;
+    }
+  }
+
+  Future<bool> signInWithFacebook(String accessToken) async {
+    state = state.copyWith(error: null);
+    try {
+      final res = await _repo.facebookLogin(accessToken);
+      state = state.copyWith(
+          status: AuthStatus.authenticated, customer: res.customer);
+      _registerPush();
+      return true;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (e) {
+      state = state.copyWith(error: 'Facebook sign-in failed. Please try again.');
       return false;
     }
   }

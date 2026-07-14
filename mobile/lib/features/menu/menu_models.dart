@@ -42,6 +42,81 @@ class Variation {
       );
 }
 
+/// A single choice within a [ModifierGroup] (e.g. "Extra cheese +Rs 100").
+class ModifierOption {
+  const ModifierOption({required this.id, required this.name, this.price = 0});
+
+  final String id;
+  final String name;
+  final double price;
+
+  factory ModifierOption.fromJson(Map<String, dynamic> j) => ModifierOption(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        price: _toDouble(j['price']),
+      );
+}
+
+/// A group of modifier options with selection rules. `type` is "single" (radio,
+/// pick one) or "multi" (checkboxes, pick min..max). Mirrors the backend's
+/// modifier_groups schema; the server re-validates + re-prices on order.
+class ModifierGroup {
+  const ModifierGroup({
+    required this.id,
+    required this.name,
+    required this.type,
+    required this.required,
+    required this.minSelect,
+    required this.maxSelect,
+    this.active = true,
+    this.options = const [],
+  });
+
+  final String id;
+  final String name;
+  final String type; // "single" | "multi"
+  final bool required;
+  final int minSelect;
+  final int maxSelect;
+  final bool active;
+  final List<ModifierOption> options;
+
+  bool get isSingle => type == 'single';
+
+  factory ModifierGroup.fromJson(Map<String, dynamic> j) => ModifierGroup(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        type: (j['type'] ?? 'multi').toString() == 'single' ? 'single' : 'multi',
+        required: j['required'] == true,
+        minSelect: _toInt(j['min_select']),
+        maxSelect: _toInt(j['max_select']),
+        active: j['active'] != false,
+        options: ((j['options'] as List?) ?? [])
+            .whereType<Map>()
+            .map((o) => ModifierOption.fromJson(Map<String, dynamic>.from(o)))
+            .toList(),
+      );
+}
+
+/// An ingredient the customer may optionally remove (e.g. "No onion").
+class MenuIngredient {
+  const MenuIngredient({
+    required this.id,
+    required this.name,
+    this.removable = true,
+  });
+
+  final String id;
+  final String name;
+  final bool removable;
+
+  factory MenuIngredient.fromJson(Map<String, dynamic> j) => MenuIngredient(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        removable: j['removable'] != false,
+      );
+}
+
 class MenuItem {
   const MenuItem({
     required this.id,
@@ -56,6 +131,8 @@ class MenuItem {
     this.isPopular = false,
     this.isBestseller = false,
     this.variations = const [],
+    this.modifierGroups = const [],
+    this.ingredients = const [],
   });
 
   final String id;
@@ -70,8 +147,19 @@ class MenuItem {
   final bool isPopular;
   final bool isBestseller;
   final List<Variation> variations;
+  final List<ModifierGroup> modifierGroups;
+  final List<MenuIngredient> ingredients;
 
   bool get hasVariations => variations.isNotEmpty;
+  bool get hasModifiers => modifierGroups.isNotEmpty;
+  List<MenuIngredient> get removableIngredients =>
+      ingredients.where((i) => i.removable).toList();
+  bool get hasRemovals => removableIngredients.isNotEmpty;
+
+  /// True when adding this item needs the customization sheet (a size to pick,
+  /// add-ons/choices, or removable ingredients) rather than a one-tap add.
+  bool get needsCustomization => hasVariations || hasModifiers || hasRemovals;
+
   bool get isDiscounted => originalPrice != null && originalPrice! > price;
 
   factory MenuItem.fromJson(Map<String, dynamic> j) => MenuItem(
@@ -91,6 +179,15 @@ class MenuItem {
         variations: ((j['variations'] as List?) ?? [])
             .whereType<Map>()
             .map((v) => Variation.fromJson(Map<String, dynamic>.from(v)))
+            .toList(),
+        modifierGroups: ((j['modifier_groups'] as List?) ?? [])
+            .whereType<Map>()
+            .map((g) => ModifierGroup.fromJson(Map<String, dynamic>.from(g)))
+            .where((g) => g.active && g.options.isNotEmpty)
+            .toList(),
+        ingredients: ((j['ingredients'] as List?) ?? [])
+            .whereType<Map>()
+            .map((i) => MenuIngredient.fromJson(Map<String, dynamic>.from(i)))
             .toList(),
       );
 }

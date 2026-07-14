@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/api_client.dart';
 import '../../core/format.dart';
+import '../../core/location.dart';
+import '../auth/auth_controller.dart';
 import 'order_models.dart';
 import 'order_repository.dart';
 
@@ -93,6 +96,10 @@ class _TrackingBody extends StatelessWidget {
           )
         else
           _StatusTimeline(currentIndex: currentIndex),
+        if (!terminalRejected && order.status != 'delivered') ...[
+          const SizedBox(height: 16),
+          _ShareLocationButton(orderId: order.id),
+        ],
         const SizedBox(height: 24),
         Text('Items', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
@@ -116,6 +123,10 @@ class _TrackingBody extends StatelessWidget {
         _row('Payment', order.paymentMethod.toUpperCase()),
         if (order.diamondsEarned > 0)
           _row('Diamonds earned', '${order.diamondsEarned} 💎'),
+        if (order.status == 'delivered') ...[
+          const SizedBox(height: 24),
+          _ReviewSection(orderId: order.id),
+        ],
       ],
     );
   }
@@ -194,6 +205,268 @@ class _Scrollable extends StatelessWidget {
         child: ConstrainedBox(
           constraints: BoxConstraints(minHeight: constraints.maxHeight),
           child: Center(child: child),
+        ),
+      ),
+    );
+  }
+}
+
+/// Rate + comment a delivered order. Shows the existing review (read-only) if
+/// one exists, otherwise a form for the signed-in owner. Guests (tracking via
+/// token) only see an existing review, since POST /reviews requires auth.
+class _ReviewSection extends ConsumerStatefulWidget {
+  const _ReviewSection({required this.orderId});
+  final String orderId;
+
+  @override
+  ConsumerState<_ReviewSection> createState() => _ReviewSectionState();
+}
+
+class _ReviewSectionState extends ConsumerState<_ReviewSection> {
+  final _comment = TextEditingController();
+  int _rating = 0;
+  bool _submitting = false;
+
+  @override
+  void dispose() {
+    _comment.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() => _submitting = true);
+    try {
+      await ref.read(orderRepositoryProvider).submitReview(
+            orderId: widget.orderId,
+            rating: _rating,
+            comment: _comment.text.trim(),
+          );
+      ref.invalidate(orderReviewProvider(widget.orderId));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not submit review. Please try again.')));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reviewAsync = ref.watch(orderReviewProvider(widget.orderId));
+    final authed = ref.watch(authControllerProvider).status ==
+        AuthStatus.authenticated;
+
+    return reviewAsync.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, __) => const SizedBox.shrink(),
+      data: (review) {
+        if (review != null) {
+          return _ReviewCard(
+            title: 'Your review',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _Stars(rating: review.rating),
+                if (review.comment.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(review.comment),
+                ],
+              ],
+            ),
+          );
+        }
+        if (!authed) return const SizedBox.shrink();
+        return _ReviewCard(
+          title: 'Rate your order',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _StarSelector(
+                rating: _rating,
+                onChanged: (r) => setState(() => _rating = r),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _comment,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  hintText: 'Tell us how it was (optional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed:
+                      (_rating == 0 || _submitting) ? null : _submit,
+                  child: _submitting
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Submit review'),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ReviewCard extends StatelessWidget {
+  const _ReviewCard({required this.title, required this.child});
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 10),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Stars extends StatelessWidget {
+  const _Stars({required this.rating});
+  final int rating;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        for (var i = 1; i <= 5; i++)
+          Icon(i <= rating ? Icons.star : Icons.star_border,
+              color: scheme.primary, size: 22),
+      ],
+    );
+  }
+}
+
+class _StarSelector extends StatelessWidget {
+  const _StarSelector({required this.rating, required this.onChanged});
+  final int rating;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        for (var i = 1; i <= 5; i++)
+          IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            icon: Icon(i <= rating ? Icons.star : Icons.star_border,
+                color: scheme.primary, size: 30),
+            onPressed: () => onChanged(i),
+          ),
+      ],
+    );
+  }
+}
+
+/// Lets the customer push their current GPS to an in-progress order so the
+/// restaurant/rider can find them (POST /online-orders/{id}/customer-location).
+class _ShareLocationButton extends ConsumerStatefulWidget {
+  const _ShareLocationButton({required this.orderId});
+  final String orderId;
+
+  @override
+  ConsumerState<_ShareLocationButton> createState() =>
+      _ShareLocationButtonState();
+}
+
+class _ShareLocationButtonState extends ConsumerState<_ShareLocationButton> {
+  bool _busy = false;
+  bool _shared = false;
+
+  Future<void> _share() async {
+    setState(() => _busy = true);
+    try {
+      final loc = await LocationService.current();
+      await ref.read(orderRepositoryProvider).shareLocation(
+            orderId: widget.orderId,
+            lat: loc.lat,
+            lng: loc.lng,
+          );
+      if (!mounted) return;
+      setState(() => _shared = true);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Location shared with the restaurant')));
+    } on LocationException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not share location. Please try again.')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      color: scheme.secondaryContainer,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Icon(Icons.my_location, color: scheme.onSecondaryContainer),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                _shared
+                    ? 'Location shared. Tap to update if you have moved.'
+                    : 'Share your live location so the rider can find you.',
+                style: TextStyle(color: scheme.onSecondaryContainer),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: _busy ? null : _share,
+              child: _busy
+                  ? const SizedBox(
+                      height: 18,
+                      width: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : Text(_shared ? 'Update' : 'Share'),
+            ),
+          ],
         ),
       ),
     );

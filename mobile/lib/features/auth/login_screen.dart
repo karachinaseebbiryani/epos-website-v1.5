@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
+
+import '../../core/config.dart';
 
 import 'auth_controller.dart';
 
@@ -26,15 +30,87 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _busy = true);
-    final ok = await ref
-        .read(authControllerProvider.notifier)
-        .login(_email.text.trim(), _password.text);
+    bool ok = false;
+    try {
+      ok = await ref
+          .read(authControllerProvider.notifier)
+          .login(_email.text.trim(), _password.text);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
     if (!mounted) return;
-    setState(() => _busy = false);
     if (!ok) {
       final err = ref.read(authControllerProvider).error ?? 'Login failed';
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(err)));
+    }
+  }
+
+  void _showMsg(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  Future<void> _google() async {
+    if (AppConfig.googleServerClientId.isEmpty) {
+      _showMsg("Google sign-in isn't set up yet.");
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final gsi = GoogleSignIn(
+          serverClientId: AppConfig.googleServerClientId,
+          scopes: const ['email']);
+      final acct = await gsi.signIn();
+      if (acct == null) return; // user cancelled
+      final tokenAuth = await acct.authentication;
+      final idToken = tokenAuth.idToken;
+      if (idToken == null) {
+        _showMsg('Could not get a Google token.');
+        return;
+      }
+      final ok = await ref
+          .read(authControllerProvider.notifier)
+          .signInWithGoogle(idToken);
+      if (!ok && mounted) {
+        _showMsg(ref.read(authControllerProvider).error ?? 'Google sign-in failed');
+      }
+    } catch (_) {
+      _showMsg('Google sign-in failed.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _facebook() async {
+    // Inert until configured: the Facebook Android SDK has auto-init disabled and
+    // the app id is a placeholder, so we only attempt a real login when a valid
+    // FACEBOOK_APP_ID was supplied at build time.
+    if (!AppConfig.facebookConfigured) {
+      _showMsg('Facebook sign-in will be enabled once the app is configured.');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final result = await FacebookAuth.instance.login(permissions: const ['email']);
+      if (result.status != LoginStatus.success || result.accessToken == null) {
+        if (result.status != LoginStatus.cancelled) {
+          _showMsg('Facebook sign-in failed.');
+        }
+        return;
+      }
+      final token = result.accessToken!.tokenString;
+      final ok = await ref
+          .read(authControllerProvider.notifier)
+          .signInWithFacebook(token);
+      if (!ok && mounted) {
+        _showMsg(
+            ref.read(authControllerProvider).error ?? 'Facebook sign-in failed');
+      }
+    } catch (_) {
+      _showMsg('Facebook sign-in failed.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -95,8 +171,28 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     onPressed: _busy ? null : () => context.go('/register'),
                     child: const Text("New here? Create an account"),
                   ),
-                  // NOTE: Google / Facebook sign-in buttons wired in P0.1 once
-                  // the Android OAuth client IDs + SHA-1 are provided.
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    const Expanded(child: Divider()),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('or',
+                          style: Theme.of(context).textTheme.bodySmall),
+                    ),
+                    const Expanded(child: Divider()),
+                  ]),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _google,
+                    icon: const Icon(Icons.g_mobiledata, size: 28),
+                    label: const Text('Continue with Google'),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _facebook,
+                    icon: const Icon(Icons.facebook),
+                    label: const Text('Continue with Facebook'),
+                  ),
                 ],
               ),
             ),

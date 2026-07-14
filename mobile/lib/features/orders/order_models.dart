@@ -131,3 +131,28 @@ class DeliveryQuote {
         maxRadiusKm: _toDouble(j['max_radius_km']),
       );
 }
+
+/// A customer review of a delivered order (POST /reviews, GET /reviews/order/{id}).
+class Review {
+  const Review({
+    required this.id,
+    required this.rating,
+    required this.comment,
+    required this.customerName,
+    required this.createdAt,
+  });
+
+  final String id;
+  final int rating;
+  final String comment;
+  final String customerName;
+  final String createdAt;
+
+  factory Review.fromJson(Map<String, dynamic> j) => Review(
+        id: (j['id'] ?? '').toString(),
+        rating: _toInt(j['rating']),
+        comment: (j['comment'] ?? '').toString(),
+        customerName: (j['customer_name'] ?? '').toString(),
+        createdAt: (j['created_at'] ?? '').toString(),
+      );
+}

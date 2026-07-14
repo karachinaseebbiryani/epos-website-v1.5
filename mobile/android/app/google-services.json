@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "557642081718",
+    "project_id": "karachinaseebbiryani-4f6d0",
+    "storage_bucket": "karachinaseebbiryani-4f6d0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:557642081718:android:7cd2d693e70b6349774d17",
+        "android_client_info": {
+          "package_name": "com.karachinaseeb.knb_customer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5Qe8euLJme8RSKKhLsos8ocVX1ojsr50"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

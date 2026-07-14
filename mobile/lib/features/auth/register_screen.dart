@@ -30,14 +30,18 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _busy = true);
-    final ok = await ref.read(authControllerProvider.notifier).register(
-          name: _name.text.trim(),
-          email: _email.text.trim(),
-          phone: _phone.text.trim(),
-          password: _password.text,
-        );
+    bool ok = false;
+    try {
+      ok = await ref.read(authControllerProvider.notifier).register(
+            name: _name.text.trim(),
+            email: _email.text.trim(),
+            phone: _phone.text.trim(),
+            password: _password.text,
+          );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
     if (!mounted) return;
-    setState(() => _busy = false);
     if (!ok) {
       final err = ref.read(authControllerProvider).error ?? 'Registration failed';
       ScaffoldMessenger.of(context)

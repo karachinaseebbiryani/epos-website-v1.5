@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Facebook Login placeholders. Replace with the real values from the
+         Facebook developer console (App ID + Client Token) to enable Facebook
+         sign-in, then build passing FACEBOOK_APP_ID as a dart-define.
+         Auto-init is disabled in AndroidManifest.xml so these placeholders can
+         never crash the app at launch while sign-in stays inert. -->
+    <string name="facebook_app_id">000000000000000</string>
+    <string name="fb_login_protocol_scheme">fb000000000000000</string>
+    <string name="facebook_client_token">CHANGE_ME_CLIENT_TOKEN</string>
+</resources>

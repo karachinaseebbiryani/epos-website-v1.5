@@ -49,6 +49,24 @@ class AuthRepository {
     return result;
   }
 
+  Future<AuthResult> googleLogin(String idToken) async {
+    final res = await _api.dio.post('/customer/google',
+        data: {'credential': idToken}, options: _authOpts());
+    throwIfError(res);
+    final result = AuthResult.fromJson(Map<String, dynamic>.from(res.data));
+    await _tokenStore.write(result.token);
+    return result;
+  }
+
+  Future<AuthResult> facebookLogin(String accessToken) async {
+    final res = await _api.dio.post('/customer/facebook',
+        data: {'access_token': accessToken}, options: _authOpts());
+    throwIfError(res);
+    final result = AuthResult.fromJson(Map<String, dynamic>.from(res.data));
+    await _tokenStore.write(result.token);
+    return result;
+  }
+
   /// Verify a stored token and hydrate the profile on app start.
   Future<Customer?> me() async {
     final token = await _tokenStore.read();
