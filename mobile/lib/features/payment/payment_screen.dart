@@ -234,17 +234,21 @@ class _Body extends StatelessWidget {
         const SizedBox(height: 8),
         TextField(
           controller: reference,
+          maxLength: 60,
           decoration: const InputDecoration(
             labelText: 'Transaction ID / reference',
             border: OutlineInputBorder(),
+            counterText: '',
           ),
         ),
         const SizedBox(height: 12),
         TextField(
           controller: payer,
+          maxLength: 60,
           decoration: const InputDecoration(
             labelText: 'Sender name (optional)',
             border: OutlineInputBorder(),
+            counterText: '',
           ),
         ),
         const SizedBox(height: 12),

@@ -21,6 +21,7 @@ class Offer {
     required this.discountAmount,
     required this.couponCode,
     required this.minOrderAmount,
+    this.imageUrl = '',
     this.validUntil,
     DateTime? serverNow,
     DateTime? fetchedAt,
@@ -34,6 +35,7 @@ class Offer {
   final double discountAmount;
   final String couponCode;
   final double minOrderAmount;
+  final String imageUrl;
 
   /// Server-controlled expiry (UTC). Null = no expiry.
   final DateTime? validUntil;
@@ -68,6 +70,7 @@ class Offer {
         discountAmount: _toDouble(j['discount_amount']),
         couponCode: (j['coupon_code'] ?? '').toString(),
         minOrderAmount: _toDouble(j['min_order_amount']),
+        imageUrl: (j['image_url'] ?? '').toString(),
         validUntil: _parseUtc(j['valid_until']),
         serverNow: _parseUtc(j['server_now']),
       );

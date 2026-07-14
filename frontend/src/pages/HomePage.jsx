@@ -6,6 +6,7 @@ import { useCart } from "../contexts/CartContext";
 import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
+import { OfferCountdown } from "./OffersPage";
 import TrustStrip from "../components/TrustStrip";
 import { useRestaurantInfo } from "../lib/restaurantInfo";
 import { useSeo } from "../lib/seo";
@@ -154,11 +155,14 @@ export default function HomePage() {
                                     )}
                                     <div className="absolute inset-0 bg-gradient-to-t from-brand-ink via-brand-ink/60 to-transparent" />
                                     <div className="relative h-full flex flex-col justify-end p-6">
-                                        {offer.coupon_code && (
-                                            <span className="self-start bg-brand-yellow text-brand-ink text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full mb-3">
-                                                {offer.coupon_code}
-                                            </span>
-                                        )}
+                                        <div className="flex items-center gap-2 mb-3">
+                                            {offer.coupon_code && (
+                                                <span className="bg-brand-yellow text-brand-ink text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full">
+                                                    {offer.coupon_code}
+                                                </span>
+                                            )}
+                                            <OfferCountdown validUntil={offer.valid_until} serverNow={offer.server_now} className="text-brand-yellow" />
+                                        </div>
                                         <h3 className="font-display font-bold text-xl mb-2">{offer.title}</h3>
                                         <p className="text-white/80 text-sm">{offer.description}</p>
                                     </div>

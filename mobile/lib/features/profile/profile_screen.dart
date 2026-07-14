@@ -260,10 +260,12 @@ class _AllergensSectionState extends ConsumerState<_AllergensSection> {
             Expanded(
               child: TextField(
                 controller: _customCtrl,
+                maxLength: 30,
                 decoration: const InputDecoration(
                   labelText: 'Add another allergy',
                   isDense: true,
                   border: OutlineInputBorder(),
+                  counterText: '',
                 ),
                 onSubmitted: (_) => _addCustom(),
               ),

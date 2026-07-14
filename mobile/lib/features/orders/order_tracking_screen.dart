@@ -367,9 +367,11 @@ class _ReviewSectionState extends ConsumerState<_ReviewSection> {
               TextField(
                 controller: _comment,
                 maxLines: 3,
+                maxLength: 500,
                 decoration: const InputDecoration(
                   hintText: 'Tell us how it was (optional)',
                   border: OutlineInputBorder(),
+                  counterText: '',
                 ),
               ),
               const SizedBox(height: 12),

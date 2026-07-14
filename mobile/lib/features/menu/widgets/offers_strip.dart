@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/tokens.dart';
+import '../../../core/images.dart';
 import '../../offers/offers_models.dart';
 import '../../offers/offers_repository.dart';
 import '../../offers/widgets/offer_countdown.dart';
@@ -45,7 +46,7 @@ class OffersStrip extends ConsumerWidget {
           ),
         ),
         SizedBox(
-          height: 96,
+          height: 110,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -90,16 +91,47 @@ class _OfferCard extends StatelessWidget {
             },
       child: Container(
         width: 210,
-        padding: const EdgeInsets.all(12),
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [BrandColors.red, BrandColors.yellowDark],
-          ),
           borderRadius: BorderRadius.circular(BrandRadii.card),
         ),
-        child: Column(
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: [
+            // Background: the admin-set offer photo when present (same approved
+            // source as the website), else the brand gradient.
+            Positioned.fill(
+              child: offer.imageUrl.trim().isEmpty
+                  ? const DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [BrandColors.red, BrandColors.yellowDark],
+                        ),
+                      ),
+                    )
+                  : ProductImage(imageUrl: offer.imageUrl),
+            ),
+            // Dark scrim so the white text stays readable over any photo.
+            if (offer.imageUrl.trim().isNotEmpty)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.25),
+                        Colors.black.withValues(alpha: 0.55),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -151,6 +183,9 @@ class _OfferCard extends StatelessWidget {
                     : 'Auto-applied',
                 style: const TextStyle(color: Colors.white70, fontSize: 11),
               ),
+          ],
+              ),
+            ),
           ],
         ),
       ),

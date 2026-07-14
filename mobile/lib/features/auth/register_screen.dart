@@ -69,8 +69,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               children: [
                 TextFormField(
                   controller: _name,
+                  maxLength: 60,
                   decoration: const InputDecoration(
-                      labelText: 'Full name', border: OutlineInputBorder()),
+                      labelText: 'Full name',
+                      border: OutlineInputBorder(),
+                      counterText: ''),
                   validator: (v) =>
                       (v == null || v.trim().isEmpty) ? 'Enter your name' : null,
                 ),
@@ -78,8 +81,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 TextFormField(
                   controller: _email,
                   keyboardType: TextInputType.emailAddress,
+                  maxLength: 100,
                   decoration: const InputDecoration(
-                      labelText: 'Email', border: OutlineInputBorder()),
+                      labelText: 'Email',
+                      border: OutlineInputBorder(),
+                      counterText: ''),
                   validator: (v) =>
                       (v == null || !v.contains('@')) ? 'Enter a valid email' : null,
                 ),
@@ -87,8 +93,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 TextFormField(
                   controller: _phone,
                   keyboardType: TextInputType.phone,
+                  maxLength: 20,
                   decoration: const InputDecoration(
-                      labelText: 'Phone', border: OutlineInputBorder()),
+                      labelText: 'Phone',
+                      border: OutlineInputBorder(),
+                      counterText: ''),
                   validator: (v) =>
                       (v == null || v.trim().length < 7) ? 'Enter your phone' : null,
                 ),
@@ -96,8 +105,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 TextFormField(
                   controller: _password,
                   obscureText: true,
+                  maxLength: 72,
                   decoration: const InputDecoration(
-                      labelText: 'Password', border: OutlineInputBorder()),
+                      labelText: 'Password',
+                      border: OutlineInputBorder(),
+                      counterText: ''),
                   validator: (v) =>
                       (v == null || v.length < 6) ? 'Min 6 characters' : null,
                 ),

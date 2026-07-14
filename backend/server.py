@@ -3029,23 +3029,31 @@ def _email_verification_enabled() -> bool:
 def _generate_otp() -> str:
     return f"{secrets.randbelow(1000000):06d}"
 
+def _clip(v, n: int) -> str:
+    """Defensive input cap: trim + hard-truncate free-text fields so oversized
+    client payloads can't bloat documents, receipts, or WhatsApp/push messages.
+    Truncates (rather than rejects) so older clients never start erroring."""
+    return str(v or "").strip()[:n]
+
 def _customer_email_verified(cust: dict) -> bool:
     """True if the account may transact. Missing field = grandfathered/verified."""
     return bool(cust.get("email_verified", True))
 
-async def _send_customer_otp_email(email: str, name: str, otp: str) -> bool:
-    """Email a verification code. Returns False (never raises) if SMTP isn't
-    configured or sending fails, so registration itself never hard-fails on email."""
+async def _send_customer_otp_email(email: str, name: str, otp: str, purpose: str = "verify") -> bool:
+    """Email a verification / password-reset code. Returns False (never raises)
+    if SMTP isn't configured or sending fails, so the calling flow never
+    hard-fails on email."""
     try:
         s = await _get_settings_doc()
         if not (s.get("smtp_host") and s.get("smtp_port") and s.get("smtp_user") and s.get("smtp_password")):
             logger.warning("Customer OTP email skipped: SMTP not configured")
             return False
         rname = s.get("restaurant_name", "RestoPOS")
-        subject = f"[{rname}] Your verification code: {otp}"
-        plain = f"Your {rname} verification code is {otp}. It expires in {OTP_TTL_MINUTES} minutes."
+        what = "password reset code" if purpose == "reset" else "verification code"
+        subject = f"[{rname}] Your {what}: {otp}"
+        plain = f"Your {rname} {what} is {otp}. It expires in {OTP_TTL_MINUTES} minutes."
         html = (f"<p>Hi {name or 'there'},</p>"
-                f"<p>Your <b>{rname}</b> verification code is:</p>"
+                f"<p>Your <b>{rname}</b> {what} is:</p>"
                 f"<p style='font-size:26px;font-weight:800;letter-spacing:4px'>{otp}</p>"
                 f"<p style='color:#5C5F5C'>It expires in {OTP_TTL_MINUTES} minutes. "
                 f"If you didn't request this, you can ignore this email.</p>")
@@ -3085,11 +3093,13 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
     if await db.customers.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
     verify_required = _email_verification_enabled()
+    if len(email) > 100:
+        raise HTTPException(status_code=400, detail="Email is too long")
     doc = {
         "email": email,
         "password_hash": hash_password(req.password),
-        "name": req.name.strip(),
-        "phone": (req.phone or "").strip(),
+        "name": _clip(req.name, 60),
+        "phone": _clip(req.phone, 20),
         # When the gate is disabled, accounts are created already verified.
         "email_verified": not verify_required,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3171,6 +3181,69 @@ async def customer_resend_otp(request: Request):
         raise HTTPException(status_code=503, detail="Could not send the verification email. Please try again shortly.")
     return {"email_verified": False, "otp_sent": True}
 
+# --- Forgot / reset password (email OTP; additive) ---
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
+@api_router.post("/customer/forgot-password")
+async def customer_forgot_password(req: ForgotPasswordRequest):
+    """Email a 6-digit reset code. ALWAYS returns the same generic response so
+    the endpoint can't be used to probe which emails have accounts."""
+    email = _clip(req.email, 100).lower()
+    generic = {"message": "If an account exists for that email, a reset code has been sent."}
+    if not email or "@" not in email:
+        return generic
+    cust = await db.customers.find_one({"email": email})
+    if not cust:
+        return generic
+    # Same cooldown as verification resend, to stop email-bombing an address.
+    sent_at = _parse_iso_utc(cust.get("reset_otp_sent_at"))
+    if sent_at and (datetime.now(timezone.utc) - sent_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+        return generic
+    otp = _generate_otp()
+    now = datetime.now(timezone.utc)
+    await db.customers.update_one({"_id": cust["_id"]}, {"$set": {
+        "reset_otp_hash": hash_password(otp),
+        "reset_otp_expires_at": (now + timedelta(minutes=OTP_TTL_MINUTES)).isoformat(),
+        "reset_otp_attempts": 0,
+        "reset_otp_sent_at": now.isoformat(),
+    }})
+    await _send_customer_otp_email(email, cust.get("name", ""), otp, purpose="reset")
+    return generic
+
+@api_router.post("/customer/reset-password")
+async def customer_reset_password(req: ResetPasswordRequest):
+    """Set a new password after proving control of the email via the reset OTP.
+    Also marks the email verified (the code proves ownership)."""
+    email = _clip(req.email, 100).lower()
+    if len(req.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    _validate_password_length(req.new_password)
+    cust = await db.customers.find_one({"email": email})
+    # Deliberately vague on which part failed — no account enumeration.
+    bad = HTTPException(status_code=400, detail="Invalid or expired reset code.")
+    if not cust or not cust.get("reset_otp_hash"):
+        raise bad
+    exp = _parse_iso_utc(cust.get("reset_otp_expires_at"))
+    if exp is None or datetime.now(timezone.utc) > exp:
+        raise bad
+    if int(cust.get("reset_otp_attempts", 0) or 0) >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many attempts. Please request a new code.")
+    if not verify_password((req.otp or "").strip(), cust["reset_otp_hash"]):
+        await db.customers.update_one({"_id": cust["_id"]}, {"$inc": {"reset_otp_attempts": 1}})
+        raise bad
+    await db.customers.update_one(
+        {"_id": cust["_id"]},
+        {"$set": {"password_hash": hash_password(req.new_password), "email_verified": True},
+         "$unset": {"reset_otp_hash": "", "reset_otp_expires_at": "",
+                    "reset_otp_attempts": "", "reset_otp_sent_at": ""}})
+    return {"message": "Password updated. You can now sign in."}
+
 class AllergensUpdate(BaseModel):
     allergens: List[str] = []
 
@@ -3179,7 +3252,7 @@ async def update_customer_allergens(req: AllergensUpdate, request: Request):
     cust = await get_current_customer(request)
     cleaned = []
     for a in (req.allergens or [])[:40]:
-        a = str(a).strip()
+        a = _clip(a, 30)
         if a and a not in cleaned:
             cleaned.append(a)
     await db.customers.update_one({"_id": cust["_id"]}, {"$set": {"allergens": cleaned}})
@@ -3705,7 +3778,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         # validated server-side so the client can never inflate/deflate the total.
         mod_add, resolved_mods, resolved_removals = _validate_and_price_modifiers(db_item, line)
         unit_price = round(server_price + mod_add, 2)
-        line_note = (getattr(line, "line_note", None) or "").strip() or None
+        line_note = _clip(getattr(line, "line_note", None), 140) or None
         server_subtotal += unit_price * qty
         validated_items.append({
             "item_id": str(db_item["_id"]),
@@ -3928,10 +4001,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "delivery_lng": order.delivery_lng if order_type == "delivery" else None,
         "total_price": final_total,
         "customer_id": cust["_id"] if cust else None,
-        "customer_name": order.customer_name,
+        "customer_name": _clip(order.customer_name, 60),
         "phone": order.phone,
-        "address": address_clean if order_type == "delivery" else "",
-        "notes": order.notes,
+        "address": _clip(address_clean, 200) if order_type == "delivery" else "",
+        "notes": _clip(order.notes, 300),
         "payment_method": pmethod,
         "payment_status": payment_status,
         "coupon_code": coupon_used,
@@ -4394,20 +4467,36 @@ _fcm_ready: Optional[bool] = None  # None = not yet probed
 
 
 def _init_fcm() -> bool:
-    """Lazily initialise the Firebase Admin app. Returns True when FCM can send."""
+    """Lazily initialise the Firebase Admin app. Returns True when FCM can send.
+
+    FIREBASE_CREDENTIALS may be EITHER a path to the service-account JSON file
+    (local dev) OR the raw JSON content itself (Fly.io secrets have no
+    filesystem). GOOGLE_APPLICATION_CREDENTIALS remains path-only fallback."""
     global _fcm_app, _fcm_ready
     if _fcm_ready is not None:
         return _fcm_ready
-    cred_path = os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if not cred_path or not os.path.exists(cred_path):
-        logger.info("FCM disabled: no service-account credentials configured.")
-        _fcm_ready = False
-        return False
+    raw = os.environ.get("FIREBASE_CREDENTIALS") or ""
+    cred_source = None
+    if raw.strip().startswith("{"):
+        # Raw JSON content in the env var (e.g. `fly secrets set FIREBASE_CREDENTIALS=...`)
+        try:
+            cred_source = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"FCM disabled: FIREBASE_CREDENTIALS is not valid JSON ({e}).")
+            _fcm_ready = False
+            return False
+    else:
+        cred_path = raw or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if not cred_path or not os.path.exists(cred_path):
+            logger.info("FCM disabled: no service-account credentials configured.")
+            _fcm_ready = False
+            return False
+        cred_source = cred_path
     try:
         import firebase_admin
         from firebase_admin import credentials as _fb_cred
         if not firebase_admin._apps:
-            _fcm_app = firebase_admin.initialize_app(_fb_cred.Certificate(cred_path))
+            _fcm_app = firebase_admin.initialize_app(_fb_cred.Certificate(cred_source))
         else:
             _fcm_app = firebase_admin.get_app()
         _fcm_ready = True
@@ -5028,7 +5117,7 @@ async def create_review(req: ReviewCreate, request: Request):
         "customer_id": cust["_id"],
         "customer_name": cust.get("name", "Customer"),
         "rating": int(req.rating),
-        "comment": req.comment.strip(),
+        "comment": _clip(req.comment, 500),
         "created_at": now.isoformat(),
     }
     result = await db.reviews.insert_one(doc)

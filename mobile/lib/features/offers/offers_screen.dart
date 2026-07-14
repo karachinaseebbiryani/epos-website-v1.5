@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format.dart';
+import '../../core/images.dart';
 import 'offers_models.dart';
 import 'offers_repository.dart';
 import 'widgets/offer_countdown.dart';
@@ -91,11 +92,20 @@ class _OfferCard extends StatelessWidget {
     final disc = _discountText(offer.discountPercent, offer.discountAmount);
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
+      clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: BorderSide(color: scheme.outlineVariant),
       ),
-      child: Padding(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (offer.imageUrl.trim().isNotEmpty)
+            SizedBox(
+              height: 140,
+              child: ProductImage(imageUrl: offer.imageUrl),
+            ),
+          Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -142,6 +152,8 @@ class _OfferCard extends StatelessWidget {
             ],
           ],
         ),
+          ),
+        ],
       ),
     );
   }

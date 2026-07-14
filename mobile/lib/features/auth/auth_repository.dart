@@ -83,6 +83,26 @@ class AuthRepository {
     throwIfError(res);
   }
 
+  /// Request a password-reset code by email. Backend always answers the same
+  /// way (no account enumeration), so this "succeeds" for any address.
+  Future<void> forgotPassword(String email) async {
+    final res = await _api.dio.post('/customer/forgot-password',
+        data: {'email': email}, options: _authOpts());
+    throwIfError(res);
+  }
+
+  /// Set a new password using the emailed reset code.
+  Future<void> resetPassword({
+    required String email,
+    required String otp,
+    required String newPassword,
+  }) async {
+    final res = await _api.dio.post('/customer/reset-password',
+        data: {'email': email, 'otp': otp, 'new_password': newPassword},
+        options: _authOpts());
+    throwIfError(res);
+  }
+
   /// Verify a stored token and hydrate the profile on app start.
   Future<Customer?> me() async {
     final token = await _tokenStore.read();

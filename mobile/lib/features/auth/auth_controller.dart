@@ -42,17 +42,32 @@ final authRepositoryProvider = Provider<AuthRepository>(
 enum AuthStatus { unknown, authenticated, unauthenticated }
 
 class AuthState {
-  const AuthState({required this.status, this.customer, this.error});
+  const AuthState({
+    required this.status,
+    this.customer,
+    this.error,
+    this.otpEmailFailed = false,
+  });
 
   final AuthStatus status;
   final Customer? customer;
   final String? error;
 
-  AuthState copyWith({AuthStatus? status, Customer? customer, String? error}) =>
+  /// True when registration succeeded but the verification email failed to send
+  /// (SMTP down/unconfigured server-side) — the verify screen shows a warning
+  /// and points at "Resend code".
+  final bool otpEmailFailed;
+
+  AuthState copyWith(
+          {AuthStatus? status,
+          Customer? customer,
+          String? error,
+          bool? otpEmailFailed}) =>
       AuthState(
         status: status ?? this.status,
         customer: customer ?? this.customer,
         error: error,
+        otpEmailFailed: otpEmailFailed ?? this.otpEmailFailed,
       );
 
   static const initial = AuthState(status: AuthStatus.unknown);
@@ -130,6 +145,8 @@ class AuthController extends StateNotifier<AuthState> {
       state = state.copyWith(
         status: AuthStatus.authenticated,
         customer: res.customer,
+        // otp_sent=false on register means the code email didn't go out.
+        otpEmailFailed: res.otpSent == false,
       );
       _registerPush();
       return true;

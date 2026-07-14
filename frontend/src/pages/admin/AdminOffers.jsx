@@ -37,7 +37,13 @@ export default function AdminOffers() {
         e.preventDefault();
         try {
             // Convert the local datetime input back to a UTC ISO string (or null).
-            const payload = { ...form, valid_until: localInputToIso(form.valid_until) };
+            const validUntilIso = localInputToIso(form.valid_until);
+            // Guard: a past expiry (e.g. date picked but time left at 00:00) makes the
+            // offer invisible to customers immediately — almost never intended.
+            if (validUntilIso && new Date(validUntilIso).getTime() <= Date.now()) {
+                if (!confirm("The 'valid until' time is already in the past, so customers will NOT see this offer. Save anyway?")) return;
+            }
+            const payload = { ...form, valid_until: validUntilIso };
             if (editing === "new") {
                 await api.post("/offers", payload);
                 toast.success("Offer created");
@@ -81,7 +87,9 @@ export default function AdminOffers() {
                         <div className="p-4">
                             <div className="flex items-start justify-between gap-2">
                                 <h3 className="font-display font-bold text-brand-ink">{o.title}</h3>
-                                {o.active ? <span className="text-[10px] uppercase font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded">Active</span> : <span className="text-[10px] uppercase font-bold text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded">Inactive</span>}
+                                {o.valid_until && new Date(o.valid_until).getTime() <= Date.now()
+                                    ? <span className="text-[10px] uppercase font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded">Expired</span>
+                                    : o.active ? <span className="text-[10px] uppercase font-bold text-green-700 bg-green-50 px-2 py-0.5 rounded">Active</span> : <span className="text-[10px] uppercase font-bold text-neutral-500 bg-neutral-100 px-2 py-0.5 rounded">Inactive</span>}
                             </div>
                             <p className="text-xs text-neutral-500 mt-1 line-clamp-2">{o.description}</p>
                             {o.coupon_code && <p className="text-xs font-mono text-brand-red mt-2 font-bold">{o.coupon_code}</p>}

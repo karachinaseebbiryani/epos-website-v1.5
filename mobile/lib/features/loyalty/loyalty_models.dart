@@ -4,6 +4,59 @@ int _toInt(dynamic v) {
   return int.tryParse(v.toString()) ?? 0;
 }
 
+double _toDouble(dynamic v) {
+  if (v == null) return 0;
+  if (v is num) return v.toDouble();
+  return double.tryParse(v.toString()) ?? 0;
+}
+
+/// A redeemable reward from GET /api/loyalty/rewards. Redemption itself is
+/// validated server-side at checkout (balance check, price math, stacking
+/// rules) — the app only sends the chosen reward_id.
+class LoyaltyReward {
+  const LoyaltyReward({
+    required this.id,
+    required this.title,
+    required this.description,
+    required this.rewardType, // free_item | discount_percent | discount_fixed
+    required this.rewardValue,
+    required this.costDiamonds,
+    this.freeItemName = '',
+    this.freeItemImage = '',
+    this.freeItemValue = 0,
+  });
+
+  final String id;
+  final String title;
+  final String description;
+  final String rewardType;
+  final String rewardValue;
+  final int costDiamonds;
+  final String freeItemName;
+  final String freeItemImage;
+  final double freeItemValue;
+
+  /// Short label of what you get: "15% OFF" / "Rs. 100 OFF" / "FREE <item>".
+  String get benefitLabel => switch (rewardType) {
+        'discount_percent' => '${_toDouble(rewardValue).toStringAsFixed(0)}% OFF',
+        'discount_fixed' => 'Rs. ${_toDouble(rewardValue).toStringAsFixed(0)} OFF',
+        'free_item' => freeItemName.isEmpty ? 'Free item' : 'FREE $freeItemName',
+        _ => title,
+      };
+
+  factory LoyaltyReward.fromJson(Map<String, dynamic> j) => LoyaltyReward(
+        id: (j['id'] ?? '').toString(),
+        title: (j['title'] ?? '').toString(),
+        description: (j['description'] ?? '').toString(),
+        rewardType: (j['reward_type'] ?? '').toString(),
+        rewardValue: (j['reward_value'] ?? '').toString(),
+        costDiamonds: _toInt(j['cost_diamonds']),
+        freeItemName: (j['free_item_name'] ?? '').toString(),
+        freeItemImage: (j['free_item_image'] ?? '').toString(),
+        freeItemValue: _toDouble(j['free_item_value']),
+      );
+}
+
 /// Customer diamond balance from GET /api/loyalty/balance.
 class LoyaltyBalance {
   const LoyaltyBalance({

@@ -80,7 +80,8 @@ class _VerifyEmailScreenState extends ConsumerState<VerifyEmailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final email = ref.watch(authControllerProvider).customer?.email ?? '';
+    final auth = ref.watch(authControllerProvider);
+    final email = auth.customer?.email ?? '';
     return Scaffold(
       appBar: AppBar(title: const Text('Verify your email')),
       body: ListView(
@@ -88,6 +89,22 @@ class _VerifyEmailScreenState extends ConsumerState<VerifyEmailScreen> {
         children: [
           const Icon(Icons.mark_email_read_outlined, size: 56),
           const SizedBox(height: 16),
+          if (auth.otpEmailFailed) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                'We could not send the code just now. Tap "Resend code" below to try again.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Theme.of(context).colorScheme.onErrorContainer),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
           Text(
             email.isEmpty
                 ? 'Enter the 6-digit code we emailed you.'

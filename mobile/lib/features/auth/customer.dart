@@ -37,12 +37,18 @@ class Customer {
 
 /// Login/register responses additionally carry the JWT.
 class AuthResult {
-  const AuthResult({required this.customer, required this.token});
+  const AuthResult({required this.customer, required this.token, this.otpSent});
   final Customer customer;
   final String token;
+
+  /// Register-only: whether the verification email actually sent (null on
+  /// login/social where it doesn't apply). False = SMTP failed server-side —
+  /// the UI should tell the user to hit "Resend code".
+  final bool? otpSent;
 
   factory AuthResult.fromJson(Map<String, dynamic> json) => AuthResult(
         customer: Customer.fromJson(json),
         token: (json['token'] ?? '').toString(),
+        otpSent: json.containsKey('otp_sent') ? json['otp_sent'] == true : null,
       );
 }

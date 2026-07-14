@@ -1,10 +1,48 @@
 import { useEffect, useState } from "react";
 import api, { resolveImageUrl } from "../lib/api";
-import { Tag, Flame } from "lucide-react";
+import { Tag, Flame, Timer } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../contexts/AuthContext";
 import GuestGateSheet from "../components/GuestGateSheet";
 import { useSeo } from "../lib/seo";
+
+/**
+ * Live countdown for a limited-time offer. Ticks off the SERVER clock
+ * (valid_until + server_now from GET /offers), so changing the device clock
+ * can't extend a deal. Renders nothing for offers without an expiry.
+ */
+export function OfferCountdown({ validUntil, serverNow, className = "" }) {
+    // Offset between server time and this device, captured once per mount.
+    const [offsetMs] = useState(() =>
+        serverNow ? new Date(serverNow).getTime() - Date.now() : 0
+    );
+    const [leftMs, setLeftMs] = useState(() =>
+        validUntil ? new Date(validUntil).getTime() - (Date.now() + offsetMs) : null
+    );
+    useEffect(() => {
+        if (!validUntil) return undefined;
+        const id = setInterval(() => {
+            setLeftMs(new Date(validUntil).getTime() - (Date.now() + offsetMs));
+        }, 1000);
+        return () => clearInterval(id);
+    }, [validUntil, offsetMs]);
+    if (!validUntil || leftMs == null) return null;
+    if (leftMs <= 0) {
+        return (
+            <span className={`inline-flex items-center gap-1 text-[11px] font-bold text-neutral-400 ${className}`}>
+                <Timer className="w-3 h-3" /> Expired
+            </span>
+        );
+    }
+    const s = Math.floor(leftMs / 1000);
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const label = d > 0 ? `${d}d ${h}h left` : h > 0 ? `${h}h ${m}m left` : `${m}m ${sec}s left`;
+    return (
+        <span className={`inline-flex items-center gap-1 text-[11px] font-bold ${className}`} data-testid="offer-countdown">
+            <Timer className="w-3 h-3" /> {label}
+        </span>
+    );
+}
 
 export default function OffersPage() {
     useSeo({
@@ -100,21 +138,8 @@ export default function OffersPage() {
                     </div>
                 </div>
             )}
-            {!user && (
-                <button
-                    type="button"
-                    onClick={() => setGateOpen(true)}
-                    data-testid="personal-coupons-teaser"
-                    className="w-full text-left mb-8 bg-gradient-to-br from-brand-red to-brand-red-dark text-white rounded-2xl p-5 md:p-6 shadow-lg hover:shadow-xl transition-shadow"
-                >
-                    <div className="flex items-center gap-2 mb-1">
-                        <Tag className="w-4 h-4" />
-                        <span className="text-[11px] uppercase tracking-[0.2em] font-bold">Just for you</span>
-                    </div>
-                    <h2 className="font-display font-black text-xl md:text-2xl">Sign in to unlock your personal codes</h2>
-                    <p className="text-sm text-white/85 mt-1">Customers get a unique Rs. 50 off coupon after their first delivered order.</p>
-                </button>
-            )}
+            {/* Guests see no personal-coupons panel at all (owner request 2026-07-15:
+                hide the teaser when not signed in — public offers below still show). */}
 
             {offers.length === 0 ? (
                 <div className="text-center py-16 text-neutral-500">No active offers right now. Check back soon!</div>
@@ -135,7 +160,10 @@ export default function OffersPage() {
                                 )}
                             </div>
                             <div className="p-3 md:p-6">
-                                <h3 className="font-display font-bold text-sm md:text-xl text-brand-ink mb-1 md:mb-2 line-clamp-1">{o.title}</h3>
+                                <div className="flex items-start justify-between gap-2">
+                                    <h3 className="font-display font-bold text-sm md:text-xl text-brand-ink mb-1 md:mb-2 line-clamp-1">{o.title}</h3>
+                                    <OfferCountdown validUntil={o.valid_until} serverNow={o.server_now} className="text-brand-red shrink-0 mt-0.5" />
+                                </div>
                                 <p className="text-neutral-500 text-[11px] md:text-sm leading-snug md:leading-relaxed mb-3 md:mb-5 line-clamp-2 md:line-clamp-none">{o.description}</p>
                                 {o.coupon_code && (
                                     <button

@@ -29,7 +29,11 @@ export default function RegisterPage() {
             if (data && data.email_verified === false) {
                 // New account must confirm the emailed code before it can order.
                 setVerifyStep(true);
-                toast.success("Account created — check your email for a verification code.");
+                if (data.otp_sent === false) {
+                    toast.error("Account created, but the code email failed to send — tap 'Resend code'.");
+                } else {
+                    toast.success("Account created — check your email for a verification code.");
+                }
             } else {
                 toast.success("Account created!");
                 navigate(redirectTo);

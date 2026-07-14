@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/auth/auth_controller.dart';
+import '../features/auth/forgot_password_screen.dart';
 import '../features/auth/login_screen.dart';
 import '../features/auth/register_screen.dart';
 import '../features/auth/verify_email_screen.dart';
@@ -34,7 +35,9 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, goState) {
       final status = ref.read(authControllerProvider).status;
       final loc = goState.matchedLocation;
-      final onAuthPage = loc == '/login' || loc == '/register';
+      final onAuthPage = loc == '/login' ||
+          loc == '/register' ||
+          loc == '/forgot-password';
 
       if (status == AuthStatus.unknown) return null; // splash handles it
       if (status == AuthStatus.unauthenticated) {
@@ -44,44 +47,57 @@ final routerProvider = Provider<GoRouter>((ref) {
       return onAuthPage ? '/' : null;
     },
     routes: [
-      GoRoute(path: '/', builder: (_, __) => const MenuScreen()),
+      // Child routes of '/' so deep locations build a page STACK above the menu
+      // (menu → cart → …). With the old flat layout, go()/deep-links produced a
+      // single-page stack and the system back gesture exited the whole app.
+      GoRoute(
+        path: '/',
+        builder: (_, __) => const MenuScreen(),
+        routes: [
+          GoRoute(path: 'cart', builder: (_, __) => const CartScreen()),
+          GoRoute(path: 'checkout', builder: (_, __) => const CheckoutScreen()),
+          GoRoute(path: 'diamonds', builder: (_, __) => const DiamondsScreen()),
+          GoRoute(path: 'faqs', builder: (_, __) => const FaqScreen()),
+          GoRoute(path: 'offers', builder: (_, __) => const OffersScreen()),
+          GoRoute(path: 'orders', builder: (_, __) => const OrdersScreen()),
+          GoRoute(path: 'profile', builder: (_, __) => const ProfileScreen()),
+          GoRoute(
+            path: 'verify-email',
+            builder: (_, state) => VerifyEmailScreen(
+              redirectTo: state.uri.queryParameters['redirect'] ?? '/',
+            ),
+          ),
+          GoRoute(
+            path: 'order/:id',
+            builder: (context, state) => OrderTrackingScreen(
+              orderId: state.pathParameters['id']!,
+              trackToken: state.uri.queryParameters['t'] ?? '',
+            ),
+            routes: [
+              GoRoute(
+                path: 'pay',
+                builder: (context, state) => PaymentScreen(
+                  orderId: state.pathParameters['id']!,
+                  via: state.uri.queryParameters['via'] ?? 'bank',
+                  trackToken: state.uri.queryParameters['t'] ?? '',
+                ),
+              ),
+              GoRoute(
+                path: 'safepay',
+                builder: (context, state) => SafepayWebView(
+                  orderId: state.pathParameters['id']!,
+                  trackToken: state.uri.queryParameters['t'] ?? '',
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
       GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
       GoRoute(path: '/register', builder: (_, __) => const RegisterScreen()),
       GoRoute(
-        path: '/verify-email',
-        builder: (_, state) => VerifyEmailScreen(
-          redirectTo: state.uri.queryParameters['redirect'] ?? '/',
-        ),
-      ),
-      GoRoute(path: '/cart', builder: (_, __) => const CartScreen()),
-      GoRoute(path: '/diamonds', builder: (_, __) => const DiamondsScreen()),
-      GoRoute(path: '/faqs', builder: (_, __) => const FaqScreen()),
-      GoRoute(path: '/offers', builder: (_, __) => const OffersScreen()),
-      GoRoute(path: '/orders', builder: (_, __) => const OrdersScreen()),
-      GoRoute(path: '/profile', builder: (_, __) => const ProfileScreen()),
-      GoRoute(path: '/checkout', builder: (_, __) => const CheckoutScreen()),
-      GoRoute(
-        path: '/order/:id/pay',
-        builder: (context, state) => PaymentScreen(
-          orderId: state.pathParameters['id']!,
-          via: state.uri.queryParameters['via'] ?? 'bank',
-          trackToken: state.uri.queryParameters['t'] ?? '',
-        ),
-      ),
-      GoRoute(
-        path: '/order/:id/safepay',
-        builder: (context, state) => SafepayWebView(
-          orderId: state.pathParameters['id']!,
-          trackToken: state.uri.queryParameters['t'] ?? '',
-        ),
-      ),
-      GoRoute(
-        path: '/order/:id',
-        builder: (context, state) => OrderTrackingScreen(
-          orderId: state.pathParameters['id']!,
-          trackToken: state.uri.queryParameters['t'] ?? '',
-        ),
-      ),
+          path: '/forgot-password',
+          builder: (_, __) => const ForgotPasswordScreen()),
     ],
   );
 });

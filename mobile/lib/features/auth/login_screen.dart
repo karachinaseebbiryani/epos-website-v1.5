@@ -138,9 +138,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   TextFormField(
                     controller: _email,
                     keyboardType: TextInputType.emailAddress,
+                    maxLength: 100,
                     decoration: const InputDecoration(
                       labelText: 'Email',
                       border: OutlineInputBorder(),
+                      counterText: '',
                     ),
                     validator: (v) =>
                         (v == null || !v.contains('@')) ? 'Enter a valid email' : null,
@@ -149,14 +151,25 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   TextFormField(
                     controller: _password,
                     obscureText: true,
+                    maxLength: 72,
                     decoration: const InputDecoration(
                       labelText: 'Password',
                       border: OutlineInputBorder(),
+                      counterText: '',
                     ),
                     validator: (v) =>
                         (v == null || v.length < 6) ? 'Min 6 characters' : null,
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed:
+                          _busy ? null : () => context.push('/forgot-password'),
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   FilledButton(
                     onPressed: _busy ? null : _submit,
                     child: _busy

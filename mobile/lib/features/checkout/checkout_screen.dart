@@ -152,8 +152,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             couponCode: _coupon.text.trim(),
             deliveryLat: _isPickup ? null : _lat,
             deliveryLng: _isPickup ? null : _lng,
+            rewardId: ref.read(selectedRewardProvider)?.id,
           );
       ref.read(cartProvider.notifier).clear();
+      // Reward is consumed by this order (server deducted the diamonds).
+      ref.read(selectedRewardProvider.notifier).state = null;
       // Diamonds are awarded server-side on delivery; refresh the cached balance
       // so the pill reflects any coupon/loyalty change on next view.
       ref.invalidate(loyaltyBalanceProvider);
@@ -212,8 +215,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             const SizedBox(height: 16),
             TextFormField(
               controller: _name,
+              maxLength: 60,
               decoration: const InputDecoration(
-                  labelText: 'Name', border: OutlineInputBorder()),
+                  labelText: 'Name',
+                  border: OutlineInputBorder(),
+                  counterText: ''),
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Enter your name' : null,
             ),
@@ -221,8 +227,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             TextFormField(
               controller: _phone,
               keyboardType: TextInputType.phone,
+              maxLength: 20,
               decoration: const InputDecoration(
-                  labelText: 'Phone', border: OutlineInputBorder()),
+                  labelText: 'Phone',
+                  border: OutlineInputBorder(),
+                  counterText: ''),
               validator: (v) =>
                   (v == null || v.trim().length < 7) ? 'Enter your phone' : null,
             ),
@@ -233,8 +242,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               TextFormField(
                 controller: _address,
                 maxLines: 2,
+                maxLength: 200,
                 decoration: const InputDecoration(
-                    labelText: 'Delivery address', border: OutlineInputBorder()),
+                    labelText: 'Delivery address',
+                    border: OutlineInputBorder(),
+                    counterText: ''),
                 validator: (v) => _isPickup
                     ? null
                     : (v == null || v.trim().length < 6)
@@ -254,17 +266,22 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             const SizedBox(height: 12),
             TextFormField(
               controller: _notes,
+              maxLength: 300,
               decoration: const InputDecoration(
-                  labelText: 'Notes (optional)', border: OutlineInputBorder()),
+                  labelText: 'Notes (optional)',
+                  border: OutlineInputBorder(),
+                  counterText: ''),
             ),
             const SizedBox(height: 12),
             TextFormField(
               controller: _coupon,
+              maxLength: 30,
               textCapitalization: TextCapitalization.characters,
               decoration: const InputDecoration(
                 labelText: 'Coupon code (optional)',
                 helperText: 'Applied and validated when you place the order',
                 border: OutlineInputBorder(),
+                counterText: '',
               ),
             ),
             const SizedBox(height: 8),
@@ -273,6 +290,40 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               currentCode: _coupon.text.trim(),
               onApply: (code) => setState(() => _coupon.text = code),
             ),
+            // Diamond reward picked on the Diamonds screen — applied server-side.
+            Consumer(builder: (context, ref, _) {
+              final reward = ref.watch(selectedRewardProvider);
+              if (reward == null) return const SizedBox.shrink();
+              final clashesWithCoupon = _coupon.text.trim().isNotEmpty &&
+                  reward.rewardType != 'free_item';
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    InputChip(
+                      avatar: const Icon(Icons.diamond,
+                          size: 18, color: BrandColors.yellowDark),
+                      label: Text(
+                          '${reward.benefitLabel} · ${reward.costDiamonds} 💎'),
+                      onDeleted: () => ref
+                          .read(selectedRewardProvider.notifier)
+                          .state = null,
+                    ),
+                    if (clashesWithCoupon)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          'A coupon can\'t be combined with a diamond discount — remove one.',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).colorScheme.error),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            }),
             const SizedBox(height: 20),
             Text('Payment method',
                 style: Theme.of(context).textTheme.titleMedium),

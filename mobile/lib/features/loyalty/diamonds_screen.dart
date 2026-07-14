@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../app/tokens.dart';
 import 'loyalty_models.dart';
 import 'loyalty_repository.dart';
 
@@ -11,12 +13,15 @@ class DiamondsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final balanceAsync = ref.watch(loyaltyBalanceProvider);
     final txAsync = ref.watch(loyaltyTransactionsProvider);
+    final rewardsAsync = ref.watch(loyaltyRewardsProvider);
+    final balance = balanceAsync.asData?.value.diamondBalance ?? 0;
     return Scaffold(
       appBar: AppBar(title: const Text('My Diamonds')),
       body: RefreshIndicator(
         onRefresh: () async {
           ref.invalidate(loyaltyBalanceProvider);
           ref.invalidate(loyaltyTransactionsProvider);
+          ref.invalidate(loyaltyRewardsProvider);
         },
         child: ListView(
           padding: const EdgeInsets.all(16),
@@ -29,6 +34,33 @@ class DiamondsScreen extends ConsumerWidget {
                 onRetry: () => ref.invalidate(loyaltyBalanceProvider),
               ),
               data: (b) => _BalanceCard(balance: b),
+            ),
+            const SizedBox(height: 20),
+            // Rewards catalog — what diamonds can actually be spent on.
+            Text('Spend your diamonds',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            rewardsAsync.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              ),
+              error: (e, _) => _ErrorBox(
+                message: '$e',
+                onRetry: () => ref.invalidate(loyaltyRewardsProvider),
+              ),
+              data: (rewards) => rewards.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(
+                          child: Text('No rewards available right now')),
+                    )
+                  : Column(
+                      children: [
+                        for (final r in rewards)
+                          _RewardCard(reward: r, balance: balance),
+                      ],
+                    ),
             ),
             const SizedBox(height: 20),
             Text('History', style: Theme.of(context).textTheme.titleMedium),
@@ -55,6 +87,87 @@ class DiamondsScreen extends ConsumerWidget {
               },
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One redeemable reward. "Use" stages it for the next order (applied at
+/// checkout; the BACKEND deducts diamonds + recomputes the price — the app
+/// never does the math). Unaffordable rewards are dimmed with "Need N more".
+class _RewardCard extends ConsumerWidget {
+  const _RewardCard({required this.reward, required this.balance});
+  final LoyaltyReward reward;
+  final int balance;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final affordable = balance >= reward.costDiamonds;
+    final selected = ref.watch(selectedRewardProvider)?.id == reward.id;
+    final icon = switch (reward.rewardType) {
+      'discount_percent' => Icons.percent,
+      'discount_fixed' => Icons.local_offer,
+      _ => Icons.card_giftcard,
+    };
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+            color: selected ? BrandColors.yellowDark : scheme.outlineVariant,
+            width: selected ? 2 : 1),
+      ),
+      child: Opacity(
+        opacity: affordable ? 1 : 0.55,
+        child: ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          leading: CircleAvatar(
+            backgroundColor: BrandColors.yellow.withValues(alpha: 0.25),
+            child: Icon(icon, color: BrandColors.yellowDark),
+          ),
+          title: Text(reward.title,
+              style: const TextStyle(fontWeight: FontWeight.w700)),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(reward.benefitLabel,
+                  style: const TextStyle(
+                      color: BrandColors.red, fontWeight: FontWeight.w700)),
+              Text('${reward.costDiamonds} 💎'
+                  '${affordable ? '' : ' — need ${reward.costDiamonds - balance} more'}'),
+            ],
+          ),
+          trailing: selected
+              ? TextButton(
+                  onPressed: () =>
+                      ref.read(selectedRewardProvider.notifier).state = null,
+                  child: const Text('Remove'),
+                )
+              : FilledButton(
+                  onPressed: !affordable
+                      ? null
+                      : () {
+                          ref.read(selectedRewardProvider.notifier).state =
+                              reward;
+                          ScaffoldMessenger.of(context)
+                            ..clearSnackBars()
+                            ..showSnackBar(SnackBar(
+                              content: Text(
+                                  '${reward.benefitLabel} will apply at checkout'),
+                              action: SnackBarAction(
+                                label: 'Order now',
+                                onPressed: () => context.go('/'),
+                              ),
+                            ));
+                        },
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 16)),
+                  child: const Text('Use'),
+                ),
         ),
       ),
     );
