@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/format.dart';
+import '../menu/widgets/offers_strip.dart';
+import '../menu/widgets/people_also_buy.dart';
 import 'cart_controller.dart';
 
 class CartScreen extends ConsumerWidget {
@@ -26,7 +28,10 @@ class CartScreen extends ConsumerWidget {
       ),
       body: lines.isEmpty
           ? _EmptyCart(onBrowse: () => context.go('/'))
-          : ListView.separated(
+          : Column(
+              children: [
+                Expanded(
+                  child: ListView.separated(
               padding: const EdgeInsets.all(12),
               itemCount: lines.length,
               separatorBuilder: (_, __) => const Divider(height: 1),
@@ -65,6 +70,16 @@ class CartScreen extends ConsumerWidget {
                   ),
                 );
               },
+                  ),
+                ),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                const OffersCartBanner(),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: PeopleAlsoBuy(),
+                ),
+              ],
             ),
       bottomNavigationBar: lines.isEmpty
           ? null

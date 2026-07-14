@@ -3,7 +3,21 @@ import api, { formatApiError, resolveImageUrl } from "../../lib/api";
 import { Plus, Trash2, Pencil, X } from "lucide-react";
 import { toast } from "sonner";
 
-const EMPTY = { title: "", description: "", discount_percent: 0, discount_amount: 0, coupon_code: "", image_url: "", active: true, min_order_amount: 0 };
+const EMPTY = { title: "", description: "", discount_percent: 0, discount_amount: 0, coupon_code: "", image_url: "", active: true, min_order_amount: 0, valid_until: "" };
+
+// <input type="datetime-local"> works in local time; the API stores UTC ISO.
+const isoToLocalInput = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 16);
+};
+const localInputToIso = (local) => {
+    if (!local) return null;
+    const d = new Date(local); // parsed as local time
+    return isNaN(d.getTime()) ? null : d.toISOString();
+};
 
 export default function AdminOffers() {
     const [offers, setOffers] = useState([]);
@@ -17,16 +31,18 @@ export default function AdminOffers() {
     useEffect(() => { load(); }, []);
 
     const openCreate = () => { setEditing("new"); setForm(EMPTY); };
-    const openEdit = (o) => { setEditing(o.id); setForm({ title: o.title, description: o.description, discount_percent: o.discount_percent, discount_amount: o.discount_amount, coupon_code: o.coupon_code, image_url: o.image_url, active: o.active, min_order_amount: Number(o.min_order_amount || 0) }); };
+    const openEdit = (o) => { setEditing(o.id); setForm({ title: o.title, description: o.description, discount_percent: o.discount_percent, discount_amount: o.discount_amount, coupon_code: o.coupon_code, image_url: o.image_url, active: o.active, min_order_amount: Number(o.min_order_amount || 0), valid_until: isoToLocalInput(o.valid_until) }); };
 
     const save = async (e) => {
         e.preventDefault();
         try {
+            // Convert the local datetime input back to a UTC ISO string (or null).
+            const payload = { ...form, valid_until: localInputToIso(form.valid_until) };
             if (editing === "new") {
-                await api.post("/offers", form);
+                await api.post("/offers", payload);
                 toast.success("Offer created");
             } else {
-                await api.put(`/offers/${editing}`, form);
+                await api.put(`/offers/${editing}`, payload);
                 toast.success("Offer updated");
             }
             setEditing(null);
@@ -72,6 +88,9 @@ export default function AdminOffers() {
                             {Number(o.min_order_amount) > 0 && (
                                 <p className="text-[11px] text-amber-700 mt-1" data-testid={`offer-min-order-${o.id}`}>Min. order: Rs. {Number(o.min_order_amount).toFixed(0)}</p>
                             )}
+                            {o.valid_until && (
+                                <p className="text-[11px] text-neutral-500 mt-1" data-testid={`offer-valid-until-${o.id}`}>Expires: {new Date(o.valid_until).toLocaleString()}</p>
+                            )}
                             <div className="flex justify-end gap-1 mt-3">
                                 <button onClick={() => openEdit(o)} data-testid={`offer-edit-${o.id}`} className="w-9 h-9 rounded-full hover:bg-neutral-100 flex items-center justify-center"><Pencil className="w-4 h-4" /></button>
                                 <button onClick={() => remove(o.id)} data-testid={`offer-delete-${o.id}`} className="w-9 h-9 rounded-full hover:bg-red-50 text-red-500 flex items-center justify-center"><Trash2 className="w-4 h-4" /></button>
@@ -101,6 +120,7 @@ export default function AdminOffers() {
                             </div>
                             <Input label="Coupon Code" value={form.coupon_code} onChange={(v) => setForm({ ...form, coupon_code: v.toUpperCase() })} testid="offer-form-code" />
                             <Input label="Min. Order Amount (Rs.) — 0 = no minimum" type="number" value={form.min_order_amount} onChange={(v) => setForm({ ...form, min_order_amount: Number(v) || 0 })} testid="offer-form-min-order" />
+                            <Input label="Valid until (optional) — leave blank for no expiry" type="datetime-local" value={form.valid_until} onChange={(v) => setForm({ ...form, valid_until: v })} testid="offer-form-valid-until" />
                             <Input label="Image URL" value={form.image_url} onChange={(v) => setForm({ ...form, image_url: v })} testid="offer-form-image" />
                             <label className="flex items-center gap-2 cursor-pointer">
                                 <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} data-testid="offer-form-active" />

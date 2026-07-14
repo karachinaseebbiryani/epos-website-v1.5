@@ -67,6 +67,22 @@ class AuthRepository {
     return result;
   }
 
+  /// Confirm the emailed 6-digit OTP for the signed-in customer.
+  Future<bool> verifyEmail(String otp) async {
+    final res = await _api.dio.post('/customer/verify-email',
+        data: {'otp': otp}, options: _authOpts());
+    throwIfError(res);
+    final data = Map<String, dynamic>.from(res.data);
+    return data['email_verified'] == true;
+  }
+
+  /// Ask the backend to re-send the verification code (rate-limited server-side).
+  Future<void> resendOtp() async {
+    final res =
+        await _api.dio.post('/customer/resend-otp', options: _authOpts());
+    throwIfError(res);
+  }
+
   /// Verify a stored token and hydrate the profile on app start.
   Future<Customer?> me() async {
     final token = await _tokenStore.read();

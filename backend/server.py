@@ -2850,9 +2850,13 @@ class OnlineOrderCreate(BaseModel):
     total_price: float
     customer_name: str
     phone: str
-    address: str
+    address: Optional[str] = ""  # required only for delivery orders (enforced in endpoint)
     notes: Optional[str] = ""
     payment_method: str = "cod"
+    # NEW (additive): "delivery" (default, existing behaviour) | "pickup".
+    # Pickup orders skip the delivery address + delivery-fee/geo logic. Absent =
+    # "delivery" so every existing client keeps working unchanged.
+    order_type: str = "delivery"
     coupon_code: Optional[str] = None
     delivery_lat: Optional[float] = None
     delivery_lng: Optional[float] = None
@@ -2862,6 +2866,12 @@ class OnlineOrderCreate(BaseModel):
     @classmethod
     def _v_phone(cls, v):
         return _normalize_and_validate_phone(v, required=True, field="phone")
+
+    @field_validator("order_type")
+    @classmethod
+    def _v_order_type(cls, v):
+        v = (v or "delivery").strip().lower()
+        return v if v in ("delivery", "pickup") else "delivery"
 
 class OnlineOrderStatusUpdate(BaseModel):
     status: str  # pending, accepted, preparing, ready, out_for_delivery, delivered, cancelled, rejected
@@ -2897,6 +2907,10 @@ class OfferCreate(BaseModel):
     active: bool = True
     min_order_amount: Optional[float] = 0  # V2: minimum cart subtotal required to apply this offer
     one_time_per_customer: bool = False  # If true, each customer (or phone for guests) can use this coupon at most once
+    # NEW (additive): server-controlled expiry (ISO-8601 UTC). Null = no expiry
+    # (existing behaviour). Enforced server-side at checkout; drives app/website
+    # countdowns so a customer can't extend an offer by changing their clock.
+    valid_until: Optional[str] = None
 
 class OfferUpdate(BaseModel):
     title: Optional[str] = None
@@ -2908,6 +2922,7 @@ class OfferUpdate(BaseModel):
     active: Optional[bool] = None
     min_order_amount: Optional[float] = None
     one_time_per_customer: Optional[bool] = None
+    valid_until: Optional[str] = None
 
 class FAQCreate(BaseModel):
     """Public-facing frequently asked questions, admin-managed.
@@ -2993,6 +3008,71 @@ async def get_optional_customer(request: Request):
     except HTTPException:
         return None
 
+# --- Customer email verification (OTP) ---
+# NEW (additive): email/password signups must confirm a 6-digit code emailed to
+# them before they can place orders / earn/redeem diamonds. Social logins
+# (Google/Facebook) are pre-verified by the provider. Existing accounts created
+# before this feature have no `email_verified` field and are grandfathered as
+# verified so nobody is locked out by the rollout.
+OTP_TTL_MINUTES = 10
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_COOLDOWN_SECONDS = 60
+
+def _email_verification_enabled() -> bool:
+    """Feature flag (env EMAIL_VERIFICATION_REQUIRED, default ON). Set to
+    false/0/no/off on the server to instantly disable the whole OTP gate in
+    production without a code rollback: new signups are auto-verified, no OTP is
+    sent, and ordering is never blocked on verification."""
+    return os.environ.get("EMAIL_VERIFICATION_REQUIRED", "true").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+def _generate_otp() -> str:
+    return f"{secrets.randbelow(1000000):06d}"
+
+def _customer_email_verified(cust: dict) -> bool:
+    """True if the account may transact. Missing field = grandfathered/verified."""
+    return bool(cust.get("email_verified", True))
+
+async def _send_customer_otp_email(email: str, name: str, otp: str) -> bool:
+    """Email a verification code. Returns False (never raises) if SMTP isn't
+    configured or sending fails, so registration itself never hard-fails on email."""
+    try:
+        s = await _get_settings_doc()
+        if not (s.get("smtp_host") and s.get("smtp_port") and s.get("smtp_user") and s.get("smtp_password")):
+            logger.warning("Customer OTP email skipped: SMTP not configured")
+            return False
+        rname = s.get("restaurant_name", "RestoPOS")
+        subject = f"[{rname}] Your verification code: {otp}"
+        plain = f"Your {rname} verification code is {otp}. It expires in {OTP_TTL_MINUTES} minutes."
+        html = (f"<p>Hi {name or 'there'},</p>"
+                f"<p>Your <b>{rname}</b> verification code is:</p>"
+                f"<p style='font-size:26px;font-weight:800;letter-spacing:4px'>{otp}</p>"
+                f"<p style='color:#5C5F5C'>It expires in {OTP_TTL_MINUTES} minutes. "
+                f"If you didn't request this, you can ignore this email.</p>")
+        await asyncio.to_thread(
+            _send_email_sync, s["smtp_host"], s["smtp_port"], s.get("smtp_user", ""),
+            s.get("smtp_password", ""), bool(s.get("smtp_use_tls", True)),
+            s.get("smtp_from") or s.get("smtp_user"), [email], subject, plain, html)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send OTP email to {email}: {e}")
+        return False
+
+async def _issue_customer_otp(customer_oid, email: str, name: str) -> bool:
+    """Generate + store a fresh hashed OTP for a customer and email it."""
+    otp = _generate_otp()
+    now = datetime.now(timezone.utc)
+    await db.customers.update_one({"_id": customer_oid}, {"$set": {
+        "email_otp_hash": hash_password(otp),
+        "email_otp_expires_at": (now + timedelta(minutes=OTP_TTL_MINUTES)).isoformat(),
+        "email_otp_attempts": 0,
+        "email_otp_sent_at": now.isoformat(),
+    }})
+    return await _send_customer_otp_email(email, name, otp)
+
+class VerifyEmailRequest(BaseModel):
+    otp: str
+
 # --- Customer Auth ---
 @api_router.post("/customer/register")
 async def customer_register(req: CustomerRegisterRequest, response: Response):
@@ -3004,18 +3084,28 @@ async def customer_register(req: CustomerRegisterRequest, response: Response):
     _validate_password_length(req.password)
     if await db.customers.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
+    verify_required = _email_verification_enabled()
     doc = {
         "email": email,
         "password_hash": hash_password(req.password),
         "name": req.name.strip(),
         "phone": (req.phone or "").strip(),
+        # When the gate is disabled, accounts are created already verified.
+        "email_verified": not verify_required,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.customers.insert_one(doc)
     cid = str(result.inserted_id)
+    # Fire off the verification code only when the gate is on. If SMTP is down the
+    # account still exists and the user can hit /customer/resend-otp; we surface
+    # otp_sent so the UI knows whether to show the OTP step.
+    otp_sent = False
+    if verify_required:
+        otp_sent = await _issue_customer_otp(result.inserted_id, email, req.name.strip())
     token = create_customer_token(cid, email)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
-    return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token}
+    return {"id": cid, "email": email, "name": req.name, "phone": req.phone, "token": token,
+            "email_verified": doc["email_verified"], "otp_sent": otp_sent}
 
 @api_router.post("/customer/login")
 async def customer_login(req: CustomerLoginRequest, request: Request, response: Response):
@@ -3031,13 +3121,55 @@ async def customer_login(req: CustomerLoginRequest, request: Request, response: 
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
-    return {"id": cid, "email": email, "name": cust.get("name", ""), "phone": cust.get("phone", ""), "token": token}
+    return {"id": cid, "email": email, "name": cust.get("name", ""), "phone": cust.get("phone", ""), "token": token,
+            "email_verified": _customer_email_verified(cust)}
 
 @api_router.get("/customer/me")
 async def customer_me(request: Request):
     cust = await get_current_customer(request)
     return {"id": cust["_id"], "email": cust["email"], "name": cust.get("name", ""),
-            "phone": cust.get("phone", ""), "allergens": cust.get("allergens", [])}
+            "phone": cust.get("phone", ""), "allergens": cust.get("allergens", []),
+            "email_verified": _customer_email_verified(cust)}
+
+@api_router.post("/customer/verify-email")
+async def customer_verify_email(req: VerifyEmailRequest, request: Request):
+    """Confirm the 6-digit OTP for the signed-in customer. On success the account
+    is marked email_verified and the OTP is cleared."""
+    cust = await get_current_customer(request)
+    if _customer_email_verified(cust) and not cust.get("email_otp_hash"):
+        return {"email_verified": True}
+    otp_hash = cust.get("email_otp_hash")
+    exp = _parse_iso_utc(cust.get("email_otp_expires_at"))
+    attempts = int(cust.get("email_otp_attempts", 0) or 0)
+    if not otp_hash or exp is None:
+        raise HTTPException(status_code=400, detail="No verification code pending. Please request a new one.")
+    if datetime.now(timezone.utc) > exp:
+        raise HTTPException(status_code=400, detail="Verification code expired. Please request a new one.")
+    if attempts >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many attempts. Please request a new code.")
+    if not verify_password((req.otp or "").strip(), otp_hash):
+        await db.customers.update_one({"_id": ObjectId(cust["_id"])}, {"$inc": {"email_otp_attempts": 1}})
+        raise HTTPException(status_code=400, detail="Incorrect code. Please try again.")
+    await db.customers.update_one(
+        {"_id": ObjectId(cust["_id"])},
+        {"$set": {"email_verified": True},
+         "$unset": {"email_otp_hash": "", "email_otp_expires_at": "",
+                    "email_otp_attempts": "", "email_otp_sent_at": ""}})
+    return {"email_verified": True}
+
+@api_router.post("/customer/resend-otp")
+async def customer_resend_otp(request: Request):
+    """Re-send a verification code, rate-limited to one per cooldown window."""
+    cust = await get_current_customer(request)
+    if _customer_email_verified(cust):
+        return {"email_verified": True, "message": "Already verified"}
+    sent_at = _parse_iso_utc(cust.get("email_otp_sent_at"))
+    if sent_at and (datetime.now(timezone.utc) - sent_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+        raise HTTPException(status_code=429, detail="Please wait a moment before requesting another code.")
+    sent = await _issue_customer_otp(ObjectId(cust["_id"]), cust["email"], cust.get("name", ""))
+    if not sent:
+        raise HTTPException(status_code=503, detail="Could not send the verification email. Please try again shortly.")
+    return {"email_verified": False, "otp_sent": True}
 
 class AllergensUpdate(BaseModel):
     allergens: List[str] = []
@@ -3109,9 +3241,12 @@ async def _social_find_or_create_customer(email: str, name: str, provider: str, 
     existing = await db.customers.find_one({"email": email})
     now_iso = datetime.now(timezone.utc).isoformat()
     if existing:
-        # Idempotently record the link (does not overwrite an existing password_hash)
-        update = {"$set": {f"{provider}_id": provider_user_id, "last_social_login_at": now_iso}}
+        # Idempotently record the link. The provider verified this email, so also
+        # mark the account email_verified (covers a pre-existing unverified
+        # email/password account whose owner now signs in with Google/Facebook).
+        update = {"$set": {f"{provider}_id": provider_user_id, "last_social_login_at": now_iso, "email_verified": True}}
         await db.customers.update_one({"_id": existing["_id"]}, update)
+        existing["email_verified"] = True
         return existing
     doc = {
         "email": email,
@@ -3121,6 +3256,7 @@ async def _social_find_or_create_customer(email: str, name: str, provider: str, 
         "password_hash": hash_password(_uuid.uuid4().hex + INSTANCE_ID),
         f"{provider}_id": provider_user_id,
         "signup_provider": provider,
+        "email_verified": True,  # provider already verified the email address
         "created_at": now_iso,
     }
     result = await db.customers.insert_one(doc)
@@ -3135,6 +3271,7 @@ def _serialize_customer_login_response(cust: dict, token: str):
         "name": cust.get("name", ""),
         "phone": cust.get("phone", ""),
         "token": token,
+        "email_verified": _customer_email_verified(cust),
     }
 
 
@@ -3482,6 +3619,20 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         if not bh.get("is_open"):
             raise HTTPException(status_code=400, detail="Restaurant is currently closed. Please order during business hours.")
 
+    # Email verification gate: a signed-in customer with an unverified email
+    # cannot place orders (blocks fake-email signups from transacting). Guests
+    # and grandfathered/social accounts are unaffected. Bypassed entirely when
+    # the EMAIL_VERIFICATION_REQUIRED flag is off.
+    if _email_verification_enabled() and cust and not _customer_email_verified(cust):
+        raise HTTPException(status_code=403, detail="Please verify your email before placing an order. We've sent a code to your inbox.")
+
+    # Order type (additive, default "delivery" = existing behaviour). Delivery
+    # requires an address; pickup does not and skips all delivery-fee/geo logic.
+    order_type = order.order_type if order.order_type in ("delivery", "pickup") else "delivery"
+    address_clean = (order.address or "").strip()
+    if order_type == "delivery" and len(address_clean) < 6:
+        raise HTTPException(status_code=400, detail="Delivery address is required for delivery orders.")
+
     # ===== SERVER-SIDE AUTHORITATIVE PRICING =====
     # SECURITY (payment manipulation fix): Every previous calculation below relied on
     # `order.total_price` and `order.items[*].price`, both of which come straight from
@@ -3608,6 +3759,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         else:
             offer = await db.offers.find_one({"coupon_code": code_normalized, "active": True})
             if offer:
+                # Server-controlled expiry — reject a coupon past its valid_until
+                # (uses the server clock, so a tampered device clock can't extend it).
+                if _offer_expired(offer):
+                    raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has expired.")
                 # V2: enforce minimum order amount on offers
                 min_amount = float(offer.get("min_order_amount", 0) or 0)
                 if min_amount > 0 and server_subtotal < min_amount:
@@ -3630,10 +3785,11 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
                 elif offer.get("discount_amount"):
                     discount_amount = float(offer["discount_amount"])
                 coupon_used = offer["coupon_code"]
-    # Delivery fee calculation (server-side, ignores any frontend value)
+    # Delivery fee calculation (server-side, ignores any frontend value).
+    # Pickup orders never incur a delivery fee and skip the service-area check.
     delivery_fee = 0.0
     distance_km = None
-    if order.delivery_lat is not None and order.delivery_lng is not None:
+    if order_type == "delivery" and order.delivery_lat is not None and order.delivery_lng is not None:
         s = await get_online_settings_doc()
         distance_km = haversine_km(s["restaurant_lat"], s["restaurant_lng"], order.delivery_lat, order.delivery_lng)
         quote = calculate_delivery_fee(distance_km, s, subtotal=server_subtotal - float(discount_amount or 0))
@@ -3767,13 +3923,14 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "discount_amount": discount_amount,
         "delivery_fee": delivery_fee,
         "distance_km": round(distance_km, 2) if distance_km is not None else None,
-        "delivery_lat": order.delivery_lat,
-        "delivery_lng": order.delivery_lng,
+        "order_type": order_type,
+        "delivery_lat": order.delivery_lat if order_type == "delivery" else None,
+        "delivery_lng": order.delivery_lng if order_type == "delivery" else None,
         "total_price": final_total,
         "customer_id": cust["_id"] if cust else None,
         "customer_name": order.customer_name,
         "phone": order.phone,
-        "address": order.address,
+        "address": address_clean if order_type == "delivery" else "",
         "notes": order.notes,
         "payment_method": pmethod,
         "payment_status": payment_status,
@@ -5008,10 +5165,35 @@ async def submit_feedback(req: PublicFeedbackCreate, request: Request):
     return {"id": str(result.inserted_id), "message": "Thank you for your feedback!"}
 
 # --- Offers ---
+def _parse_iso_utc(s):
+    """Parse an ISO-8601 string to an aware UTC datetime, or None if unparseable."""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def _offer_expired(o: dict, now: datetime | None = None) -> bool:
+    """True when an offer's server-controlled valid_until has passed. Offers with
+    no valid_until never expire (existing behaviour)."""
+    vu = _parse_iso_utc(o.get("valid_until"))
+    if vu is None:
+        return False
+    return (now or datetime.now(timezone.utc)) > vu
+
 @api_router.get("/offers")
 async def list_offers(active_only: bool = True):
     q = {"active": True} if active_only else {}
     offers = await db.offers.find(q).sort("created_at", -1).to_list(100)
+    now = datetime.now(timezone.utc)
+    # When active_only, hide offers whose server-side expiry has passed so the
+    # public UI never shows a coupon the checkout would reject.
+    if active_only:
+        offers = [o for o in offers if not _offer_expired(o, now)]
     return [{
         "id": str(o["_id"]),
         "title": o["title"],
@@ -5023,7 +5205,10 @@ async def list_offers(active_only: bool = True):
         "active": o.get("active", True),
         "min_order_amount": float(o.get("min_order_amount", 0) or 0),
         "one_time_per_customer": bool(o.get("one_time_per_customer", False)),
+        "valid_until": o.get("valid_until"),
         "created_at": o.get("created_at", ""),
+        # Server clock so clients render countdowns immune to device-clock changes.
+        "server_now": now.isoformat(),
     } for o in offers]
 
 @api_router.post("/offers")
@@ -5041,6 +5226,8 @@ async def create_offer(offer: OfferCreate, request: Request):
         "active": offer.active,
         "min_order_amount": float(offer.min_order_amount or 0),
         "one_time_per_customer": bool(offer.one_time_per_customer),
+        "valid_until": (_parse_iso_utc(offer.valid_until).isoformat()
+                        if _parse_iso_utc(offer.valid_until) else None),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.offers.insert_one(doc)
@@ -5054,6 +5241,9 @@ async def update_offer(offer_id: str, offer: OfferUpdate, request: Request):
     ud = {k: v for k, v in offer.model_dump().items() if v is not None}
     if "coupon_code" in ud:
         ud["coupon_code"] = ud["coupon_code"].upper().strip()
+    if "valid_until" in ud:
+        parsed = _parse_iso_utc(ud["valid_until"])
+        ud["valid_until"] = parsed.isoformat() if parsed else None
     if ud:
         await db.offers.update_one({"_id": ObjectId(offer_id)}, {"$set": ud})
     return {"message": "Updated"}

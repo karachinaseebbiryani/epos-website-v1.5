@@ -1,10 +1,8 @@
 /// App-wide configuration.
 ///
-/// Override the backend at build/run time, e.g.:
-///   flutter run --dart-define=API_BASE_URL=https://api.karachinaseeb.com
-///
-/// Default targets the host machine's localhost from an Android emulator
-/// (10.0.2.2 is the emulator's alias for the host loopback).
+/// Defaults target the LIVE production backend on Fly.io, so a plain Android
+/// Studio "Run ▶" (no flags) works out of the box. Override only if needed:
+///   flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000   (local dev)
 class AppConfig {
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
@@ -35,5 +33,5 @@ class AppConfig {
 
   static bool get facebookConfigured => facebookAppId.isNotEmpty;
 
-  static const String currencySymbol = 'Rs';
+  static const String currencySymbol = 'Rs.';
 }

@@ -1,14 +1,30 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/theme_controller.dart';
+import '../../app/tokens.dart';
 import '../../core/format.dart';
+import '../../core/images.dart';
 import '../hours/business_hours.dart';
 import '../cart/cart_controller.dart';
+import '../loyalty/widgets/diamond_pill.dart';
 import 'menu_models.dart';
 import 'menu_repository.dart';
+import 'widgets/offers_strip.dart';
+import 'widgets/price_block.dart';
+
+/// Opens the item-customization bottom sheet for [item]. Public so other
+/// surfaces (e.g. the "People also buy" upsell strip) can reuse the exact same
+/// picker instead of re-implementing size/modifier selection.
+Future<void> showItemCustomizeSheet(BuildContext context, MenuItem item) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (_) => _CustomizeSheet(item: item),
+  );
+}
 
 class MenuScreen extends ConsumerWidget {
   const MenuScreen({super.key});
@@ -21,11 +37,7 @@ class MenuScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Karachi Naseeb'),
         actions: [
-          IconButton(
-            tooltip: 'Diamonds',
-            icon: const Icon(Icons.diamond_outlined),
-            onPressed: () => context.push('/diamonds'),
-          ),
+          const DiamondPill(),
           IconButton(
             tooltip: 'Theme',
             icon: Icon(switch (ref.watch(themeModeControllerProvider)) {
@@ -47,6 +59,7 @@ class MenuScreen extends ConsumerWidget {
       body: Column(
         children: [
           const _ClosedBanner(),
+          const OffersStrip(),
           Expanded(
             child: menuAsync.when(
               loading: () => const Center(child: CircularProgressIndicator()),
@@ -162,23 +175,18 @@ class _ItemTile extends ConsumerWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: SizedBox(
-                width: 72,
-                height: 72,
-                child: item.imageUrl.isEmpty
-                    ? Container(
-                        color: scheme.surfaceContainerHighest,
-                        child: const Icon(Icons.restaurant),
-                      )
-                    : CachedNetworkImage(
-                        imageUrl: item.imageUrl,
-                        fit: BoxFit.cover,
-                        placeholder: (_, __) =>
-                            Container(color: scheme.surfaceContainerHighest),
-                        errorWidget: (_, __, ___) => Container(
-                          color: scheme.surfaceContainerHighest,
-                          child: const Icon(Icons.restaurant),
-                        ),
-                      ),
+                width: 76,
+                height: 76,
+                child: Stack(
+                  children: [
+                    Positioned.fill(child: ProductImage(imageUrl: item.imageUrl)),
+                    Positioned(
+                      top: 4,
+                      left: 4,
+                      child: ProductBadges(item: item),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(width: 12),
@@ -187,7 +195,7 @@ class _ItemTile extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(item.name,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                      style: const TextStyle(fontWeight: FontWeight.w700)),
                   if (item.description.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
@@ -200,35 +208,43 @@ class _ItemTile extends ConsumerWidget {
                       ),
                     ),
                   const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Text(money(item.price),
-                          style:
-                              const TextStyle(fontWeight: FontWeight.w700)),
-                      if (item.isDiscounted) ...[
-                        const SizedBox(width: 6),
-                        Text(
-                          money(item.originalPrice!),
-                          style: TextStyle(
-                            fontSize: 12,
-                            decoration: TextDecoration.lineThrough,
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+                  PriceBlock(item: item),
                 ],
               ),
             ),
             const SizedBox(width: 8),
-            FilledButton.tonal(
+            _AddButton(
+              label: item.needsCustomization ? 'Choose' : 'Add',
               onPressed: () => _onAdd(context, ref),
-              child: Text(item.needsCustomization ? 'Choose' : 'Add'),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Compact red-pill add/choose button matching the website's primary CTA.
+class _AddButton extends StatelessWidget {
+  const _AddButton({required this.label, required this.onPressed});
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton(
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        backgroundColor: BrandColors.red,
+        foregroundColor: Colors.white,
+        minimumSize: const Size(0, 40),
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(BrandRadii.pill),
+        ),
+      ),
+      child: Text(label,
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
     );
   }
 }
@@ -433,6 +449,30 @@ class _CustomizeSheetState extends ConsumerState<_CustomizeSheet> {
         ),
       );
 
+  /// Variation price cell: sale price, plus struck-through original when the
+  /// backend marked this size as discounted (values come straight from the API).
+  Widget _variationPrice(Variation v) {
+    final discounted = v.originalPrice != null && v.originalPrice! > v.price;
+    if (!discounted) return Text(money(v.price));
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(money(v.price),
+            style: const TextStyle(
+                color: BrandColors.red, fontWeight: FontWeight.w700)),
+        const SizedBox(width: 4),
+        Text(
+          money(v.originalPrice!),
+          style: const TextStyle(
+            fontSize: 11,
+            decoration: TextDecoration.lineThrough,
+            color: BrandColors.mutedForeground,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _sizeSection() => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -449,7 +489,7 @@ class _CustomizeSheetState extends ConsumerState<_CustomizeSheet> {
                   RadioListTile<String>(
                     value: v.name,
                     title: Text(v.name),
-                    secondary: Text(money(v.price)),
+                    secondary: _variationPrice(v),
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                   ),

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/format.dart';
 import 'offers_models.dart';
 import 'offers_repository.dart';
+import 'widgets/offer_countdown.dart';
 
 class OffersScreen extends ConsumerWidget {
   const OffersScreen({super.key});
@@ -130,6 +131,10 @@ class _OfferCard extends StatelessWidget {
               Text('Min order ${money(offer.minOrderAmount)}',
                   style: TextStyle(
                       fontSize: 12, color: scheme.onSurfaceVariant)),
+            ],
+            if (offer.hasExpiry) ...[
+              const SizedBox(height: 6),
+              OfferCountdown(offer: offer),
             ],
             if (offer.couponCode.isNotEmpty) ...[
               const SizedBox(height: 8),

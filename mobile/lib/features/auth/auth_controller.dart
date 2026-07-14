@@ -176,6 +176,40 @@ class AuthController extends StateNotifier<AuthState> {
     }
   }
 
+  /// Confirm the email OTP. On success flips the cached customer to verified so
+  /// the router/checkout stop gating. Returns true when verified.
+  Future<bool> verifyEmail(String otp) async {
+    state = state.copyWith(error: null);
+    try {
+      final ok = await _repo.verifyEmail(otp);
+      if (ok && state.customer != null) {
+        state = state.copyWith(
+            customer: state.customer!.copyWith(emailVerified: true));
+      }
+      return ok;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (_) {
+      state = state.copyWith(error: 'Could not verify. Please try again.');
+      return false;
+    }
+  }
+
+  Future<bool> resendOtp() async {
+    state = state.copyWith(error: null);
+    try {
+      await _repo.resendOtp();
+      return true;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (_) {
+      state = state.copyWith(error: 'Could not resend the code. Please try again.');
+      return false;
+    }
+  }
+
   Future<void> logout() async {
     await _repo.logout();
     state = const AuthState(status: AuthStatus.unauthenticated);

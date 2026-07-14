@@ -20,17 +20,28 @@ const List<String> orderStatusFlow = [
   'delivered',
 ];
 
+/// Customer-facing status labels — kept in sync with the website tracker
+/// (frontend/src/pages/TrackingPage.jsx STEPS) so app and site read identically.
 String prettyStatus(String s) => switch (s) {
-      'pending' => 'Order placed',
+      'pending' => 'Order Placed',
       'accepted' => 'Accepted',
       'preparing' => 'Preparing',
       'ready' => 'Ready',
-      'out_for_delivery' => 'Out for delivery',
+      'out_for_delivery' => 'On the way',
       'delivered' => 'Delivered',
       'rejected' => 'Rejected',
       'cancelled' => 'Cancelled',
       _ => s,
     };
+
+/// Terminal states never change again, so live polling can stop once reached.
+const Set<String> terminalStatuses = {'delivered', 'cancelled', 'rejected'};
+
+bool isTerminalStatus(String s) => terminalStatuses.contains(s);
+
+/// Human-readable payment status, matching the website (raw value with
+/// underscores as spaces, e.g. pending_verification → "pending verification").
+String prettyPaymentStatus(String s) => s.replaceAll('_', ' ');
 
 class OrderItem {
   const OrderItem({required this.name, required this.price, required this.quantity, this.variationName});
@@ -59,6 +70,7 @@ class Order {
     required this.paymentMethod,
     required this.paymentStatus,
     required this.items,
+    this.orderType = 'delivery',
     this.trackToken,
     this.diamondsEarned = 0,
     this.customerName = '',
@@ -77,7 +89,10 @@ class Order {
   final String paymentMethod;
   final String paymentStatus;
   final List<OrderItem> items;
+  final String orderType; // 'delivery' | 'pickup'
   final String? trackToken;
+
+  bool get isPickup => orderType == 'pickup';
   final int diamondsEarned;
   final String customerName;
   final String phone;
@@ -98,6 +113,7 @@ class Order {
             .whereType<Map>()
             .map((i) => OrderItem.fromJson(Map<String, dynamic>.from(i)))
             .toList(),
+        orderType: (j['order_type'] ?? 'delivery').toString(),
         trackToken: j['track_token']?.toString(),
         diamondsEarned: _toInt(j['diamonds_earned']),
         customerName: (j['customer_name'] ?? '').toString(),

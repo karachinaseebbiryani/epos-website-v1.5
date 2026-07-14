@@ -49,6 +49,18 @@ export function AuthProvider({ children }) {
         return data;
     };
 
+    // Email OTP verification (email/password signups). Social logins are already verified.
+    const verifyEmail = async (otp) => {
+        const { data } = await api.post("/customer/verify-email", { otp });
+        setUser((u) => (u ? { ...u, email_verified: true } : u));
+        return data;
+    };
+
+    const resendOtp = async () => {
+        const { data } = await api.post("/customer/resend-otp");
+        return data;
+    };
+
     const logout = () => {
         localStorage.removeItem("knb_token");
         setToken(null);
@@ -56,7 +68,7 @@ export function AuthProvider({ children }) {
     };
 
     return (
-        <AuthContext.Provider value={{ user, token, login, register, logout, socialLogin }}>
+        <AuthContext.Provider value={{ user, token, login, register, logout, socialLogin, verifyEmail, resendOtp }}>
             {children}
         </AuthContext.Provider>
     );

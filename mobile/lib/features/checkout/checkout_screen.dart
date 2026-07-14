@@ -2,11 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../app/tokens.dart';
 import '../../core/api_client.dart';
 import '../../core/format.dart';
 import '../../core/location.dart';
 import '../auth/auth_controller.dart';
 import '../cart/cart_controller.dart';
+import '../loyalty/loyalty_repository.dart';
+import '../loyalty/widgets/diamond_pill.dart';
+import '../menu/menu_repository.dart';
+import '../menu/widgets/people_also_buy.dart';
+import '../offers/offers_logic.dart';
+import '../offers/offers_repository.dart';
 import '../orders/order_models.dart';
 import '../orders/order_repository.dart';
 import '../payment/payment_models.dart';
@@ -27,7 +34,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   final _notes = TextEditingController();
   final _coupon = TextEditingController();
   String _paymentMethod = 'cod';
+  String _orderType = 'delivery'; // 'delivery' | 'pickup'
   bool _busy = false;
+
+  bool get _isPickup => _orderType == 'pickup';
 
   double? _lat;
   double? _lng;
@@ -47,6 +57,34 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     final allergens = ref.read(allergensProvider).asData?.value;
     if (allergens != null && allergens.isNotEmpty && _notes.text.isEmpty) {
       _notes.text = 'Allergies: ${allergens.join(', ')}';
+    }
+    // Re-validate a possibly-restored/stale cart against the live menu before
+    // the customer pays: drop unavailable items, refresh prices to backend
+    // truth. The server still re-prices authoritatively on order.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revalidateCart());
+  }
+
+  Future<void> _revalidateCart() async {
+    try {
+      final menu = await ref.read(menuRepositoryProvider).fetchMenu();
+      if (!mounted) return;
+      final result = ref.read(cartProvider.notifier).reconcile(menu);
+      if (!mounted || !result.changed) return;
+      final parts = <String>[
+        if (result.removedItems.isNotEmpty)
+          '${result.removedItems.join(', ')} no longer available',
+        if (result.pricesChanged) 'prices updated',
+      ];
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Cart updated: ${parts.join(' · ')}'),
+        duration: const Duration(seconds: 3),
+      ));
+      if (ref.read(cartProvider).isEmpty && mounted) {
+        context.go('/'); // everything went out of stock
+      }
+    } catch (_) {
+      // Non-blocking: if the menu can't be fetched, checkout proceeds and the
+      // backend still validates at order time.
     }
   }
 
@@ -108,13 +146,17 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             customerName: _name.text.trim(),
             phone: _phone.text.trim(),
             address: _address.text.trim(),
+            orderType: _orderType,
             notes: _notes.text.trim(),
             paymentMethod: _paymentMethod,
             couponCode: _coupon.text.trim(),
-            deliveryLat: _lat,
-            deliveryLng: _lng,
+            deliveryLat: _isPickup ? null : _lat,
+            deliveryLng: _isPickup ? null : _lng,
           );
       ref.read(cartProvider.notifier).clear();
+      // Diamonds are awarded server-side on delivery; refresh the cached balance
+      // so the pill reflects any coupon/loyalty change on next view.
+      ref.invalidate(loyaltyBalanceProvider);
       if (!mounted) return;
       final tok = order.trackToken ?? '';
       // Route by payment method: manual transfers need a reference/proof step,
@@ -145,13 +187,29 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   Widget build(BuildContext context) {
     final subtotal = ref.watch(cartSubtotalProvider);
     final total = subtotal + _deliveryFee;
+    final customer = ref.watch(authControllerProvider).customer;
+    final needsVerify = customer != null && !customer.emailVerified;
     return Scaffold(
-      appBar: AppBar(title: const Text('Checkout')),
+      appBar: AppBar(
+        title: const Text('Checkout'),
+        actions: const [DiamondPill()],
+      ),
       body: Form(
         key: _formKey,
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            if (needsVerify) ...[
+              _VerifyEmailBanner(
+                onVerify: () => context.push('/verify-email?redirect=/checkout'),
+              ),
+              const SizedBox(height: 16),
+            ],
+            _OrderTypeSelector(
+              selected: _orderType,
+              onChanged: (v) => setState(() => _orderType = v),
+            ),
+            const SizedBox(height: 16),
             TextFormField(
               controller: _name,
               decoration: const InputDecoration(
@@ -169,22 +227,30 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                   (v == null || v.trim().length < 7) ? 'Enter your phone' : null,
             ),
             const SizedBox(height: 12),
-            TextFormField(
-              controller: _address,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                  labelText: 'Delivery address', border: OutlineInputBorder()),
-              validator: (v) => (v == null || v.trim().length < 6)
-                  ? 'Enter your address'
-                  : null,
-            ),
-            const SizedBox(height: 20),
-            _DeliveryLocationCard(
-              hasLocation: _lat != null,
-              locating: _locating,
-              quote: _quote,
-              onCapture: _locating ? null : _captureLocation,
-            ),
+            // Address + delivery location are only relevant for delivery orders.
+            // Pickup / pay-at-restaurant customers are never asked for them.
+            if (!_isPickup) ...[
+              TextFormField(
+                controller: _address,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                    labelText: 'Delivery address', border: OutlineInputBorder()),
+                validator: (v) => _isPickup
+                    ? null
+                    : (v == null || v.trim().length < 6)
+                        ? 'Enter your address'
+                        : null,
+              ),
+              const SizedBox(height: 20),
+              _DeliveryLocationCard(
+                hasLocation: _lat != null,
+                locating: _locating,
+                quote: _quote,
+                onCapture: _locating ? null : _captureLocation,
+              ),
+              const SizedBox(height: 12),
+            ] else
+              const _PickupNotice(),
             const SizedBox(height: 12),
             TextFormField(
               controller: _notes,
@@ -197,9 +263,15 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               textCapitalization: TextCapitalization.characters,
               decoration: const InputDecoration(
                 labelText: 'Coupon code (optional)',
-                helperText: 'Applied when you place the order',
+                helperText: 'Applied and validated when you place the order',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 8),
+            _CouponSuggestion(
+              subtotal: subtotal,
+              currentCode: _coupon.text.trim(),
+              onApply: (code) => setState(() => _coupon.text = code),
             ),
             const SizedBox(height: 20),
             Text('Payment method',
@@ -208,15 +280,21 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               selected: _paymentMethod,
               onChanged: (v) => setState(() => _paymentMethod = v),
             ),
+            const SizedBox(height: 8),
+            // "People also buy" — same recommendations the website shows at
+            // checkout. Its own internal padding handles horizontal insets.
+            const PeopleAlsoBuy(),
             const Divider(height: 28),
             _SummaryRow(label: 'Subtotal', value: money(subtotal)),
-            const SizedBox(height: 4),
-            _SummaryRow(
-              label: 'Delivery',
-              value: _quote == null
-                  ? '-'
-                  : (_quote!.freeDelivery ? 'FREE' : money(_deliveryFee)),
-            ),
+            if (!_isPickup) ...[
+              const SizedBox(height: 4),
+              _SummaryRow(
+                label: 'Delivery',
+                value: _quote == null
+                    ? '-'
+                    : (_quote!.freeDelivery ? 'FREE' : money(_deliveryFee)),
+              ),
+            ],
             const SizedBox(height: 6),
             _SummaryRow(label: 'Total', value: money(total), bold: true),
           ],
@@ -228,20 +306,119 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
           child: SizedBox(
             width: double.infinity,
             child: FilledButton(
-              onPressed: (_busy || _outOfRange || _lat == null) ? null : _placeOrder,
+              onPressed: (_busy ||
+                      needsVerify ||
+                      (!_isPickup && (_outOfRange || _lat == null)))
+                  ? (needsVerify
+                      ? () => context.push('/verify-email?redirect=/checkout')
+                      : null)
+                  : _placeOrder,
               child: _busy
                   ? const SizedBox(
                       height: 20,
                       width: 20,
                       child: CircularProgressIndicator(strokeWidth: 2))
-                  : Text(_outOfRange
-                      ? 'Outside delivery area'
-                      : _lat == null
-                          ? 'Add delivery location'
-                          : 'Place order - ${money(total)}'),
+                  : Text(needsVerify
+                      ? 'Verify email to order'
+                      : _isPickup
+                          ? 'Place pickup order - ${money(total)}'
+                          : _outOfRange
+                              ? 'Outside delivery area'
+                              : _lat == null
+                                  ? 'Add delivery location'
+                                  : 'Place order - ${money(total)}'),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Shown at the top of checkout when a signed-in account hasn't verified its
+/// email — the backend will reject the order otherwise.
+class _VerifyEmailBanner extends StatelessWidget {
+  const _VerifyEmailBanner({required this.onVerify});
+  final VoidCallback onVerify;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: BrandColors.yellow.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(BrandRadii.md),
+        border: Border.all(color: BrandColors.yellowDark.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.mark_email_unread_outlined,
+              color: BrandColors.yellowDark),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Verify your email to place orders and earn diamonds.',
+              style: TextStyle(
+                  color: BrandColors.ink, fontWeight: FontWeight.w600),
+            ),
+          ),
+          TextButton(onPressed: onVerify, child: const Text('Verify')),
+        ],
+      ),
+    );
+  }
+}
+
+/// Delivery vs Pickup toggle. Pickup hides the address + delivery fee entirely.
+class _OrderTypeSelector extends StatelessWidget {
+  const _OrderTypeSelector({required this.selected, required this.onChanged});
+  final String selected;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<String>(
+      segments: const [
+        ButtonSegment(
+            value: 'delivery',
+            label: Text('Delivery'),
+            icon: Icon(Icons.delivery_dining)),
+        ButtonSegment(
+            value: 'pickup',
+            label: Text('Pickup'),
+            icon: Icon(Icons.storefront)),
+      ],
+      selected: {selected},
+      onSelectionChanged: (s) => onChanged(s.first),
+      showSelectedIcon: false,
+    );
+  }
+}
+
+/// Shown instead of the address/location card for pickup orders.
+class _PickupNotice extends StatelessWidget {
+  const _PickupNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: BrandColors.cream,
+        borderRadius: BorderRadius.circular(BrandRadii.md),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.storefront, color: BrandColors.red, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Pick up your order at the restaurant — no delivery address needed.',
+              style: TextStyle(color: scheme.onSurface),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -406,6 +583,75 @@ class _QuoteLine extends StatelessWidget {
     return Text(
       '$km km away - $feeText',
       style: TextStyle(color: scheme.onSurfaceVariant),
+    );
+  }
+}
+
+/// Suggests the single best eligible coupon for the current subtotal and lets
+/// the customer apply it with one tap. The backend still validates and computes
+/// the real discount on order — this only stages the code into the field.
+class _CouponSuggestion extends ConsumerWidget {
+  const _CouponSuggestion({
+    required this.subtotal,
+    required this.currentCode,
+    required this.onApply,
+  });
+
+  final double subtotal;
+  final String currentCode;
+  final ValueChanged<String> onApply;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final offers = ref.watch(offersProvider).asData?.value ?? const [];
+    final coupons = ref.watch(myCouponsProvider).asData?.value ?? const [];
+    final best = bestEligibleCoupon(
+      offers: offers,
+      personal: coupons,
+      subtotal: subtotal,
+    );
+    if (best == null) return const SizedBox.shrink();
+    // Already applied → confirm, don't re-suggest.
+    final applied = currentCode.toUpperCase() == best.code.toUpperCase();
+    final saving = best.indicativeValue(subtotal);
+
+    return Material(
+      color: BrandColors.cream,
+      borderRadius: BorderRadius.circular(BrandRadii.md),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.local_offer, size: 18, color: BrandColors.red),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    applied
+                        ? '${best.code} applied'
+                        : 'Save ~Rs. ${saving.toStringAsFixed(0)} with ${best.code}',
+                    style: const TextStyle(
+                        color: BrandColors.ink, fontWeight: FontWeight.w700),
+                  ),
+                  Text(best.label,
+                      style: const TextStyle(
+                          color: BrandColors.mutedForeground, fontSize: 12)),
+                ],
+              ),
+            ),
+            if (applied)
+              const Icon(Icons.check_circle, color: BrandColors.discountBadge)
+            else
+              TextButton(
+                onPressed: () => onApply(best.code),
+                child: const Text('Apply'),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

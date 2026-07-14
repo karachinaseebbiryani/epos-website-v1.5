@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/api_client.dart';
 import '../../core/format.dart';
 import '../../core/location.dart';
+import '../../core/review_prompt.dart';
 import '../auth/auth_controller.dart';
 import 'order_models.dart';
 import 'order_repository.dart';
@@ -22,7 +23,10 @@ class OrderTrackingScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final key = '$orderId|$trackToken';
-    final async = ref.watch(orderTrackingProvider(key));
+    // Auto-refreshing stream: polls every 5s until the order is terminal, so an
+    // employee's status change on the website appears here within ~5s without a
+    // manual refresh. Pull-to-refresh still forces an immediate re-read.
+    final async = ref.watch(orderTrackingStreamProvider(key));
 
     return Scaffold(
       appBar: AppBar(
@@ -33,8 +37,10 @@ class OrderTrackingScreen extends ConsumerWidget {
         ),
       ),
       body: RefreshIndicator(
-        onRefresh: () async => ref.invalidate(orderTrackingProvider(key)),
+        onRefresh: () async => ref.invalidate(orderTrackingStreamProvider(key)),
         child: async.when(
+          // While reconnecting the stream keeps the last value, so `loading`
+          // only shows on the very first fetch.
           loading: () => const _Scrollable(
             child: Padding(
               padding: EdgeInsets.only(top: 80),
@@ -53,7 +59,7 @@ class OrderTrackingScreen extends ConsumerWidget {
                   const SizedBox(height: 12),
                   OutlinedButton(
                     onPressed: () =>
-                        ref.invalidate(orderTrackingProvider(key)),
+                        ref.invalidate(orderTrackingStreamProvider(key)),
                     child: const Text('Retry'),
                   ),
                 ],
@@ -77,14 +83,42 @@ class _TrackingBody extends StatelessWidget {
         order.status == 'rejected' || order.status == 'cancelled';
     final currentIndex = orderStatusFlow.indexOf(order.status);
 
+    // Once the order is delivered, politely offer the Play in-app review — once
+    // per order, after the flow completes (never during checkout). Self-gates.
+    if (order.status == 'delivered') {
+      WidgetsBinding.instance.addPostFrameCallback(
+          (_) => ReviewPrompt.maybeRequest(order.id));
+    }
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text('Order #${order.receiptNo}',
-            style: Theme.of(context).textTheme.titleLarge),
+        Row(
+          children: [
+            Text('Order #${order.receiptNo}',
+                style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(width: 8),
+            Chip(
+              label: Text(order.isPickup ? 'Pickup' : 'Delivery'),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              avatar: Icon(
+                  order.isPickup ? Icons.storefront : Icons.delivery_dining,
+                  size: 16),
+            ),
+          ],
+        ),
         const SizedBox(height: 4),
-        Text('Status: ${prettyStatus(order.status)}',
-            style: Theme.of(context).textTheme.bodyMedium),
+        Row(
+          children: [
+            Text('Status: ${prettyStatus(order.status)}',
+                style: Theme.of(context).textTheme.bodyMedium),
+            if (!isTerminalStatus(order.status)) ...[
+              const SizedBox(width: 8),
+              const _LiveDot(),
+            ],
+          ],
+        ),
         const SizedBox(height: 20),
         if (terminalRejected)
           Card(
@@ -96,7 +130,9 @@ class _TrackingBody extends StatelessWidget {
           )
         else
           _StatusTimeline(currentIndex: currentIndex),
-        if (!terminalRejected && order.status != 'delivered') ...[
+        if (!terminalRejected &&
+            order.status != 'delivered' &&
+            !order.isPickup) ...[
           const SizedBox(height: 16),
           _ShareLocationButton(orderId: order.id),
         ],
@@ -121,6 +157,8 @@ class _TrackingBody extends StatelessWidget {
         _row('Total', money(order.totalPrice), bold: true),
         const SizedBox(height: 8),
         _row('Payment', order.paymentMethod.toUpperCase()),
+        if (order.paymentStatus.isNotEmpty)
+          _row('Payment status', prettyPaymentStatus(order.paymentStatus)),
         if (order.diamondsEarned > 0)
           _row('Diamonds earned', '${order.diamondsEarned} 💎'),
         if (order.status == 'delivered') ...[
@@ -143,6 +181,41 @@ class _TrackingBody extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// Small "live" pill shown while the tracker is actively polling, mirroring the
+/// website's "updates live every 5 seconds" cue.
+class _LiveDot extends StatelessWidget {
+  const _LiveDot();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: scheme.primary.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+                color: scheme.primary, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          Text('Live',
+              style: TextStyle(
+                  color: scheme.primary,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
 }
 
 class _StatusTimeline extends StatelessWidget {

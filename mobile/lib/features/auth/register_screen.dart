@@ -46,6 +46,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       final err = ref.read(authControllerProvider).error ?? 'Registration failed';
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    // New email/password accounts start unverified → send them to enter the OTP.
+    final customer = ref.read(authControllerProvider).customer;
+    if (customer != null && !customer.emailVerified) {
+      context.go('/verify-email');
     }
   }
 

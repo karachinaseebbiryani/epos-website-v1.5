@@ -40,6 +40,12 @@ class Variation {
         originalPrice:
             j['original_price'] == null ? null : _toDouble(j['original_price']),
       );
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'price': price,
+        if (originalPrice != null) 'original_price': originalPrice,
+      };
 }
 
 /// A single choice within a [ModifierGroup] (e.g. "Extra cheese +Rs 100").
@@ -162,6 +168,29 @@ class MenuItem {
 
   bool get isDiscounted => originalPrice != null && originalPrice! > price;
 
+  /// Minimum sale price to advertise on the card. For a variant item this is the
+  /// cheapest variation (the website's "From Rs. {min}"), otherwise the item's
+  /// own sale price. Pure min-selection over backend-supplied prices — the app
+  /// never computes a price itself.
+  double get fromPrice => hasVariations
+      ? variations.map((v) => v.price).reduce((a, b) => a < b ? a : b)
+      : price;
+
+  /// The pre-discount original that pairs with [fromPrice], for strike-through.
+  /// Null when there's nothing to strike (no discount on the cheapest option).
+  double? get fromOriginal {
+    if (hasVariations) {
+      final orig = variations
+          .map((v) => v.originalPrice ?? v.price)
+          .reduce((a, b) => a < b ? a : b);
+      return orig > fromPrice ? orig : null;
+    }
+    return isDiscounted ? originalPrice : null;
+  }
+
+  /// True when this item shows a "From" (multiple price points to choose from).
+  bool get showsFromPrice => hasVariations;
+
   factory MenuItem.fromJson(Map<String, dynamic> j) => MenuItem(
         id: (j['id'] ?? '').toString(),
         name: (j['name'] ?? '').toString(),
@@ -190,6 +219,24 @@ class MenuItem {
             .map((i) => MenuIngredient.fromJson(Map<String, dynamic>.from(i)))
             .toList(),
       );
+
+  /// Serialize just enough to rebuild a persisted cart line for display. The
+  /// customization sheet is never reopened from a restored line, so modifier
+  /// groups / ingredients are intentionally omitted to keep storage light.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'price': price,
+        'category_id': categoryId,
+        if (originalPrice != null) 'original_price': originalPrice,
+        'discount_percent': discountPercent,
+        'image_url': imageUrl,
+        'description': description,
+        'stock': stock,
+        'is_popular': isPopular,
+        'is_bestseller': isBestseller,
+        'variations': [for (final v in variations) v.toJson()],
+      };
 }
 
 /// Full menu payload: categories + items.

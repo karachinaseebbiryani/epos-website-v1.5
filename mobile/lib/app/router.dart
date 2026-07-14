@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../features/auth/auth_controller.dart';
 import '../features/auth/login_screen.dart';
 import '../features/auth/register_screen.dart';
+import '../features/auth/verify_email_screen.dart';
 import '../features/cart/cart_screen.dart';
 import '../features/checkout/checkout_screen.dart';
 import '../features/faq/faq_screen.dart';
@@ -46,6 +47,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/', builder: (_, __) => const MenuScreen()),
       GoRoute(path: '/login', builder: (_, __) => const LoginScreen()),
       GoRoute(path: '/register', builder: (_, __) => const RegisterScreen()),
+      GoRoute(
+        path: '/verify-email',
+        builder: (_, state) => VerifyEmailScreen(
+          redirectTo: state.uri.queryParameters['redirect'] ?? '/',
+        ),
+      ),
       GoRoute(path: '/cart', builder: (_, __) => const CartScreen()),
       GoRoute(path: '/diamonds', builder: (_, __) => const DiamondsScreen()),
       GoRoute(path: '/faqs', builder: (_, __) => const FaqScreen()),

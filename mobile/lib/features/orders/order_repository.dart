@@ -18,6 +18,7 @@ class OrderRepository {
     required String customerName,
     required String phone,
     required String address,
+    String orderType = 'delivery',
     String notes = '',
     String paymentMethod = 'cod',
     String? couponCode,
@@ -25,6 +26,7 @@ class OrderRepository {
     double? deliveryLng,
     String? rewardId,
   }) async {
+    final pickup = orderType == 'pickup';
     final res = await _api.dio.post(
       '/online-orders',
       data: {
@@ -32,12 +34,14 @@ class OrderRepository {
         'total_price': subtotal,
         'customer_name': customerName,
         'phone': phone,
-        'address': address,
+        'address': pickup ? '' : address,
+        'order_type': orderType,
         'notes': notes,
         'payment_method': paymentMethod,
         if (couponCode != null && couponCode.isNotEmpty) 'coupon_code': couponCode,
-        if (deliveryLat != null) 'delivery_lat': deliveryLat,
-        if (deliveryLng != null) 'delivery_lng': deliveryLng,
+        // Delivery coordinates are meaningless for pickup — never send them.
+        if (!pickup && deliveryLat != null) 'delivery_lat': deliveryLat,
+        if (!pickup && deliveryLng != null) 'delivery_lng': deliveryLng,
         if (rewardId != null) 'reward_id': rewardId,
       },
       options: Options(extra: {'showLoading': true}),
@@ -133,12 +137,33 @@ final orderRepositoryProvider = Provider<OrderRepository>(
 );
 
 /// Live tracking for one order. `.family` keyed by "orderId|token".
+/// One-shot read (used for pull-to-refresh / manual invalidation).
 final orderTrackingProvider =
     FutureProvider.family<Order, String>((ref, key) {
   final parts = key.split('|');
   final id = parts.first;
   final token = parts.length > 1 && parts[1].isNotEmpty ? parts[1] : null;
   return ref.watch(orderRepositoryProvider).track(id, token);
+});
+
+/// Auto-refreshing tracking: polls GET /track every 5s (matching the website's
+/// 5-second poll) while the order is non-terminal, then stops. This is what
+/// keeps the app's status in step with employee changes on the website even
+/// when FCM push isn't configured/delivered. Keyed by "orderId|token".
+final orderTrackingStreamProvider =
+    StreamProvider.autoDispose.family<Order, String>((ref, key) async* {
+  final parts = key.split('|');
+  final id = parts.first;
+  final token = parts.length > 1 && parts[1].isNotEmpty ? parts[1] : null;
+  final repo = ref.watch(orderRepositoryProvider);
+
+  // Emit immediately, then poll until a terminal status is reached.
+  while (true) {
+    final order = await repo.track(id, token);
+    yield order;
+    if (isTerminalStatus(order.status)) break;
+    await Future<void>.delayed(const Duration(seconds: 5));
+  }
 });
 
 /// Existing review for an order (null if not yet reviewed). Keyed by order id.
