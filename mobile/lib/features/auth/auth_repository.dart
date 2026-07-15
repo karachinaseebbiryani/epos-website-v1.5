@@ -67,6 +67,29 @@ class AuthRepository {
     return result;
   }
 
+  /// Sign in with Apple (iOS). Sends the identity token; name is only available
+  /// on the very first authorization, so pass it when Apple provides it.
+  Future<AuthResult> appleLogin(String identityToken, {String? name}) async {
+    final res = await _api.dio.post('/customer/apple',
+        data: {
+          'identity_token': identityToken,
+          if (name != null && name.isNotEmpty) 'name': name,
+        },
+        options: _authOpts());
+    throwIfError(res);
+    final result = AuthResult.fromJson(Map<String, dynamic>.from(res.data));
+    await _tokenStore.write(result.token);
+    return result;
+  }
+
+  /// Permanently delete the signed-in customer's account + personal data
+  /// (App Store / Play policy requirement). Clears the local session too.
+  Future<void> deleteAccount() async {
+    final res = await _api.dio.delete('/customer/me', options: _authOpts());
+    throwIfError(res);
+    await _tokenStore.clear();
+  }
+
   /// Confirm the emailed 6-digit OTP for the signed-in customer.
   Future<bool> verifyEmail(String otp) async {
     final res = await _api.dio.post('/customer/verify-email',

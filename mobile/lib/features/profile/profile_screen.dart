@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../app/theme_controller.dart';
 import '../auth/auth_controller.dart';
+import 'policy_webview.dart';
 import 'profile_repository.dart';
 
 class ProfileScreen extends ConsumerWidget {
@@ -106,6 +107,26 @@ class ProfileScreen extends ConsumerWidget {
               icon: Icons.help_outline,
               label: 'FAQs',
               onTap: () => context.push('/faqs')),
+          const SizedBox(height: 20),
+          // Policies — same pages as the website (PayFast + store compliance).
+          Text('Legal & policies', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          _NavTile(
+              icon: Icons.privacy_tip_outlined,
+              label: 'Privacy Policy',
+              onTap: () => _openPolicy(context, 'privacy', 'Privacy Policy')),
+          _NavTile(
+              icon: Icons.description_outlined,
+              label: 'Terms & Conditions',
+              onTap: () => _openPolicy(context, 'terms', 'Terms & Conditions')),
+          _NavTile(
+              icon: Icons.currency_exchange,
+              label: 'Return & Refund Policy',
+              onTap: () => _openPolicy(context, 'refunds', 'Return & Refund Policy')),
+          _NavTile(
+              icon: Icons.delivery_dining_outlined,
+              label: 'Delivery / Service Policy',
+              onTap: () => _openPolicy(context, 'delivery', 'Delivery Information')),
           const SizedBox(height: 24),
           OutlinedButton.icon(
             onPressed: () =>
@@ -117,9 +138,54 @@ class ProfileScreen extends ConsumerWidget {
               side: BorderSide(color: scheme.error),
             ),
           ),
+          const SizedBox(height: 8),
+          // Permanent deletion — App Store & Play Store policy requirement.
+          TextButton.icon(
+            onPressed: () => _confirmDeleteAccount(context, ref),
+            icon: Icon(Icons.delete_forever, color: scheme.error, size: 20),
+            label: Text('Delete my account',
+                style: TextStyle(color: scheme.error)),
+          ),
         ],
       ),
     );
+  }
+
+  void _openPolicy(BuildContext context, String slug, String title) {
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => PolicyWebView(slug: slug, title: title)));
+  }
+
+  Future<void> _confirmDeleteAccount(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete account?'),
+        content: const Text(
+            'This permanently deletes your account, saved allergies, coupons '
+            'and diamond balance. This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete forever'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final ok =
+        await ref.read(authControllerProvider.notifier).deleteAccount();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok
+            ? 'Your account has been deleted.'
+            : ref.read(authControllerProvider).error ??
+                'Could not delete the account.')));
   }
 
   static String _initial(String? name) {

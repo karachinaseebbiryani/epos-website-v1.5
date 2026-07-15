@@ -114,6 +114,7 @@ function App() {
                   <Route path="/contact" element={<ContactPage />} />
                   <Route path="/privacy" element={<PolicyPage />} />
                   <Route path="/terms" element={<PolicyPage />} />
+                  <Route path="/refunds" element={<PolicyPage />} />
                   <Route path="/delivery" element={<DeliveryPage />} />
                   <Route path="/rewards-program" element={<PolicyPage />} />
                   <Route path="/profile" element={<ProfilePage />} />

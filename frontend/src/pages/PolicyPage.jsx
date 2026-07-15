@@ -72,7 +72,7 @@ export default function PolicyPage() {
 
             <header className="mb-10">
                 <div className="inline-flex items-center gap-2 bg-brand-yellow/20 text-brand-ink px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest mb-3">
-                    <ShieldCheck className="w-3.5 h-3.5" /> {policy.slug === "privacy" ? "Your data, your rights" : policy.slug === "terms" ? "Service Agreement" : policy.slug === "delivery" ? "How delivery works" : "Loyalty Program"}
+                    <ShieldCheck className="w-3.5 h-3.5" /> {policy.slug === "privacy" ? "Your data, your rights" : policy.slug === "terms" ? "Service Agreement" : policy.slug === "refunds" ? "Returns & refunds" : policy.slug === "delivery" ? "How delivery works" : "Loyalty Program"}
                 </div>
                 <h1 className="font-display font-black text-3xl md:text-5xl text-brand-ink mb-2" itemProp="headline">{policy.title}</h1>
                 <p className="text-sm text-neutral-500">Last updated: {policy.updated}</p>

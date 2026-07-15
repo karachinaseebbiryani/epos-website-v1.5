@@ -554,6 +554,12 @@ export default function CheckoutPage() {
                             {isClosed ? "Closed — try again later" : (loading ? "Processing..." : `Place Order — Rs. ${total.toFixed(0)}`)}
                         </button>
                         <p className="text-[11px] text-neutral-400 text-center mt-3">Estimated delivery 30–45 min</p>
+                        <p className="text-[11px] text-neutral-400 text-center mt-1">
+                            By placing an order you agree to our{" "}
+                            <Link to="/terms" className="underline hover:text-brand-red">Terms</Link>,{" "}
+                            <Link to="/refunds" className="underline hover:text-brand-red">Refund Policy</Link> and{" "}
+                            <Link to="/privacy" className="underline hover:text-brand-red">Privacy Policy</Link>.
+                        </p>
                     </div>
                 </aside>
             </form>

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,44 +8,40 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../core/api_client.dart';
 import 'payment_repository.dart';
 
-/// Hosted-checkout WebView for the SafePay gateway. Creates a session for the
-/// order, loads the checkout URL, and watches for the success/cancel redirect
-/// (any navigation back to our `origin_url`). On return it polls the backend for
-/// the authoritative payment status, then continues to order tracking.
+/// Hosted-checkout WebView for the PayFast (gopayfast) gateway — the route
+/// that actually charges Easypaisa / JazzCash wallets in-app. Creates a
+/// session, auto-submits the transaction form to PayFast's hosted page, and
+/// watches for the success/cancel redirect back to our sentinel origin. The
+/// redirect's err_code is reported to the backend (which flips the order to
+/// paid), then we continue to order tracking.
 ///
-/// Used for cards (`via: card`) and — when the gateway is enabled — the
-/// Easypaisa/JazzCash wallets, which SafePay charges on its hosted page. If the
-/// gateway is unavailable and the wallet has manual account details configured,
-/// the error view offers the manual transfer flow as a fallback.
-///
-/// Inert until the backend is configured: `createSafepaySession` returns a 503
-/// (surfaced as an ApiException) which we show as "not available".
-class SafepayWebView extends ConsumerStatefulWidget {
-  const SafepayWebView({
+/// Inert until the backend has PAYFAST_MERCHANT_ID/PAYFAST_SECURED_KEY: the
+/// session call 503s and the error view offers the manual transfer flow.
+class PayfastWebView extends ConsumerStatefulWidget {
+  const PayfastWebView({
     super.key,
     required this.orderId,
     required this.trackToken,
-    this.via = 'card',
+    this.via = 'easypaisa',
   });
 
   final String orderId;
   final String trackToken;
 
-  /// What the customer chose to pay with: `card`, `easypaisa` or `jazzcash`.
-  /// Cosmetic for the hosted page (SafePay shows its own method picker) but
-  /// drives the title and the manual-transfer fallback on error.
+  /// Wallet the customer picked: `easypaisa` or `jazzcash`. Cosmetic (PayFast
+  /// shows its own method picker) but drives the title + manual fallback.
   final String via;
 
   @override
-  ConsumerState<SafepayWebView> createState() => _SafepayWebViewState();
+  ConsumerState<PayfastWebView> createState() => _PayfastWebViewState();
 }
 
-class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
-  // Sentinel origin the backend uses to build success/cancel redirect URLs.
+class _PayfastWebViewState extends ConsumerState<PayfastWebView> {
+  // Sentinel origin the backend embeds in SUCCESS_URL / FAILURE_URL.
   static const String _origin = 'https://knb.payment.return';
 
   WebViewController? _controller;
-  String? _tracker;
+  String? _basketId;
   String? _error;
   bool _finishing = false;
 
@@ -55,33 +53,45 @@ class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
 
   Future<void> _start() async {
     try {
-      final session = await ref.read(paymentRepositoryProvider).createSafepaySession(
+      final session = await ref.read(paymentRepositoryProvider).createPayfastSession(
             orderId: widget.orderId,
             originUrl: _origin,
           );
-      if (session.url.isEmpty) {
+      if (session.actionUrl.isEmpty) {
         setState(() => _error = 'Could not start the payment.');
         return;
       }
-      _tracker = session.tracker;
+      _basketId = session.basketId;
+      // PayFast's redirect model wants a form POST, not a GET — render a tiny
+      // self-submitting form so the WebView lands on the hosted checkout.
+      final inputs = session.fields.entries
+          .map((e) =>
+              '<input type="hidden" name="${_esc(e.key)}" value="${_esc(e.value)}">')
+          .join();
+      final html = '<!DOCTYPE html><html><body>'
+          '<p style="font-family:sans-serif;text-align:center;margin-top:40vh">'
+          'Connecting to PayFast…</p>'
+          '<form id="pf" method="post" action="${_esc(session.actionUrl)}">$inputs</form>'
+          '<script>document.getElementById("pf").submit();</script>'
+          '</body></html>';
       final controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setNavigationDelegate(NavigationDelegate(
           onNavigationRequest: (req) {
             if (req.url.startsWith(_origin)) {
-              _finish();
+              _finish(Uri.parse(req.url));
               return NavigationDecision.prevent;
             }
             return NavigationDecision.navigate;
           },
         ))
-        ..loadRequest(Uri.parse(session.url));
+        ..loadHtmlString(html);
       if (!mounted) return;
       setState(() => _controller = controller);
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _error = e.statusCode == 503
-          ? 'Online payment is not available yet.'
+          ? 'Online wallet payment is not available yet.'
           : e.message);
     } catch (_) {
       if (!mounted) return;
@@ -89,13 +99,25 @@ class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
     }
   }
 
-  Future<void> _finish() async {
+  String _esc(String s) => const HtmlEscape(HtmlEscapeMode.attribute).convert(s);
+
+  Future<void> _finish(Uri redirect) async {
     if (_finishing) return;
     _finishing = true;
-    // Confirm with the backend rather than trusting the redirect alone.
+    // Success redirects land on $_origin/success, failures on /cancel. PayFast
+    // appends err_code/err_msg/transaction_id — forward them so the BACKEND
+    // decides paid vs failed (the app never trusts the redirect alone).
     try {
-      if (_tracker != null && _tracker!.isNotEmpty) {
-        await ref.read(paymentRepositoryProvider).safepayStatus(_tracker!);
+      if (_basketId != null && _basketId!.isNotEmpty) {
+        final q = redirect.queryParameters;
+        await ref.read(paymentRepositoryProvider).payfastReturn(
+              basketId: _basketId!,
+              errCode: q['err_code'] ??
+                  (redirect.path.contains('success') ? '000' : null),
+              errMsg: q['err_msg'],
+              transactionId: q['transaction_id'],
+              validationHash: q['validation_hash'],
+            );
       }
     } catch (_) {
       // Tracking screen shows the authoritative status regardless.
@@ -105,9 +127,8 @@ class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
   }
 
   String get _title => switch (widget.via) {
-        'easypaisa' => 'Easypaisa payment',
         'jazzcash' => 'JazzCash payment',
-        _ => 'Card payment',
+        _ => 'Easypaisa payment',
       };
 
   /// Manual account details exist for the chosen wallet, so the transfer +

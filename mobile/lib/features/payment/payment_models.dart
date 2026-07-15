@@ -11,6 +11,7 @@ class PublicPaymentSettings {
     required this.payAtRestaurant,
     required this.bankTransfer,
     required this.card,
+    required this.payfastEnabled,
     required this.bankAccountTitle,
     required this.bankAccountNumber,
     required this.bankName,
@@ -26,6 +27,10 @@ class PublicPaymentSettings {
   final bool bankTransfer;
   final bool card;
 
+  /// PayFast gateway configured on the backend — charges Easypaisa/JazzCash
+  /// wallets natively on its hosted page (SafePay doesn't list PK wallets).
+  final bool payfastEnabled;
+
   final String bankAccountTitle;
   final String bankAccountNumber;
   final String bankName;
@@ -35,9 +40,18 @@ class PublicPaymentSettings {
   final String jazzcashNumber;
   final String jazzcashAccountTitle;
 
-  bool get hasEasypaisa => bankTransfer && easypaisaNumber.isNotEmpty;
-  bool get hasJazzcash => bankTransfer && jazzcashNumber.isNotEmpty;
+  /// The wallet gateway (PayFast) can charge Easypaisa/JazzCash in-app.
+  bool get gatewayOn => payfastEnabled;
+
+  /// Manual-transfer details are configured for each wallet / the bank.
+  bool get easypaisaManual => bankTransfer && easypaisaNumber.isNotEmpty;
+  bool get jazzcashManual => bankTransfer && jazzcashNumber.isNotEmpty;
   bool get hasBank => bankTransfer && bankAccountNumber.isNotEmpty;
+
+  /// A wallet is offered when EITHER the gateway can charge it in-app OR the
+  /// manual account number is configured (fallback flow).
+  bool get easypaisaAvailable => gatewayOn || easypaisaManual;
+  bool get jazzcashAvailable => gatewayOn || jazzcashManual;
 
   factory PublicPaymentSettings.fromJson(Map<String, dynamic> j) {
     final pm = (j['payment_methods'] is Map)
@@ -49,6 +63,7 @@ class PublicPaymentSettings {
       payAtRestaurant: pm['pay_at_restaurant'] != false,
       bankTransfer: pm['bank_transfer'] == true,
       card: pm['card'] == true,
+      payfastEnabled: j['payfast_enabled'] == true,
       bankAccountTitle: s('bank_account_title'),
       bankAccountNumber: s('bank_account_number'),
       bankName: s('bank_name'),

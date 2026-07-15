@@ -100,6 +100,10 @@ export default function Footer() {
                         <Link to="/privacy" data-testid="footer-privacy-link" className="hover:text-white">Privacy</Link>
                         <span>·</span>
                         <Link to="/terms" data-testid="footer-terms-link" className="hover:text-white">Terms</Link>
+                        <span>·</span>
+                        <Link to="/refunds" data-testid="footer-refunds-link" className="hover:text-white">Refunds</Link>
+                        <span>·</span>
+                        <Link to="/delivery" data-testid="footer-shipping-link" className="hover:text-white">Delivery</Link>
                     </div>
                 </div>
             </div>

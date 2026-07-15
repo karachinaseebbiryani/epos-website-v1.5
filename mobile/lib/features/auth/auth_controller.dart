@@ -227,6 +227,39 @@ class AuthController extends StateNotifier<AuthState> {
     }
   }
 
+  Future<bool> signInWithApple(String identityToken, {String? name}) async {
+    state = state.copyWith(error: null);
+    try {
+      final res = await _repo.appleLogin(identityToken, name: name);
+      state = state.copyWith(
+          status: AuthStatus.authenticated, customer: res.customer);
+      _registerPush();
+      return true;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (e) {
+      state = state.copyWith(error: 'Apple sign-in failed. Please try again.');
+      return false;
+    }
+  }
+
+  /// Permanently delete the account. On success drops to signed-out state.
+  Future<bool> deleteAccount() async {
+    state = state.copyWith(error: null);
+    try {
+      await _repo.deleteAccount();
+      state = const AuthState(status: AuthStatus.unauthenticated);
+      return true;
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+      return false;
+    } catch (_) {
+      state = state.copyWith(error: 'Could not delete the account. Please try again.');
+      return false;
+    }
+  }
+
   Future<void> logout() async {
     await _repo.logout();
     state = const AuthState(status: AuthStatus.unauthenticated);

@@ -54,6 +54,53 @@ class PaymentRepository {
     throwIfError(res);
   }
 
+  /// Create a PayFast hosted-checkout session. Returns the form action URL +
+  /// hidden fields the webview auto-submits. 503 = gateway not configured.
+  Future<PayfastSession> createPayfastSession({
+    required String orderId,
+    required String originUrl,
+  }) async {
+    final res = await _api.dio.post(
+      '/payments/payfast/create-session',
+      data: {'order_id': orderId, 'origin_url': originUrl},
+      options: Options(extra: {'showLoading': true, 'silent': true}),
+    );
+    throwIfError(res);
+    final j = Map<String, dynamic>.from(res.data);
+    return PayfastSession(
+      actionUrl: (j['action_url'] ?? '').toString(),
+      basketId: (j['basket_id'] ?? '').toString(),
+      fields: Map<String, String>.from(
+          (j['fields'] as Map? ?? {}).map((k, v) => MapEntry('$k', '$v'))),
+    );
+  }
+
+  /// Report the PayFast redirect result so the backend records paid/failed.
+  /// The backend only trusts `validationHash` (verified against the merchant
+  /// key) to mark paid — without it the order goes to pending_verification.
+  Future<String> payfastReturn({
+    required String basketId,
+    String? errCode,
+    String? errMsg,
+    String? transactionId,
+    String? validationHash,
+  }) async {
+    final res = await _api.dio.post(
+      '/payments/payfast/return',
+      data: {
+        'basket_id': basketId,
+        if (errCode != null) 'err_code': errCode,
+        if (errMsg != null) 'err_msg': errMsg,
+        if (transactionId != null) 'transaction_id': transactionId,
+        if (validationHash != null) 'validation_hash': validationHash,
+      },
+      options: Options(extra: {'silent': true}),
+    );
+    throwIfError(res);
+    final j = Map<String, dynamic>.from(res.data);
+    return (j['payment_status'] ?? 'pending').toString();
+  }
+
   /// Create a SafePay hosted-checkout session for an order. Returns the checkout
   /// URL + tracker. Backend returns 503 when SafePay is not configured — callers
   /// should treat that as "gateway unavailable".
@@ -91,6 +138,19 @@ class SafepaySession {
   const SafepaySession({required this.url, required this.tracker});
   final String url;
   final String tracker;
+}
+
+/// PayFast checkout bootstrap: the webview builds a hidden form with [fields]
+/// and auto-submits it to [actionUrl]; PayFast's hosted page takes over.
+class PayfastSession {
+  const PayfastSession({
+    required this.actionUrl,
+    required this.basketId,
+    required this.fields,
+  });
+  final String actionUrl;
+  final String basketId;
+  final Map<String, String> fields;
 }
 
 final paymentRepositoryProvider = Provider<PaymentRepository>(

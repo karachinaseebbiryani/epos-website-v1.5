@@ -99,28 +99,39 @@ class Order {
   final String address;
   final String createdAt;
 
-  factory Order.fromJson(Map<String, dynamic> j) => Order(
-        id: (j['id'] ?? '').toString(),
-        receiptNo: (j['receipt_no'] ?? '').toString(),
-        status: (j['status'] ?? 'pending').toString(),
-        subtotal: _toDouble(j['subtotal']),
-        deliveryFee: _toDouble(j['delivery_fee']),
-        discountAmount: _toDouble(j['discount_amount']),
-        totalPrice: _toDouble(j['total_price']),
-        paymentMethod: (j['payment_method'] ?? 'cod').toString(),
-        paymentStatus: (j['payment_status'] ?? 'pending').toString(),
-        items: ((j['items'] as List?) ?? [])
-            .whereType<Map>()
-            .map((i) => OrderItem.fromJson(Map<String, dynamic>.from(i)))
-            .toList(),
-        orderType: (j['order_type'] ?? 'delivery').toString(),
-        trackToken: j['track_token']?.toString(),
-        diamondsEarned: _toInt(j['diamonds_earned']),
-        customerName: (j['customer_name'] ?? '').toString(),
-        phone: (j['phone'] ?? '').toString(),
-        address: (j['address'] ?? '').toString(),
-        createdAt: (j['created_at'] ?? '').toString(),
-      );
+  factory Order.fromJson(Map<String, dynamic> j) {
+    final items = ((j['items'] as List?) ?? [])
+        .whereType<Map>()
+        .map((i) => OrderItem.fromJson(Map<String, dynamic>.from(i)))
+        .toList();
+    // The public /track response historically omitted `subtotal` (only the
+    // full order serializer has it), which rendered as "Subtotal: Rs. 0" on
+    // the tracking screen. Fall back to the items sum — line prices are
+    // server-validated, so summing them reproduces the server's subtotal.
+    var subtotal = _toDouble(j['subtotal']);
+    if (subtotal <= 0 && items.isNotEmpty) {
+      subtotal = items.fold(0.0, (s, i) => s + i.price * i.quantity);
+    }
+    return Order(
+      id: (j['id'] ?? '').toString(),
+      receiptNo: (j['receipt_no'] ?? '').toString(),
+      status: (j['status'] ?? 'pending').toString(),
+      subtotal: subtotal,
+      deliveryFee: _toDouble(j['delivery_fee']),
+      discountAmount: _toDouble(j['discount_amount']),
+      totalPrice: _toDouble(j['total_price']),
+      paymentMethod: (j['payment_method'] ?? 'cod').toString(),
+      paymentStatus: (j['payment_status'] ?? 'pending').toString(),
+      items: items,
+      orderType: (j['order_type'] ?? 'delivery').toString(),
+      trackToken: j['track_token']?.toString(),
+      diamondsEarned: _toInt(j['diamonds_earned']),
+      customerName: (j['customer_name'] ?? '').toString(),
+      phone: (j['phone'] ?? '').toString(),
+      address: (j['address'] ?? '').toString(),
+      createdAt: (j['created_at'] ?? '').toString(),
+    );
+  }
 }
 
 /// Response of POST /api/delivery/quote.

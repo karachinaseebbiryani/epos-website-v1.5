@@ -12,6 +12,14 @@ class AppConfig {
   /// FastAPI mounts everything under the /api prefix.
   static String get apiRoot => '$apiBaseUrl/api';
 
+  /// Public customer website. Policy pages (privacy/terms/refunds/delivery)
+  /// are opened from the app in a WebView so app + site always show the same
+  /// text (PayFast + store-listing compliance requirement).
+  static const String siteBaseUrl = String.fromEnvironment(
+    'SITE_BASE_URL',
+    defaultValue: 'https://www.karachinaseebbiryani.com',
+  );
+
   /// Google OAuth *Web* client id, used as GoogleSignIn.serverClientId so the
   /// returned idToken's audience matches the backend's GOOGLE_CLIENT_ID.
   /// Default = the Karachi Naseeb web client (project 487494109113). Override at

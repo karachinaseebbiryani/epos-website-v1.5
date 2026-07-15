@@ -3258,6 +3258,34 @@ async def update_customer_allergens(req: AllergensUpdate, request: Request):
     await db.customers.update_one({"_id": cust["_id"]}, {"$set": {"allergens": cleaned}})
     return {"allergens": cleaned}
 
+@api_router.delete("/customer/me")
+async def delete_customer_account(request: Request):
+    """Permanent account deletion (required by both App Store and Play policy).
+    Removes the customer document and their personal data (coupons, loyalty
+    ledger, push tokens, saved allergens). Orders are BUSINESS records (receipts,
+    tax) so they are kept, but anonymised: customer_id is detached so they no
+    longer link to any account."""
+    cust = await get_current_customer(request)
+    cid_str = str(cust["_id"])
+    try:
+        cid_obj = ObjectId(cid_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid account")
+    # Detach (anonymise) orders — keep them as unlinked business records. Both
+    # id representations are matched because historical writes stored either.
+    await db.online_orders.update_many(
+        {"customer_id": {"$in": [cid_str, cid_obj]}},
+        {"$set": {"customer_id": None, "account_deleted": True}})
+    # Personal data: gone.
+    await db.personal_coupons.delete_many({"customer_id": {"$in": [cid_str, cid_obj]}})
+    await db.loyalty_transactions.delete_many({"customer_id": {"$in": [cid_str, cid_obj]}})
+    await db.reviews.update_many(
+        {"customer_id": {"$in": [cid_str, cid_obj]}},
+        {"$set": {"customer_id": None, "customer_name": "Deleted account"}})
+    await db.customers.delete_one({"_id": cid_obj})
+    logger.info(f"Customer account {cid_str} deleted at their request.")
+    return {"message": "Your account and personal data have been deleted."}
+
 @api_router.post("/customer/logout")
 async def customer_logout(response: Response):
     response.delete_cookie("customer_token", path="/")
@@ -3303,6 +3331,10 @@ class GoogleLoginRequest(BaseModel):
 class FacebookLoginRequest(BaseModel):
     access_token: str  # Short-lived access token from Facebook JS SDK FB.login()
     user_id: Optional[str] = None  # FB user id (optional; we re-verify via Graph API)
+
+class AppleLoginRequest(BaseModel):
+    identity_token: str  # Apple identity token (JWT) from Sign in with Apple
+    name: Optional[str] = ""  # Full name — Apple only provides it on FIRST sign-in
 
 
 async def _social_find_or_create_customer(email: str, name: str, provider: str, provider_user_id: str):
@@ -3373,6 +3405,55 @@ async def customer_google_login(req: GoogleLoginRequest, response: Response):
     sub = info.get("sub") or ""
     name = info.get("name") or ""
     cust = await _social_find_or_create_customer(email, name, "google", sub)
+    cid = str(cust["_id"])
+    token = create_customer_token(cid, email)
+    response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
+    return _serialize_customer_login_response(cust, token)
+
+
+@api_router.post("/customer/apple")
+async def customer_apple_login(req: AppleLoginRequest, response: Response):
+    """Sign in with Apple (required by App Store review for apps with social
+    login). Verifies the identity token's RS256 signature against Apple's
+    published JWKS, checks issuer + audience (our bundle id), then find-or-
+    creates the customer like Google/Facebook. Apple only sends the user's name
+    on the FIRST authorization, so the client passes it along when present."""
+    bundle_id = os.environ.get("APPLE_BUNDLE_ID")
+    if not bundle_id:
+        raise HTTPException(status_code=503, detail="Apple login is not configured")
+    try:
+        # Apple rotates its signing keys; fetch the JWKS and pick by `kid`.
+        async with httpx.AsyncClient(timeout=10) as client:
+            jwks = (await client.get("https://appleid.apple.com/auth/keys")).json()
+        header = jwt.get_unverified_header(req.identity_token)
+        key_data = next((k for k in jwks.get("keys", []) if k.get("kid") == header.get("kid")), None)
+        if not key_data:
+            raise ValueError("no matching Apple signing key")
+        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(key_data))
+        info = jwt.decode(
+            req.identity_token,
+            public_key,
+            algorithms=["RS256"],
+            audience=bundle_id,
+            issuer="https://appleid.apple.com",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Apple token verification failed: {e}")
+        raise HTTPException(status_code=401, detail="Invalid Apple login")
+    email = info.get("email")
+    sub = info.get("sub") or ""
+    if not sub:
+        raise HTTPException(status_code=401, detail="Invalid Apple login")
+    # Apple omits `email` after the first authorization — look the account up by
+    # the stable Apple user id instead.
+    if not email:
+        existing = await db.customers.find_one({"apple_id": sub})
+        if not existing:
+            raise HTTPException(status_code=400, detail="Apple did not share an email. Remove this app from your Apple ID's 'Sign in with Apple' list and try again.")
+        email = existing["email"]
+    cust = await _social_find_or_create_customer(email, _clip(req.name, 60), "apple", sub)
     cid = str(cust["_id"])
     token = create_customer_token(cid, email)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
@@ -5614,6 +5695,7 @@ async def sitemap_xml(request: Request):
         {"loc": f"{base}/rewards-program",   "changefreq": "monthly", "priority": "0.6", "lastmod": today},
         {"loc": f"{base}/privacy",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/terms",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/refunds",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/feedback",          "changefreq": "monthly", "priority": "0.4", "lastmod": today},
         {"loc": f"{base}/login",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/register",          "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
@@ -6110,6 +6192,10 @@ async def get_public_settings():
         "delivery_max_radius_km": s["delivery_max_radius_km"],
         "free_delivery_min_subtotal": float(s.get("free_delivery_min_subtotal", 0) or 0),
         "payment_methods": s["payment_methods"],
+        # PayFast (wallet gateway) readiness — lets clients route Easypaisa/
+        # JazzCash to the hosted checkout instead of the manual transfer flow.
+        # Purely additive: old clients ignore it.
+        "payfast_enabled": payfast_configured(),
         "bank_account_title": s["bank_account_title"],
         "bank_account_number": s["bank_account_number"],
         "bank_name": s["bank_name"],
@@ -6446,6 +6532,222 @@ async def safepay_status(tracker: str):
         "tracker": tracker,
         "payment_status": payment_status,
         "order_id": (txn or {}).get("order_id"),
+    }
+
+# --- PayFast Pakistan (gopayfast / APPS) hosted-checkout gateway -------------
+# Charges Easypaisa / JazzCash wallets (and cards) natively — SafePay does not
+# list those wallets, so wallet payments route here instead. Same shape as the
+# SafePay/Stripe integrations: inert until PAYFAST_MERCHANT_ID +
+# PAYFAST_SECURED_KEY are set (endpoints return 503 and the app falls back to
+# the manual transfer flow); server-side amounts; a payment_transactions record
+# keyed by basket_id; idempotent order->paid update on IPN / status check.
+# Flow (PayFast redirect model):
+#   1) POST /Ecommerce/api/Transaction/GetAccessToken (merchant_id+secured_key
+#      +basket_id+txnamt) -> one-time ACCESS TOKEN bound to this transaction.
+#   2) Client opens a WebView that form-POSTs to /Ecommerce/api/Transaction/
+#      PostTransaction with TOKEN + order fields; PayFast shows its hosted page
+#      (wallet MPIN / OTP) and redirects to SUCCESS_URL/FAILURE_URL. err_code=000
+#      on the redirect is treated as provisional-paid.
+#   3) GET /payments/payfast/status/{basket_id} confirms/refreshes from our DB
+#      (redirect params are recorded by POST /payments/payfast/return).
+#   Docs: https://gopayfast.com/docs/  (UAT host: ipguat.apps.net.pk)
+class PayfastSessionRequest(BaseModel):
+    order_id: str
+    origin_url: str
+
+def _payfast_base() -> str:
+    env = (os.environ.get("PAYFAST_ENV") or "sandbox").strip().lower()
+    if env in ("production", "prod", "live"):
+        return os.environ.get("PAYFAST_API_BASE", "https://ipg1.apps.net.pk")
+    return "https://ipguat.apps.net.pk"
+
+def payfast_configured() -> bool:
+    return bool(os.environ.get("PAYFAST_MERCHANT_ID") and os.environ.get("PAYFAST_SECURED_KEY"))
+
+@api_router.post("/payments/payfast/create-session")
+async def create_payfast_session(req: PayfastSessionRequest):
+    """Mint a PayFast transaction token for an existing order and return the
+    hosted-checkout form parameters. Amount comes from server-side order data."""
+    if not payfast_configured():
+        raise HTTPException(status_code=503, detail="PayFast not configured")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(req.order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("payment_status") == "paid":
+        raise HTTPException(status_code=400, detail="Order already paid")
+    amount = float(order.get("total_price", 0))
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+
+    base = _payfast_base()
+    # basket_id must be unique per attempt — retries after a failed/abandoned
+    # checkout need a fresh token, so suffix the order id with a nonce.
+    basket_id = f"{req.order_id}-{secrets.token_hex(4)}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            tok = await client.post(
+                f"{base}/Ecommerce/api/Transaction/GetAccessToken",
+                data={
+                    "MERCHANT_ID": os.environ["PAYFAST_MERCHANT_ID"],
+                    "SECURED_KEY": os.environ["PAYFAST_SECURED_KEY"],
+                    "BASKET_ID": basket_id,
+                    "TXNAMT": f"{amount:.2f}",
+                    "CURRENCY_CODE": "PKR",
+                },
+            )
+        if tok.status_code >= 400:
+            logger.warning(f"PayFast token failed {tok.status_code}: {tok.text[:300]}")
+            raise HTTPException(status_code=502, detail="Could not start PayFast checkout")
+        token = ((tok.json() or {}).get("ACCESS_TOKEN") or "").strip()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"PayFast token error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach PayFast")
+    if not token:
+        raise HTTPException(status_code=502, detail="PayFast did not return a token")
+
+    origin = req.origin_url.rstrip("/")
+    now = datetime.now(timezone.utc)
+    await db.payment_transactions.insert_one({
+        "gateway": "payfast",
+        "tracker": basket_id,          # same field name as safepay for admin queries
+        "basket_id": basket_id,
+        "order_id": req.order_id,
+        "amount_pkr": amount,
+        "currency": "PKR",
+        "environment": (os.environ.get("PAYFAST_ENV") or "sandbox").strip().lower(),
+        "payment_status": "initiated",
+        "created_at": now.isoformat(),
+    })
+    # The client renders an auto-submitting form with exactly these fields.
+    # PayFast's hosted page handles wallet number + MPIN/OTP itself.
+    return {
+        "action_url": f"{base}/Ecommerce/api/Transaction/PostTransaction",
+        "basket_id": basket_id,
+        "fields": {
+            "MERCHANT_ID": os.environ["PAYFAST_MERCHANT_ID"],
+            "MERCHANT_NAME": (await get_online_settings_doc()).get("restaurant_name", "Restaurant"),
+            "TOKEN": token,
+            "PROCCODE": "00",
+            "TXNAMT": f"{amount:.2f}",
+            "CURRENCY_CODE": "PKR",
+            "CUSTOMER_MOBILE_NO": str(order.get("phone", "") or ""),
+            "CUSTOMER_EMAIL_ADDRESS": "",
+            "SIGNATURE": secrets.token_hex(8),
+            "VERSION": "MERCHANT-CART-0.1",
+            "TXNDESC": f"Order {req.order_id[-6:].upper()}",
+            "SUCCESS_URL": f"{origin}/success?basket_id={basket_id}",
+            "FAILURE_URL": f"{origin}/cancel?basket_id={basket_id}",
+            "BASKET_ID": basket_id,
+            "ORDER_DATE": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "CHECKOUT_URL": os.environ.get("PUBLIC_SITE_URL", "https://www.karachinaseebbiryani.com").rstrip("/") + "/api/payments/payfast/return",
+        },
+    }
+
+def _payfast_validation_hash(basket_id: str, err_code: str) -> str:
+    """Response-validation hash per PayFast (APPS) docs:
+    sha256(basket_id|secured_key|merchant_id|err_code)."""
+    raw = f"{basket_id}|{os.environ.get('PAYFAST_SECURED_KEY','')}|" \
+          f"{os.environ.get('PAYFAST_MERCHANT_ID','')}|{err_code}"
+    return _hashlib.sha256(raw.encode()).hexdigest()
+
+@api_router.post("/payments/payfast/return")
+async def payfast_return(request: Request):
+    """Record the redirect/IPN result for a PayFast attempt. Accepts BOTH
+    JSON (our app forwarding the redirect params) and form-encoded bodies
+    (PayFast's own server-to-server CHECKOUT_URL callback).
+
+    SECURITY: this endpoint is unauthenticated (the webview calls it after the
+    gateway redirect), so the reported err_code alone MUST NOT be able to flip
+    an order to paid — otherwise anyone with their own basket_id could fake a
+    success. An order is marked *paid* only when the request carries PayFast's
+    validation_hash and it verifies against our SECURED_KEY. A success report
+    WITHOUT a valid hash lands in `pending_verification` — visible to the admin
+    exactly like a manual bank transfer, never silently trusted. Idempotent:
+    a paid order/txn is never downgraded."""
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "application/json" in ctype:
+            raw = await request.json()
+        else:
+            raw = dict(await request.form())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unreadable payload")
+    def _pick(*names):
+        for n in names:
+            v = raw.get(n)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return ""
+    basket_id = _pick("basket_id", "BASKET_ID")
+    if not basket_id:
+        raise HTTPException(status_code=400, detail="basket_id required")
+    err_code = _pick("err_code", "ERR_CODE")
+    err_msg = _pick("err_msg", "ERR_MSG")
+    transaction_id = _pick("transaction_id", "TRANSACTION_ID", "txn_id")
+    validation_hash = _pick("validation_hash", "VALIDATION_HASH", "Response_Key")
+
+    txn = await db.payment_transactions.find_one({"gateway": "payfast", "basket_id": basket_id})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Unknown transaction")
+    ok = err_code in ("000", "00", "0")
+    hash_ok = bool(
+        validation_hash
+        and secrets.compare_digest(
+            validation_hash.lower(),
+            _payfast_validation_hash(basket_id, err_code),
+        )
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    if ok and txn.get("payment_status") != "paid":
+        new_status = "paid" if hash_ok else "pending_verification"
+        set_fields = {
+            "payment_status": new_status,
+            "gateway_txn_id": transaction_id[:64],
+            "hash_verified": hash_ok,
+        }
+        if hash_ok:
+            set_fields["paid_at"] = now
+        await db.payment_transactions.update_one(
+            {"_id": txn["_id"], "payment_status": {"$nin": ["paid"]}},
+            {"$set": set_fields},
+        )
+        await db.online_orders.update_one(
+            {"_id": ObjectId(txn["order_id"]), "payment_status": {"$nin": ["paid"]}},
+            {"$set": {"payment_status": new_status,
+                      **({"paid_at": now} if hash_ok else
+                         {"payment_reference": f"PayFast {(transaction_id or basket_id)[:64]}",
+                          "payment_submitted_at": now})}},
+        )
+        return {"payment_status": new_status}
+    if not ok and txn.get("payment_status") == "initiated":
+        await db.payment_transactions.update_one(
+            {"_id": txn["_id"], "payment_status": "initiated"},
+            {"$set": {"payment_status": "failed",
+                      "gateway_err": f"{err_code[:8]}: {err_msg[:200]}"}},
+        )
+        return {"payment_status": "failed"}
+    return {"payment_status": txn.get("payment_status") or "pending"}
+
+@api_router.get("/payments/payfast/status/{basket_id}")
+async def payfast_status(basket_id: str):
+    """Authoritative payment status for a PayFast attempt (DB-backed — populated
+    by /payments/payfast/return). Same response shape as the SafePay/Stripe
+    status endpoints so clients can share polling code."""
+    if not payfast_configured():
+        raise HTTPException(status_code=503, detail="PayFast not configured")
+    txn = await db.payment_transactions.find_one(
+        {"gateway": "payfast", "basket_id": basket_id}, {"_id": 0})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Unknown transaction")
+    return {
+        "tracker": basket_id,
+        "payment_status": txn.get("payment_status") or "pending",
+        "order_id": txn.get("order_id"),
     }
 
 # --- Bank Transfer manual verification ---
@@ -7053,6 +7355,7 @@ async def public_track_order(order_id: str, request: Request, t: Optional[str] =
         "payment_status": o.get("payment_status", "pending"),
         "payment_method": o.get("payment_method", "cod"),
         "items": o.get("items", []),
+        "subtotal": o.get("subtotal", 0),
         "total_price": o.get("total_price", 0),
         "delivery_fee": o.get("delivery_fee", 0),
         "delivery_fee_overridden": bool(o.get("delivery_fee_overridden", False)),

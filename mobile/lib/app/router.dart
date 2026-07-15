@@ -14,6 +14,7 @@ import '../features/loyalty/diamonds_screen.dart';
 import '../features/menu/menu_screen.dart';
 import '../features/offers/offers_screen.dart';
 import '../features/payment/payment_screen.dart';
+import '../features/payment/payfast_webview.dart';
 import '../features/payment/safepay_webview.dart';
 import '../features/profile/profile_screen.dart';
 import '../features/orders/order_tracking_screen.dart';
@@ -86,6 +87,15 @@ final routerProvider = Provider<GoRouter>((ref) {
                 path: 'safepay',
                 builder: (context, state) => SafepayWebView(
                   orderId: state.pathParameters['id']!,
+                  via: state.uri.queryParameters['via'] ?? 'card',
+                  trackToken: state.uri.queryParameters['t'] ?? '',
+                ),
+              ),
+              GoRoute(
+                path: 'payfast',
+                builder: (context, state) => PayfastWebView(
+                  orderId: state.pathParameters['id']!,
+                  via: state.uri.queryParameters['via'] ?? 'easypaisa',
                   trackToken: state.uri.queryParameters['t'] ?? '',
                 ),
               ),

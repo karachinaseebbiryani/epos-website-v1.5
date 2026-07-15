@@ -162,14 +162,21 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       ref.invalidate(loyaltyBalanceProvider);
       if (!mounted) return;
       final tok = order.trackToken ?? '';
-      // Route by payment method: manual transfers need a reference/proof step,
-      // SafePay opens the hosted checkout; COD / pay-at-restaurant go straight
-      // to tracking.
-      const manual = {'easypaisa', 'jazzcash', 'bank'};
-      if (manual.contains(_paymentMethod)) {
+      // Route by payment method. Wallets (Easypaisa/JazzCash) go through the
+      // PayFast hosted checkout when that gateway is configured — a real
+      // in-app charge — and fall back to the manual transfer+reference screen
+      // when it isn't. Bank transfer is always manual; card uses SafePay;
+      // COD / pay-at-restaurant go straight to tracking.
+      final gatewayOn =
+          ref.read(paymentSettingsProvider).asData?.value.gatewayOn ?? false;
+      const wallets = {'easypaisa', 'jazzcash'};
+      if (wallets.contains(_paymentMethod) && gatewayOn) {
+        context.go(
+            '/order/${order.id}/payfast?via=$_paymentMethod&t=$tok');
+      } else if (wallets.contains(_paymentMethod) || _paymentMethod == 'bank') {
         context.go('/order/${order.id}/pay?via=$_paymentMethod&t=$tok');
       } else if (_paymentMethod == 'safepay') {
-        context.go('/order/${order.id}/safepay?t=$tok');
+        context.go('/order/${order.id}/safepay?via=card&t=$tok');
       } else {
         context.go('/order/${order.id}?t=$tok');
       }
@@ -491,18 +498,22 @@ class _PaymentMethodPicker extends ConsumerWidget {
       if (s == null || s.payAtRestaurant)
         const PaymentOption(
             method: 'pay_at_restaurant', title: 'Pay at restaurant'),
-      if (s != null && s.hasEasypaisa)
-        const PaymentOption(
+      if (s != null && s.easypaisaAvailable)
+        PaymentOption(
             method: 'easypaisa',
             title: 'Easypaisa',
-            subtitle: 'Transfer then submit reference',
-            needsTransfer: true),
-      if (s != null && s.hasJazzcash)
-        const PaymentOption(
+            subtitle: s.gatewayOn
+                ? 'Pay in app via secure checkout'
+                : 'Transfer then submit reference',
+            needsTransfer: !s.gatewayOn),
+      if (s != null && s.jazzcashAvailable)
+        PaymentOption(
             method: 'jazzcash',
             title: 'JazzCash',
-            subtitle: 'Transfer then submit reference',
-            needsTransfer: true),
+            subtitle: s.gatewayOn
+                ? 'Pay in app via secure checkout'
+                : 'Transfer then submit reference',
+            needsTransfer: !s.gatewayOn),
       if (s != null && s.hasBank)
         const PaymentOption(
             method: 'bank',
