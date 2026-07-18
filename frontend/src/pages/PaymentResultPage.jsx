@@ -47,6 +47,16 @@ export default function PaymentResultPage({ outcome }) {
         poll();
     }, [pollUrl, outcome]);
 
+    // Once payment is confirmed (or submitted for verification), take the
+    // customer straight to order tracking after a short beat — no tap needed.
+    useEffect(() => {
+        if (status.payment_status !== "paid" && status.payment_status !== "pending_verification") return;
+        const dest = status.order_id || orderId;
+        if (!dest) return;
+        const t = setTimeout(() => navigate(`/order/${dest}/success`), 2500);
+        return () => clearTimeout(t);
+    }, [status, orderId, navigate]);
+
     if (outcome === "cancel") {
         return (
             <div className="max-w-md mx-auto px-4 py-24 text-center" data-testid="payment-cancel-page">
@@ -81,7 +91,7 @@ export default function PaymentResultPage({ outcome }) {
                         <CheckCircle className="w-12 h-12 text-green-600" />
                     </div>
                     <h1 className="font-display font-black text-3xl text-brand-ink mb-3">Payment Successful!</h1>
-                    <p className="text-neutral-500 mb-8">Your payment went through. Order is confirmed.</p>
+                    <p className="text-neutral-500 mb-8">Your payment went through. Taking you to order tracking&hellip;</p>
                     <button onClick={() => navigate(`/order/${status.order_id || orderId}/success`)}
                         className="bg-brand-red text-white rounded-full px-7 py-3.5 font-bold" data-testid="paid-continue-button">
                         Track My Order

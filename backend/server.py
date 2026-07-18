@@ -2785,6 +2785,11 @@ async def _do_startup():
         # page). Runs every 10 min; window = PAYMENT_ABANDON_MINUTES (def 30).
         scheduler.add_job(_expire_abandoned_gateway_orders, "interval", minutes=10,
                           id="expire_awaiting_payment", replace_existing=True)
+        # SafePay safety net: confirm paid transactions server-side even when
+        # the customer never returns from the hosted checkout (see the job's
+        # docstring). Every 2 min, only recent initiated SafePay txns.
+        scheduler.add_job(_reconcile_safepay_payments, "interval", minutes=2,
+                          id="reconcile_safepay", replace_existing=True)
     except Exception as e:
         logger.error(f"Scheduler start failed: {e}")
     # Start tunnel watcher in background
@@ -6295,6 +6300,57 @@ async def _expire_abandoned_gateway_orders() -> None:
     except Exception as e:
         logger.error(f"Abandoned-order expiry failed: {e}")
 
+async def _reconcile_safepay_payments() -> None:
+    """Server-side confirmation safety net for SafePay. The hosted checkout
+    confirms via the browser redirect -> result-page polling, but if the
+    customer closes the browser before redirecting (SafePay's mobile-mode
+    interstitial even tells them to), nothing would ever flip the order to
+    paid. This job polls SafePay for recent initiated transactions so paid
+    orders reach the restaurant within a couple of minutes regardless."""
+    cfg = await _safepay_cfg()
+    api_key = (cfg.get("api_key") or "").strip()
+    if not api_key:
+        return
+    api_base, _ = _safepay_bases_for(cfg.get("mode", "sandbox"))
+    lookback = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    try:
+        txns = await db.payment_transactions.find({
+            "gateway": "safepay", "payment_status": "initiated",
+            "created_at": {"$gt": lookback},
+        }).to_list(50)
+    except Exception as e:
+        logger.error(f"SafePay reconcile query failed: {e}")
+        return
+    for txn in txns:
+        tracker = txn.get("tracker")
+        if not tracker:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(f"{api_base}/order/v1/{tracker}")
+            if r.status_code >= 400:
+                continue
+            data = (r.json() or {}).get("data") or {}
+            state = str(data.get("state") or data.get("status") or "").lower()
+            if state not in ("paid", "tracker_ended", "completed", "succeeded"):
+                continue
+            now = datetime.now(timezone.utc).isoformat()
+            await db.payment_transactions.update_one(
+                {"_id": txn["_id"], "payment_status": {"$ne": "paid"}},
+                {"$set": {"payment_status": "paid", "paid_at": now,
+                          "confirmed_by": "reconcile_job"}},
+            )
+            order_id = txn.get("order_id")
+            if order_id:
+                await db.online_orders.update_one(
+                    {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
+                    {"$set": {"payment_status": "paid", "paid_at": now}},
+                )
+                await _release_online_order(order_id)
+                logger.info(f"SafePay reconcile: order {order_id} confirmed paid ({tracker})")
+        except Exception as e:
+            logger.warning(f"SafePay reconcile error for {tracker}: {e}")
+
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _parse_hhmm(value: str, default_minutes: int) -> int:
@@ -6777,11 +6833,16 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
     #    redirect_url — the app watches for our origin; the website result
     #    page polls /payments/safepay/status/{tracker} via gateway+ref params.
     origin = req.origin_url.rstrip("/")
+    # source=mobile makes SafePay show "return to your mobile application"
+    # instead of redirecting the browser — correct ONLY for the app's webview
+    # (sentinel origin). Website checkouts must use source=web or the customer
+    # is stranded on SafePay's interstitial and the order never confirms.
+    source = "mobile" if origin.startswith("https://knb.payment.return") else "web"
     from urllib.parse import urlencode
     qs = urlencode({
         "beacon": tracker,
         "env": env,
-        "source": "mobile",
+        "source": source,
         "order_id": req.order_id,
         "redirect_url": f"{origin}/payment/success?gateway=safepay&ref={tracker}&order_id={req.order_id}",
         "cancel_url": f"{origin}/payment/cancel?gateway=safepay&ref={tracker}&order_id={req.order_id}",
