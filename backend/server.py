@@ -2780,6 +2780,11 @@ async def _do_startup():
         scheduler = AsyncIOScheduler()
         scheduler.start()
         await _reschedule_daily_job()
+        # Expire gateway orders whose payment never completed so they don't
+        # linger in awaiting_payment forever (customer closed the gateway
+        # page). Runs every 10 min; window = PAYMENT_ABANDON_MINUTES (def 30).
+        scheduler.add_job(_expire_abandoned_gateway_orders, "interval", minutes=10,
+                          id="expire_awaiting_payment", replace_existing=True)
     except Exception as e:
         logger.error(f"Scheduler start failed: {e}")
     # Start tunnel watcher in background
@@ -4061,6 +4066,12 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         payment_status = "pending"  # collected later
     else:
         payment_status = "pending"  # awaiting card/bank flow
+    # Online-gateway orders must be PAID before the restaurant sees them:
+    # they start as "awaiting_payment" (excluded from the staff pending
+    # queue/alert/printer) and are flipped to "pending" by the payment
+    # confirmation path (_release_online_order). COD / pay-at-restaurant /
+    # manual bank transfer keep the existing immediate flow.
+    initial_status = "awaiting_payment" if pmethod in GATEWAY_PAYMENT_METHODS else "pending"
     now = datetime.now(timezone.utc)
     # Per-order unguessable share token. The /api/track endpoint requires this on
     # every unauthenticated request to close the IDOR — without it, anyone who
@@ -4092,7 +4103,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "coupon_code": coupon_used,
         "reward_applied": reward_applied,  # NEW: Loyalty reward info
         "diamonds_earned": diamonds_earned,  # NEW: Diamonds earned from this order
-        "status": "pending",
+        "status": initial_status,
         "printed": False,
         "track_token": track_token,
         "created_at": now.isoformat(),
@@ -4172,6 +4183,10 @@ async def list_online_orders(request: Request, status: Optional[str] = None):
     query = {}
     if status and status != "all":
         query["status"] = status
+    else:
+        # Held gateway orders (payment not completed yet) stay out of the
+        # restaurant's queue — they appear only once payment releases them.
+        query["status"] = {"$ne": "awaiting_payment"}
     orders = await db.online_orders.find(query).sort("created_at", -1).to_list(1000)
     return [_serialize_online_order(o) for o in orders]
 
@@ -4181,7 +4196,7 @@ async def list_pending_print_orders(request: Request):
     user = await get_current_user(request)
     if not _has_perm(user, "online_orders"):
         raise HTTPException(status_code=403, detail="You don't have permission to view online orders.")
-    orders = await db.online_orders.find({"printed": False, "status": {"$ne": "cancelled"}}).sort("created_at", 1).to_list(100)
+    orders = await db.online_orders.find({"printed": False, "status": {"$nin": ["cancelled", "awaiting_payment"]}}).sort("created_at", 1).to_list(100)
     return [_serialize_online_order(o) for o in orders]
 
 @api_router.put("/online-orders/{order_id}/printed")
@@ -6236,6 +6251,50 @@ async def admin_update_payment_gateways(req: PaymentGatewaysUpdate, request: Req
 
 # ===== END PAYMENT GATEWAY SETTINGS ==========================================
 
+# Payment methods where the customer pays ONLINE through a gateway before the
+# restaurant should see the order. Orders placed with these start with status
+# "awaiting_payment" (kept out of the staff pending queue, alert sound and
+# printer feed) and are released to "pending" only when the payment confirms
+# (paid or pending_verification). COD / pay-at-restaurant / manual bank
+# transfer are unaffected. "card" = Stripe.
+GATEWAY_PAYMENT_METHODS = {"easypaisa", "jazzcash", "safepay", "card"}
+
+async def _release_online_order(order_id) -> None:
+    """Flip an awaiting_payment order to pending so it enters the staff queue
+    (alert + printer). Idempotent — a released/accepted order is untouched."""
+    try:
+        oid = ObjectId(order_id) if not isinstance(order_id, ObjectId) else order_id
+        res = await db.online_orders.update_one(
+            {"_id": oid, "status": "awaiting_payment"},
+            {"$set": {"status": "pending",
+                      "released_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        if res.modified_count:
+            logger.info(f"Order {order_id} released to restaurant queue after payment")
+    except Exception as e:
+        logger.error(f"Failed to release order {order_id}: {e}")
+
+async def _expire_abandoned_gateway_orders() -> None:
+    """Cancel awaiting_payment orders whose gateway checkout was abandoned
+    (no payment confirmation within PAYMENT_ABANDON_MINUTES, default 30).
+    Keeps the DB clean and frees any redeemed coupon/reward pressure; the
+    customer was never charged (a late confirmation would find the order
+    cancelled and land in pending_verification for the admin to restore)."""
+    minutes = int(os.environ.get("PAYMENT_ABANDON_MINUTES", "30"))
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    try:
+        res = await db.online_orders.update_many(
+            {"status": "awaiting_payment", "created_at": {"$lt": cutoff},
+             "payment_status": {"$nin": ["paid", "pending_verification"]}},
+            {"$set": {"status": "cancelled",
+                      "cancel_reason": "payment_not_completed",
+                      "cancelled_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        if res.modified_count:
+            logger.info(f"Expired {res.modified_count} abandoned gateway order(s)")
+    except Exception as e:
+        logger.error(f"Abandoned-order expiry failed: {e}")
+
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _parse_hhmm(value: str, default_minutes: int) -> int:
@@ -6598,6 +6657,7 @@ async def stripe_status(session_id: str, http_request: Request):
                 {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
             )
+            await _release_online_order(order_id)
     return {
         "session_id": session_id,
         "status": status.status,
@@ -6633,6 +6693,7 @@ async def stripe_webhook(request: Request):
                 {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "paid_at": datetime.now(timezone.utc).isoformat()}}
             )
+            await _release_online_order(order_id)
     return {"received": True}
 
 # --- SafePay (Pakistan) hosted-checkout gateway ----------------------------
@@ -6771,6 +6832,7 @@ async def safepay_status(tracker: str):
                 {"_id": ObjectId(order_id), "payment_status": {"$ne": "paid"}},
                 {"$set": {"payment_status": "paid", "paid_at": now}},
             )
+            await _release_online_order(order_id)
     payment_status = "paid" if verified_paid else ((txn or {}).get("payment_status") or "pending")
     return {
         "tracker": tracker,
@@ -6967,6 +7029,9 @@ async def payfast_return(request: Request):
                          {"payment_reference": f"PayFast {(transaction_id or basket_id)[:64]}",
                           "payment_submitted_at": now})}},
         )
+        # Release held (awaiting_payment) orders into the staff queue now that
+        # the gateway flow completed — app wallet payments route through here.
+        await _release_online_order(txn["order_id"])
         return {"payment_status": new_status}
     if not ok and txn.get("payment_status") == "initiated":
         await db.payment_transactions.update_one(
@@ -7034,6 +7099,9 @@ async def submit_bank_payment(order_id: str, req: BankPaymentReference):
             "payment_submitted_at": datetime.now(timezone.utc).isoformat(),
         }},
     )
+    # A gateway order that fell back to manual transfer is still held in
+    # awaiting_payment — the submitted reference releases it for verification.
+    await _release_online_order(order_id)
     return {"message": "Payment reference submitted. Awaiting verification.", "payment_status": "pending_verification"}
 
 @api_router.put("/online-orders/{order_id}/payment-status")
@@ -7048,6 +7116,9 @@ async def admin_update_payment_status(order_id: str, body: dict, request: Reques
         {"_id": ObjectId(order_id)},
         {"$set": {"payment_status": new_status, "payment_updated_at": datetime.now(timezone.utc).isoformat()}},
     )
+    if new_status in ("paid", "pending_verification"):
+        # Admin confirming a payment also releases a held gateway order.
+        await _release_online_order(order_id)
     return {"message": "Updated", "payment_status": new_status}
 
 # =============================================================================
@@ -7115,6 +7186,7 @@ async def _mark_gateway_paid(txn: dict, now: str, gateway_txn_id: str = ""):
         {"_id": ObjectId(txn["order_id"]), "payment_status": {"$nin": ["paid"]}},
         {"$set": {"payment_status": "paid", "paid_at": now}},
     )
+    await _release_online_order(txn["order_id"])
 
 async def _mark_gateway_pending_verification(txn: dict, now: str, reference: str):
     """Success reported but not provider-verified: surface to the admin
@@ -7129,6 +7201,9 @@ async def _mark_gateway_pending_verification(txn: dict, now: str, reference: str
                   "payment_reference": reference[:64],
                   "payment_submitted_at": now}},
     )
+    # The customer DID complete the gateway flow — release to the restaurant
+    # while the admin verifies (same trust level as a manual transfer receipt).
+    await _release_online_order(txn["order_id"])
 
 async def _mark_gateway_failed(txn: dict, err: str):
     """Mark a still-open attempt failed (paid/pending are never downgraded)."""

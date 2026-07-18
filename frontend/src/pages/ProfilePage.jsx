@@ -9,6 +9,7 @@ import EnableNotificationsCard from "../components/EnableNotificationsCard";
 import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
 const STATUS_COLORS = {
+    awaiting_payment: "bg-amber-50 text-amber-700 border-amber-200",
     pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
     preparing: "bg-blue-50 text-blue-700 border-blue-200",
     ready: "bg-purple-50 text-purple-700 border-purple-200",
@@ -18,6 +19,7 @@ const STATUS_COLORS = {
 };
 
 const STATUS_LABELS = {
+    awaiting_payment: "Awaiting Payment",
     pending: "Pending", preparing: "Preparing", ready: "Ready",
     out_for_delivery: "On the way", delivered: "Delivered", cancelled: "Cancelled",
 };
