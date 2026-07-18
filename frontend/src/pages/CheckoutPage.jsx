@@ -17,6 +17,7 @@ const PAYMENT_LABELS = {
     card: { label: "Pay by Card", icon: CreditCard, desc: "Visa / Mastercard via Stripe" },
     easypaisa: { label: "EasyPaisa", icon: Smartphone, desc: "Pay online with your EasyPaisa account" },
     jazzcash: { label: "JazzCash", icon: Smartphone, desc: "Pay online with your JazzCash wallet" },
+    safepay: { label: "Pay Online (SafePay)", icon: CreditCard, desc: "Card / wallet via SafePay secure checkout" },
 };
 
 const GUEST_KEY = "knb_guest_v1";
@@ -282,6 +283,7 @@ export default function CheckoutPage() {
         ...(settings?.payment_methods || { cod: true }),
         easypaisa: !!settings?.easypaisa_gateway_enabled,
         jazzcash: !!settings?.jazzcash_gateway_enabled,
+        safepay: !!settings?.safepay_gateway_enabled,
     };
 
     const submitOrder = async (e) => {
@@ -346,6 +348,22 @@ export default function CheckoutPage() {
                 } catch (err) {
                     toast.error("Could not initiate card payment");
                     navigate(`/order/${order.id}/success`, { state: { order } });
+                    return;
+                }
+            }
+            if (form.payment_method === "safepay") {
+                try {
+                    // SafePay returns a hosted-checkout URL (like Stripe) —
+                    // full-page redirect; the result page polls status by tracker.
+                    const { data: sess } = await api.post("/payments/safepay/create-session", {
+                        order_id: order.id,
+                        origin_url: window.location.origin,
+                    });
+                    window.location.href = sess.url;
+                    return;
+                } catch (err) {
+                    toast.error("Could not start the payment. You can pay via manual transfer instead.");
+                    navigate(`/order/${order.id}/bank-payment`, { state: { order, settings } });
                     return;
                 }
             }

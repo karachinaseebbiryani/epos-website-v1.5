@@ -6058,6 +6058,15 @@ DEFAULT_GATEWAY_SETTINGS = {
         "merchant_id": "",
         "secured_key": "",
     },
+    # SafePay is redirect-based (no signed callback to pre-register). The
+    # existing /payments/safepay/* endpoints read this config (env fallback
+    # preserved); "enabled" additionally gates the WEBSITE checkout option.
+    "safepay": {
+        "enabled": False,
+        "mode": "sandbox",
+        "api_key": "",
+        "secret": "",
+    },
 }
 
 # DB field -> env var fallback (DB non-empty wins).
@@ -6077,6 +6086,10 @@ _GATEWAY_ENV_FALLBACK = {
         "merchant_id": "PAYFAST_MERCHANT_ID",
         "secured_key": "PAYFAST_SECURED_KEY",
     },
+    "safepay": {
+        "api_key": "SAFEPAY_API_KEY",
+        "secret": "SAFEPAY_SECRET",
+    },
 }
 
 # Credentials without which a gateway cannot take payments.
@@ -6084,9 +6097,10 @@ _GATEWAY_REQUIRED = {
     "easypaisa": ("store_id", "hash_key"),
     "jazzcash": ("merchant_id", "password", "integrity_salt"),
     "payfast": ("merchant_id", "secured_key"),
+    "safepay": ("api_key",),
 }
 
-_GATEWAY_SECRET_FIELDS = {"hash_key", "inquiry_password", "password", "integrity_salt", "secured_key"}
+_GATEWAY_SECRET_FIELDS = {"hash_key", "inquiry_password", "password", "integrity_salt", "secured_key", "api_key", "secret"}
 
 async def get_gateway_settings_doc() -> dict:
     stored = await db.payment_gateway_settings.find_one({"key": "gateways"}, {"_id": 0}) or {}
@@ -6136,11 +6150,14 @@ class GatewayConfigUpdate(BaseModel):
     password: Optional[str] = None        # jazzcash secret
     integrity_salt: Optional[str] = None  # jazzcash secret
     secured_key: Optional[str] = None     # payfast secret
+    api_key: Optional[str] = None         # safepay secret
+    secret: Optional[str] = None          # safepay optional secret
 
 class PaymentGatewaysUpdate(BaseModel):
     easypaisa: Optional[GatewayConfigUpdate] = None
     jazzcash: Optional[GatewayConfigUpdate] = None
     payfast: Optional[GatewayConfigUpdate] = None
+    safepay: Optional[GatewayConfigUpdate] = None
 
 def _masked_gateway_view(settings: dict, request: Request) -> dict:
     """Admin-facing view: secrets are reduced to <field>_set + <field>_last4."""
@@ -6178,7 +6195,7 @@ async def admin_update_payment_gateways(req: PaymentGatewaysUpdate, request: Req
         raise HTTPException(status_code=403, detail="Admin only")
     current = await get_gateway_settings_doc()
     updates = {}
-    for gw in ("easypaisa", "jazzcash", "payfast"):
+    for gw in ("easypaisa", "jazzcash", "payfast", "safepay"):
         upd = getattr(req, gw)
         if upd is None:
             continue
@@ -6408,6 +6425,7 @@ async def get_public_settings():
         # option only then. Additive: old clients ignore these.
         "easypaisa_gateway_enabled": await gateway_ready("easypaisa"),
         "jazzcash_gateway_enabled": await gateway_ready("jazzcash"),
+        "safepay_gateway_enabled": await gateway_ready("safepay"),
         "bank_account_title": s["bank_account_title"],
         "bank_account_number": s["bank_account_number"],
         "bank_name": s["bank_name"],
@@ -6618,9 +6636,11 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 # --- SafePay (Pakistan) hosted-checkout gateway ----------------------------
-# Inert until configured: set SAFEPAY_API_KEY (+ optional SAFEPAY_SECRET,
-# SAFEPAY_ENV=sandbox|production). Without the key both endpoints return 503 and
-# the app hides the "card" option. Mirrors the Stripe flow: server-side amount,
+# Config comes from the admin Payment Gateways page (db-backed) with env-var
+# fallback (SAFEPAY_API_KEY, optional SAFEPAY_SECRET) via get_gateway_config
+# ("safepay"). Mode: sandbox|live (legacy SAFEPAY_ENV values still accepted
+# through the fallback). Without an api key both endpoints return 503 and
+# clients hide the option. Mirrors the Stripe flow: server-side amount,
 # a payment_transactions record keyed by tracker, and an idempotent order->paid
 # update once SafePay confirms the charge.
 #   Docs / dashboard: https://sandbox.api.getsafepay.com  (sandbox)
@@ -6628,18 +6648,30 @@ class SafepaySessionRequest(BaseModel):
     order_id: str
     origin_url: str
 
-def _safepay_bases() -> tuple[str, str]:
+def _safepay_bases_for(mode: str) -> tuple[str, str]:
     """Return (api_base, checkout_base) for the configured environment."""
-    env = (os.environ.get("SAFEPAY_ENV") or "sandbox").strip().lower()
-    if env in ("production", "prod", "live"):
+    if (mode or "").strip().lower() in ("production", "prod", "live"):
         return "https://api.getsafepay.com", "https://getsafepay.com"
     return "https://sandbox.api.getsafepay.com", "https://sandbox.api.getsafepay.com"
+
+async def _safepay_cfg() -> dict:
+    """Effective SafePay config (DB wins, env fallback). Legacy SAFEPAY_ENV
+    overrides mode only when the DB doc has never been saved."""
+    cfg = await get_gateway_config("safepay")
+    stored = await db.payment_gateway_settings.find_one(
+        {"key": "gateways"}, {"safepay": 1})
+    if not (stored or {}).get("safepay"):
+        env = (os.environ.get("SAFEPAY_ENV") or "").strip().lower()
+        if env:
+            cfg["mode"] = "live" if env in ("production", "prod", "live") else "sandbox"
+    return cfg
 
 @api_router.post("/payments/safepay/create-session")
 async def create_safepay_session(req: SafepaySessionRequest, http_request: Request):
     """Create a SafePay tracker for an existing order and return the hosted
     checkout URL. Amount is taken from server-side order data (never the client)."""
-    api_key = os.environ.get("SAFEPAY_API_KEY")
+    cfg = await _safepay_cfg()
+    api_key = (cfg.get("api_key") or "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="SafePay not configured")
     try:
@@ -6654,9 +6686,8 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid order amount")
 
-    api_base, checkout_base = _safepay_bases()
-    env = (os.environ.get("SAFEPAY_ENV") or "sandbox").strip().lower()
-    env = "production" if env in ("production", "prod", "live") else "sandbox"
+    api_base, checkout_base = _safepay_bases_for(cfg.get("mode", "sandbox"))
+    env = "production" if cfg.get("mode") == "live" else "sandbox"
     # 1) Create a payment tracker (SafePay v1 init). PKR amount is in rupees.
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -6681,8 +6712,9 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
     if not tracker:
         raise HTTPException(status_code=502, detail="SafePay did not return a tracker")
 
-    # 2) Build the hosted-checkout URL the app opens in a WebView. On completion
-    #    SafePay redirects to redirect_url — the app watches for our origin.
+    # 2) Build the hosted-checkout URL. On completion SafePay redirects to
+    #    redirect_url — the app watches for our origin; the website result
+    #    page polls /payments/safepay/status/{tracker} via gateway+ref params.
     origin = req.origin_url.rstrip("/")
     from urllib.parse import urlencode
     qs = urlencode({
@@ -6690,8 +6722,8 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
         "env": env,
         "source": "mobile",
         "order_id": req.order_id,
-        "redirect_url": f"{origin}/success",
-        "cancel_url": f"{origin}/cancel",
+        "redirect_url": f"{origin}/payment/success?gateway=safepay&ref={tracker}&order_id={req.order_id}",
+        "cancel_url": f"{origin}/payment/cancel?gateway=safepay&ref={tracker}&order_id={req.order_id}",
     })
     checkout_url = f"{checkout_base}/checkout/pay?{qs}"
 

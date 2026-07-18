@@ -8,7 +8,7 @@ import { Save, CreditCard, Smartphone, Wallet, Copy, Info } from "lucide-react";
 // only <field>_set / <field>_last4, and a blank input means "keep the saved
 // value". Saved to GET/PUT /admin/payment-gateways.
 
-const SECRET_FIELDS = ["hash_key", "inquiry_password", "password", "integrity_salt", "secured_key"];
+const SECRET_FIELDS = ["hash_key", "inquiry_password", "password", "integrity_salt", "secured_key", "api_key", "secret"];
 
 export default function PaymentGateways() {
     const [s, setS] = useState(null);
@@ -33,7 +33,7 @@ export default function PaymentGateways() {
         try {
             // Strip blank secrets so the backend keeps the stored values.
             const payload = {};
-            for (const gw of ["easypaisa", "jazzcash", "payfast"]) {
+            for (const gw of ["easypaisa", "jazzcash", "payfast", "safepay"]) {
                 const cfg = { ...s[gw] };
                 delete cfg.callback_url;
                 delete cfg.note;
@@ -63,6 +63,27 @@ export default function PaymentGateways() {
             </p>
 
             <form onSubmit={save} className="space-y-6 max-w-3xl">
+                {/* SafePay — live integration, DB-configured */}
+                <GatewayCard
+                    gw="safepay" title="SafePay" icon={<CreditCard className="w-5 h-5" />}
+                    cfg={s.safepay} update={(patch) => update("safepay", patch)}
+                >
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <SecretInput label="API Key" field="api_key" cfg={s.safepay}
+                            onChange={(v) => update("safepay", { api_key: v })}
+                            testid="pg-safepay-api-key" />
+                        <SecretInput label="Secret (optional)" field="secret" cfg={s.safepay}
+                            onChange={(v) => update("safepay", { secret: v })}
+                            testid="pg-safepay-secret" />
+                    </div>
+                    <p className="text-xs text-neutral-500 mt-3">
+                        From your SafePay dashboard (getsafepay.com). Customers are redirected to
+                        SafePay's secure checkout page for card and wallet payments — no return-URL
+                        registration needed. Payment is confirmed server-to-server before the order
+                        is marked paid.
+                    </p>
+                </GatewayCard>
+
                 {/* EasyPaisa */}
                 <GatewayCard
                     gw="easypaisa" title="EasyPaisa" icon={<Smartphone className="w-5 h-5" />}
