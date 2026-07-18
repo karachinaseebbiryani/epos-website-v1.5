@@ -5,11 +5,12 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File, Form
+from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os, logging, bcrypt, jwt, secrets, json
+import os, logging, bcrypt, jwt, secrets, json, hmac
 from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -6012,6 +6013,212 @@ async def get_online_settings_doc():
             merged[k] = v
     return merged
 
+# =============================================================================
+# PAYMENT GATEWAY SETTINGS (DB-configured, admin-managed)
+# =============================================================================
+# Configuration for the hosted wallet gateways (EasyPaisa, JazzCash) lives in
+# the db.payment_gateway_settings singleton doc {"key": "gateways"} and is
+# managed from the admin "Payment Gateways" page. The DB value wins; env vars
+# are a per-field fallback so existing env-driven deploys keep working.
+#
+# PAYFAST: the live PayFast integration (further down this file) still reads
+# ONLY its env vars (PAYFAST_MERCHANT_ID / PAYFAST_SECURED_KEY / PAYFAST_ENV).
+# The "payfast" subdoc here is saved by the admin page but is INERT — it
+# pre-stages the switch to DB config. To migrate PayFast onto this framework
+# later: (1) add a PayfastGateway driver reading get_gateway_config("payfast")
+# (env fallback below already maps its fields), (2) register it in
+# GATEWAY_REGISTRY, (3) change "payfast_enabled" in /public/settings to
+# `await gateway_ready("payfast")`, (4) retire the literal /payments/payfast/*
+# routes only after all clients use the generic /payments/{gateway}/* paths.
+
+DEFAULT_GATEWAY_SETTINGS = {
+    "easypaisa": {
+        "enabled": False,
+        "mode": "sandbox",
+        "store_id": "",
+        "hash_key": "",           # 16-char AES-128 key from the Easypay portal
+        # Optional REST order-inquiry credentials. When set, a successful
+        # postback is confirmed server-to-server and the order goes straight
+        # to "paid"; without them, successes land in "pending_verification"
+        # for manual admin approval (Easypay's postback is unsigned).
+        "inquiry_username": "",
+        "inquiry_password": "",
+    },
+    "jazzcash": {
+        "enabled": False,
+        "mode": "sandbox",
+        "merchant_id": "",
+        "password": "",
+        "integrity_salt": "",
+    },
+    # Inert until PayFast joins GATEWAY_REGISTRY — see migration note above.
+    "payfast": {
+        "enabled": False,
+        "mode": "sandbox",
+        "merchant_id": "",
+        "secured_key": "",
+    },
+}
+
+# DB field -> env var fallback (DB non-empty wins).
+_GATEWAY_ENV_FALLBACK = {
+    "easypaisa": {
+        "store_id": "EASYPAISA_STORE_ID",
+        "hash_key": "EASYPAISA_HASH_KEY",
+        "inquiry_username": "EASYPAISA_INQUIRY_USERNAME",
+        "inquiry_password": "EASYPAISA_INQUIRY_PASSWORD",
+    },
+    "jazzcash": {
+        "merchant_id": "JAZZCASH_MERCHANT_ID",
+        "password": "JAZZCASH_PASSWORD",
+        "integrity_salt": "JAZZCASH_INTEGRITY_SALT",
+    },
+    "payfast": {
+        "merchant_id": "PAYFAST_MERCHANT_ID",
+        "secured_key": "PAYFAST_SECURED_KEY",
+    },
+}
+
+# Credentials without which a gateway cannot take payments.
+_GATEWAY_REQUIRED = {
+    "easypaisa": ("store_id", "hash_key"),
+    "jazzcash": ("merchant_id", "password", "integrity_salt"),
+    "payfast": ("merchant_id", "secured_key"),
+}
+
+_GATEWAY_SECRET_FIELDS = {"hash_key", "inquiry_password", "password", "integrity_salt", "secured_key"}
+
+async def get_gateway_settings_doc() -> dict:
+    stored = await db.payment_gateway_settings.find_one({"key": "gateways"}, {"_id": 0}) or {}
+    merged = {}
+    for gw, defaults in DEFAULT_GATEWAY_SETTINGS.items():
+        sub = defaults.copy()
+        for k, v in (stored.get(gw) or {}).items():
+            if k in sub:
+                sub[k] = v
+        merged[gw] = sub
+    return merged
+
+async def get_gateway_config(name: str) -> dict:
+    """Effective config for one gateway: stored values with per-field env
+    fallback applied (a non-empty DB value wins over the env var)."""
+    cfg = (await get_gateway_settings_doc()).get(name, {}).copy()
+    for field, env_name in _GATEWAY_ENV_FALLBACK.get(name, {}).items():
+        if not (cfg.get(field) or "").strip():
+            cfg[field] = (os.environ.get(env_name) or "").strip()
+    return cfg
+
+async def gateway_ready(name: str) -> bool:
+    cfg = await get_gateway_config(name)
+    return bool(cfg.get("enabled")) and all(
+        (cfg.get(f) or "").strip() for f in _GATEWAY_REQUIRED.get(name, ())
+    )
+
+def _api_public_base(request: Request) -> str:
+    """Public origin of THIS backend, used to build gateway callback URLs.
+    Prod (Vercel frontend + Fly backend) must set PUBLIC_API_BASE, e.g.
+    https://knb-backend.fly.dev; locally the request host is correct."""
+    env = (os.environ.get("PUBLIC_API_BASE") or "").strip().rstrip("/")
+    if env:
+        return env
+    host = request.headers.get("host", "localhost:8001")
+    scheme = "http" if host.split(":")[0] in ("localhost", "127.0.0.1") else "https"
+    return f"{scheme}://{host}"
+
+class GatewayConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None            # "sandbox" | "live"
+    store_id: Optional[str] = None        # easypaisa
+    hash_key: Optional[str] = None        # easypaisa secret (16 chars = AES-128 key)
+    inquiry_username: Optional[str] = None
+    inquiry_password: Optional[str] = None  # secret
+    merchant_id: Optional[str] = None     # jazzcash + payfast
+    password: Optional[str] = None        # jazzcash secret
+    integrity_salt: Optional[str] = None  # jazzcash secret
+    secured_key: Optional[str] = None     # payfast secret
+
+class PaymentGatewaysUpdate(BaseModel):
+    easypaisa: Optional[GatewayConfigUpdate] = None
+    jazzcash: Optional[GatewayConfigUpdate] = None
+    payfast: Optional[GatewayConfigUpdate] = None
+
+def _masked_gateway_view(settings: dict, request: Request) -> dict:
+    """Admin-facing view: secrets are reduced to <field>_set + <field>_last4."""
+    out = {}
+    for gw, cfg in settings.items():
+        view = {}
+        for k, v in cfg.items():
+            if k in _GATEWAY_SECRET_FIELDS:
+                sval = (v or "").strip()
+                view[f"{k}_set"] = bool(sval)
+                view[f"{k}_last4"] = sval[-4:] if sval else ""
+            else:
+                view[k] = v
+        if gw in ("easypaisa", "jazzcash"):
+            view["callback_url"] = f"{_api_public_base(request)}/api/payments/{gw}/return"
+        out[gw] = view
+    out["payfast"]["note"] = (
+        "PayFast currently runs from server environment variables. These saved "
+        "credentials are not used yet — they pre-stage the switch to database "
+        "configuration."
+    )
+    return out
+
+@api_router.get("/admin/payment-gateways")
+async def admin_get_payment_gateways(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return _masked_gateway_view(await get_gateway_settings_doc(), request)
+
+@api_router.put("/admin/payment-gateways")
+async def admin_update_payment_gateways(req: PaymentGatewaysUpdate, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    current = await get_gateway_settings_doc()
+    updates = {}
+    for gw in ("easypaisa", "jazzcash", "payfast"):
+        upd = getattr(req, gw)
+        if upd is None:
+            continue
+        merged = current[gw].copy()
+        for field, value in upd.model_dump().items():
+            if value is None or field not in DEFAULT_GATEWAY_SETTINGS[gw]:
+                continue
+            if isinstance(value, str):
+                value = value.strip()[:128]
+                # Blank secret means "keep the stored one" — changing a secret
+                # requires typing a new value.
+                if field in _GATEWAY_SECRET_FIELDS and not value:
+                    continue
+            merged[field] = value
+        if merged["mode"] not in ("sandbox", "live"):
+            raise HTTPException(status_code=400, detail=f"{gw}: mode must be 'sandbox' or 'live'")
+        if gw == "easypaisa" and merged["hash_key"] and len(merged["hash_key"]) != 16:
+            raise HTTPException(
+                status_code=400,
+                detail="EasyPaisa Hash Key must be exactly 16 characters (AES-128)")
+        if merged.get("enabled"):
+            # Validate against the EFFECTIVE config (env fallback counts).
+            effective = merged.copy()
+            for field, env_name in _GATEWAY_ENV_FALLBACK.get(gw, {}).items():
+                if not (effective.get(field) or "").strip():
+                    effective[field] = (os.environ.get(env_name) or "").strip()
+            missing = [f for f in _GATEWAY_REQUIRED[gw]
+                       if not (effective.get(f) or "").strip()]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{gw}: enable requires credentials: {', '.join(missing)}")
+        updates[gw] = merged
+    if updates:
+        await db.payment_gateway_settings.update_one(
+            {"key": "gateways"}, {"$set": updates}, upsert=True)
+    return _masked_gateway_view(await get_gateway_settings_doc(), request)
+
+# ===== END PAYMENT GATEWAY SETTINGS ==========================================
+
 DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _parse_hhmm(value: str, default_minutes: int) -> int:
@@ -6196,6 +6403,11 @@ async def get_public_settings():
         # JazzCash to the hosted checkout instead of the manual transfer flow.
         # Purely additive: old clients ignore it.
         "payfast_enabled": payfast_configured(),
+        # Hosted wallet gateways (DB-configured via the admin Payment Gateways
+        # page). True only when enabled AND credentialed — checkout shows the
+        # option only then. Additive: old clients ignore these.
+        "easypaisa_gateway_enabled": await gateway_ready("easypaisa"),
+        "jazzcash_gateway_enabled": await gateway_ready("jazzcash"),
         "bank_account_title": s["bank_account_title"],
         "bank_account_number": s["bank_account_number"],
         "bank_name": s["bank_name"],
@@ -6805,6 +7017,426 @@ async def admin_update_payment_status(order_id: str, body: dict, request: Reques
         {"$set": {"payment_status": new_status, "payment_updated_at": datetime.now(timezone.utc).isoformat()}},
     )
     return {"message": "Updated", "payment_status": new_status}
+
+# =============================================================================
+# HOSTED PAYMENT GATEWAYS (DB-configured): EasyPaisa (Easypay) + JazzCash
+# =============================================================================
+# Driver/registry pattern so future gateways drop in: implement a HostedGateway
+# subclass, add it to GATEWAY_REGISTRY, and the generic
+# /payments/{gateway}/create-session | /return | /status routes below serve it.
+# Credentials come from the admin Payment Gateways page (db-backed, env
+# fallback) via get_gateway_config() — see the settings block near
+# get_online_settings_doc() for the schema and the PayFast migration notes.
+#
+# ROUTE ORDERING INVARIANT: these generic /payments/{gateway}/... routes MUST
+# stay physically AFTER the literal /payments/stripe|safepay|payfast routes.
+# Routes register on api_router in file order (include_router runs once at the
+# bottom of this file), so the literals win. GATEWAY_REGISTRY membership is the
+# second guard: stripe/safepay/payfast are NOT in it, so even a reorder could
+# not silently reroute them here.
+#
+# Trust model (same as PayFast above): the return endpoints are unauthenticated
+# browser-redirect targets, so a reported success alone can NEVER mark an order
+# paid. JazzCash responses carry an HMAC we verify -> "paid"; EasyPaisa's
+# postback is unsigned -> "paid" only after a server-to-server inquiry
+# confirms, else "pending_verification" (admin verifies, like a manual
+# transfer). All state updates are idempotent — a paid order is never
+# downgraded.
+
+class GatewaySessionRequest(BaseModel):
+    order_id: str
+    origin_url: str
+
+class HostedGateway:
+    """Interface for hosted-redirect payment gateways."""
+    name = ""
+
+    async def create_session(self, order: dict, order_id: str, origin_url: str,
+                             cfg: dict, request: Request) -> dict:
+        """Insert a payment_transactions record and return
+        {action_url, method, ref, fields} for a client auto-submit form."""
+        raise NotImplementedError
+
+    async def handle_return(self, request: Request, params: dict, cfg: dict):
+        """Process the gateway's browser return/callback and redirect the
+        customer to the frontend result page."""
+        raise NotImplementedError
+
+def _gateway_result_redirect(origin_url: str, outcome: str, gateway: str,
+                             ref: str, order_id: str = "") -> RedirectResponse:
+    """303 (POST->GET) to the frontend result page after a gateway return."""
+    base = (origin_url or os.environ.get("PUBLIC_SITE_URL", "")).rstrip("/")
+    url = f"{base}/payment/{outcome}?gateway={gateway}&ref={ref}"
+    if order_id:
+        url += f"&order_id={order_id}"
+    return RedirectResponse(url, status_code=303)
+
+async def _mark_gateway_paid(txn: dict, now: str, gateway_txn_id: str = ""):
+    """Idempotently flip txn + order to paid (never downgrades)."""
+    await db.payment_transactions.update_one(
+        {"_id": txn["_id"], "payment_status": {"$nin": ["paid"]}},
+        {"$set": {"payment_status": "paid", "paid_at": now,
+                  "gateway_txn_id": (gateway_txn_id or "")[:64],
+                  "hash_verified": True}},
+    )
+    await db.online_orders.update_one(
+        {"_id": ObjectId(txn["order_id"]), "payment_status": {"$nin": ["paid"]}},
+        {"$set": {"payment_status": "paid", "paid_at": now}},
+    )
+
+async def _mark_gateway_pending_verification(txn: dict, now: str, reference: str):
+    """Success reported but not provider-verified: surface to the admin
+    exactly like a manual bank transfer, never silently trust it."""
+    await db.payment_transactions.update_one(
+        {"_id": txn["_id"], "payment_status": {"$nin": ["paid"]}},
+        {"$set": {"payment_status": "pending_verification", "hash_verified": False}},
+    )
+    await db.online_orders.update_one(
+        {"_id": ObjectId(txn["order_id"]), "payment_status": {"$nin": ["paid"]}},
+        {"$set": {"payment_status": "pending_verification",
+                  "payment_reference": reference[:64],
+                  "payment_submitted_at": now}},
+    )
+
+async def _mark_gateway_failed(txn: dict, err: str):
+    """Mark a still-open attempt failed (paid/pending are never downgraded)."""
+    await db.payment_transactions.update_one(
+        {"_id": txn["_id"], "payment_status": {"$in": ["initiated", "token_received"]}},
+        {"$set": {"payment_status": "failed", "gateway_err": err[:220]}},
+    )
+
+# --- JazzCash (hosted Page Redirection) --------------------------------------
+# Docs: https://sandbox.jazzcash.com.pk/SandboxDocumentation/ — merchant
+# form-POSTs pp_* fields to the CustomerPortal merchant form; JazzCash shows
+# its hosted page (wallet MPIN / card) and browser-POSTs the signed response
+# to pp_ReturnURL. Credentials: Merchant ID, Password, Integrity Salt.
+
+def _jazzcash_base(mode: str) -> str:
+    host = "https://payments.jazzcash.com.pk" if mode == "live" \
+        else "https://sandbox.jazzcash.com.pk"
+    return host + "/CustomerPortal/transactionmanagement/merchantform/"
+
+def _jazzcash_secure_hash(fields: dict, salt: str) -> str:
+    """pp_SecureHash per JazzCash spec — used for BOTH signing our request and
+    verifying their response so the two can never drift: take every pp_*/ppmpf_*
+    field, sort alphabetically by key, DROP empty values and pp_SecureHash
+    itself, join the VALUES with '&', prepend the Integrity Salt + '&', then
+    HMAC-SHA256 keyed with the salt, uppercase hex. Getting inclusion or
+    ordering wrong fails every transaction with 'invalid secure hash'."""
+    vals = [str(v) for k, v in sorted(fields.items())
+            if k.lower().startswith("pp") and k != "pp_SecureHash"
+            and str(v).strip() != ""]
+    msg = salt + "&" + "&".join(vals)
+    return hmac.new(salt.encode("utf-8"), msg.encode("utf-8"),
+                    _hashlib.sha256).hexdigest().upper()
+
+class JazzcashGateway(HostedGateway):
+    name = "jazzcash"
+
+    async def create_session(self, order, order_id, origin_url, cfg, request):
+        amount = float(order.get("total_price", 0))
+        # JazzCash validates txn/expiry times against Pakistan time — UTC
+        # timestamps make transactions instantly expired.
+        pkt = datetime.now(pytz.timezone("Asia/Karachi"))
+        txn_dt = pkt.strftime("%Y%m%d%H%M%S")
+        expiry = (pkt + timedelta(hours=1)).strftime("%Y%m%d%H%M%S")
+        # Fresh ref per attempt (19 chars, limit 20) so retries never collide.
+        ref = "T" + txn_dt + secrets.token_hex(2)
+        # Amount is integer PAISA. round() first — int(x*100) float-truncates.
+        paisa = str(int(round(amount * 100)))
+        fields = {
+            "pp_Version": "1.1",
+            # Empty TxnType lets the customer choose wallet/card on the hosted
+            # page; the non-empty rule correctly excludes it from the hash.
+            "pp_TxnType": "",
+            "pp_Language": "EN",
+            "pp_MerchantID": cfg["merchant_id"],
+            "pp_Password": cfg["password"],
+            "pp_TxnRefNo": ref,
+            "pp_Amount": paisa,
+            "pp_TxnCurrency": "PKR",
+            "pp_TxnDateTime": txn_dt,
+            "pp_TxnExpiryDateTime": expiry,
+            "pp_BillReference": ("ORD" + order_id[-8:]).upper(),
+            "pp_Description": "Food order",
+            "pp_ReturnURL": f"{_api_public_base(request)}/api/payments/jazzcash/return",
+        }
+        fields["pp_SecureHash"] = _jazzcash_secure_hash(fields, cfg["integrity_salt"])
+        await db.payment_transactions.insert_one({
+            "gateway": "jazzcash",
+            "tracker": ref,
+            "order_id": order_id,
+            "amount_pkr": amount,
+            "amount_paisa": int(paisa),
+            "currency": "PKR",
+            "environment": cfg["mode"],
+            "payment_status": "initiated",
+            "origin_url": origin_url.rstrip("/"),
+            "api_base": _api_public_base(request),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {"action_url": _jazzcash_base(cfg["mode"]), "method": "POST",
+                "ref": ref, "fields": fields}
+
+    async def handle_return(self, request, params, cfg):
+        ref = str(params.get("pp_TxnRefNo") or "").strip()
+        txn = await db.payment_transactions.find_one(
+            {"gateway": "jazzcash", "tracker": ref}) if ref else None
+        if not txn:
+            # No txn -> no stored origin; send them to the site root.
+            return RedirectResponse(
+                os.environ.get("PUBLIC_SITE_URL", "/") or "/", status_code=303)
+        code = str(params.get("pp_ResponseCode") or "").strip()
+        msg = str(params.get("pp_ResponseMessage") or "").strip()
+        rrn = str(params.get("pp_RetreivalReferenceNo") or "").strip()  # sic, JazzCash's spelling
+        their_hash = str(params.get("pp_SecureHash") or "").strip()
+        received = {k: v for k, v in params.items() if k.lower().startswith("pp")}
+        computed = _jazzcash_secure_hash(received, cfg["integrity_salt"])
+        hash_ok = bool(their_hash) and hmac.compare_digest(their_hash.upper(), computed)
+        # Defense in depth: the signed response must be for OUR amount, not a
+        # replayed success from a cheaper transaction.
+        amount_ok = str(params.get("pp_Amount", "")).strip() == str(txn.get("amount_paisa", ""))
+        ok = code == "000"
+        now = datetime.now(timezone.utc).isoformat()
+        origin = txn.get("origin_url") or ""
+        if ok and hash_ok and amount_ok:
+            await _mark_gateway_paid(txn, now, rrn or ref)
+            return _gateway_result_redirect(origin, "success", "jazzcash", ref)
+        if ok:
+            logger.warning(f"JazzCash success without valid hash for {ref} "
+                           f"(hash_ok={hash_ok} amount_ok={amount_ok})")
+            await _mark_gateway_pending_verification(txn, now, f"JazzCash {rrn or ref}")
+            return _gateway_result_redirect(origin, "success", "jazzcash", ref)
+        await _mark_gateway_failed(txn, f"{code[:8]}: {msg[:200]}")
+        return _gateway_result_redirect(origin, "cancel", "jazzcash", ref,
+                                        txn.get("order_id", ""))
+
+# --- EasyPaisa (Easypay hosted checkout, two-step) ---------------------------
+# Docs: Easypay Merchant Integration Guide v4 — step 1 form-POSTs to
+# /easypay/Index.jsf with an AES-hashed request; after payment Easypay sends
+# the browser back to postBackURL with an auth_token, which we form-POST to
+# /easypay/Confirm.jsf; the final redirect carries status/orderRefNumber.
+# Credentials: Store ID + 16-char Hash Key (+ optional inquiry API creds).
+
+def _easypay_host(mode: str) -> str:
+    return "https://easypay.easypaisa.com.pk" if mode == "live" \
+        else "https://easypaystg.easypaisa.com.pk"
+
+def _easypay_hashed_req(fields: dict, hash_key: str) -> str:
+    """merchantHashedReq per Easypay v4: every posted field (except the hash
+    itself), sorted alphabetically by key, joined as 'k=v' with '&', then
+    AES-128-ECB with the 16-char merchant Hash Key, PKCS7 padding, base64.
+    The plaintext values must byte-match what is POSTed (esp. the amount)."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding as _crypto_pad
+    import base64 as _b64
+    plaintext = "&".join(f"{k}={v}" for k, v in sorted(fields.items())
+                         if str(v) != "")
+    padder = _crypto_pad.PKCS7(128).padder()
+    padded = padder.update(plaintext.encode("utf-8")) + padder.finalize()
+    enc = Cipher(algorithms.AES(hash_key.encode("utf-8")), modes.ECB()).encryptor()
+    return _b64.b64encode(enc.update(padded) + enc.finalize()).decode()
+
+async def _easypay_inquire(ref: str, cfg: dict) -> Optional[bool]:
+    """Server-to-server order-status inquiry. Returns True (provider says
+    paid), False (provider says not paid), or None (inquiry unavailable —
+    creds missing or the call failed)."""
+    import base64 as _b64
+    user = (cfg.get("inquiry_username") or "").strip()
+    pw = (cfg.get("inquiry_password") or "").strip()
+    if not user or not pw:
+        return None
+    try:
+        creds = _b64.b64encode(f"{user}:{pw}".encode()).decode()
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{_easypay_host(cfg['mode'])}/easypay-service/rest/v4/inquire-transaction",
+                headers={"Credentials": creds},
+                json={"orderId": ref, "storeId": cfg["store_id"], "accountNum": ""},
+            )
+        if resp.status_code >= 400:
+            logger.warning(f"Easypay inquiry HTTP {resp.status_code} for {ref}")
+            return None
+        data = resp.json() or {}
+        if str(data.get("responseCode", "")).strip() != "0000":
+            return None
+        status = str(data.get("transactionStatus", "")).strip().upper()
+        return status in ("PAID", "SUCCESS")
+    except Exception as e:
+        logger.warning(f"Easypay inquiry error for {ref}: {type(e).__name__}: {e}")
+        return None
+
+class EasypaisaGateway(HostedGateway):
+    name = "easypaisa"
+
+    async def create_session(self, order, order_id, origin_url, cfg, request):
+        if len(cfg.get("hash_key") or "") != 16:
+            raise HTTPException(
+                status_code=503,
+                detail="EasyPaisa hash key misconfigured (must be 16 characters)")
+        amount = float(order.get("total_price", 0))
+        pkt = datetime.now(pytz.timezone("Asia/Karachi"))
+        ref = "EP" + pkt.strftime("%y%m%d%H%M%S") + secrets.token_hex(2)
+        # The exact amount string is hashed — store it so verification and
+        # debugging can byte-match what was sent.
+        amount_str = f"{amount:.1f}"
+        api_base = _api_public_base(request)
+        # ref rides in the query so the step-1 postback (which only carries
+        # auth_token) can be correlated back to this transaction.
+        postback = f"{api_base}/api/payments/easypaisa/return?ref={ref}"
+        fields = {
+            "storeId": cfg["store_id"],
+            "amount": amount_str,
+            "postBackURL": postback,
+            "orderRefNum": ref,
+            "expiryDate": (pkt + timedelta(hours=1)).strftime("%Y%m%d %H%M%S"),
+            "autoRedirect": "1",
+            "paymentMethod": "MA_PAYMENT_METHOD",  # mobile-account flow — the option the customer picked
+            "mobileNum": str(order.get("phone", "") or ""),
+            "timeStamp": pkt.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        fields["merchantHashedReq"] = _easypay_hashed_req(fields, cfg["hash_key"])
+        await db.payment_transactions.insert_one({
+            "gateway": "easypaisa",
+            "tracker": ref,
+            "order_id": order_id,
+            "amount_pkr": amount,
+            "amount_str": amount_str,
+            "currency": "PKR",
+            "environment": cfg["mode"],
+            "payment_status": "initiated",
+            "origin_url": origin_url.rstrip("/"),
+            "api_base": api_base,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {"action_url": f"{_easypay_host(cfg['mode'])}/easypay/Index.jsf",
+                "method": "POST", "ref": ref, "fields": fields}
+
+    async def handle_return(self, request, params, cfg):
+        import html as _html
+        # Defensive: some Easypay deployments naively append '?auth_token=' to
+        # a postBackURL that already has a query string, yielding '?ref=..?auth_token=..'.
+        raw_q = str(request.url.query or "")
+        if "?" in raw_q:
+            from urllib.parse import parse_qsl
+            for k, v in parse_qsl(raw_q.replace("?", "&")):
+                params.setdefault(k, v)
+        ref = str(params.get("orderRefNumber") or params.get("ref") or "").strip()
+        txn = await db.payment_transactions.find_one(
+            {"gateway": "easypaisa", "tracker": ref}) if ref else None
+        if not txn:
+            return RedirectResponse(
+                os.environ.get("PUBLIC_SITE_URL", "/") or "/", status_code=303)
+        origin = txn.get("origin_url") or ""
+        order_id = txn.get("order_id", "")
+        status = str(params.get("status") or "").strip()
+        auth_token = str(params.get("auth_token") or "").strip()
+
+        # Phase 1: Easypay handed back an auth token — confirm it by form-
+        # POSTing to Confirm.jsf (browser stays in the loop by design).
+        if auth_token and not status:
+            await db.payment_transactions.update_one(
+                {"_id": txn["_id"], "payment_status": "initiated"},
+                {"$set": {"auth_token": auth_token[:128],
+                          "payment_status": "token_received"}},
+            )
+            confirm_url = f"{_easypay_host(cfg['mode'])}/easypay/Confirm.jsf"
+            postback2 = f"{txn.get('api_base', _api_public_base(request))}/api/payments/easypaisa/return?ref={ref}"
+            esc = lambda v: _html.escape(str(v), quote=True)
+            return HTMLResponse(
+                "<html><body>Completing payment&hellip;"
+                f"<form method=\"post\" action=\"{esc(confirm_url)}\">"
+                f"<input type=\"hidden\" name=\"auth_token\" value=\"{esc(auth_token)}\">"
+                f"<input type=\"hidden\" name=\"postBackURL\" value=\"{esc(postback2)}\">"
+                "</form><script>document.forms[0].submit()</script></body></html>")
+
+        # Phase 2: final status postback. It is UNSIGNED — only a server-to-
+        # server inquiry may mark the order paid.
+        ok = status in ("0000", "SUCCESS")
+        now = datetime.now(timezone.utc).isoformat()
+        if ok:
+            confirmed = await _easypay_inquire(ref, cfg)
+            if confirmed is True:
+                await _mark_gateway_paid(txn, now, str(params.get("transactionId") or ref))
+                return _gateway_result_redirect(origin, "success", "easypaisa", ref)
+            if confirmed is False:
+                await _mark_gateway_failed(txn, "inquiry: provider reports not paid")
+                return _gateway_result_redirect(origin, "cancel", "easypaisa", ref, order_id)
+            # Inquiry unavailable — never trust the browser, never strand the
+            # customer on a provider outage: admin verifies manually.
+            await _mark_gateway_pending_verification(txn, now, f"EasyPaisa {ref}")
+            return _gateway_result_redirect(origin, "success", "easypaisa", ref)
+        desc = str(params.get("desc") or "").strip()
+        await _mark_gateway_failed(txn, f"{status[:8]}: {desc[:200]}")
+        return _gateway_result_redirect(origin, "cancel", "easypaisa", ref, order_id)
+
+# stripe/safepay/payfast intentionally absent — their literal routes above serve them.
+GATEWAY_REGISTRY: Dict[str, HostedGateway] = {
+    "easypaisa": EasypaisaGateway(),
+    "jazzcash": JazzcashGateway(),
+}
+
+@api_router.post("/payments/{gateway}/create-session")
+async def create_gateway_session(gateway: str, req: GatewaySessionRequest, request: Request):
+    gw = GATEWAY_REGISTRY.get(gateway)
+    if not gw:
+        raise HTTPException(status_code=404, detail="Unknown gateway")
+    if not await gateway_ready(gateway):
+        raise HTTPException(status_code=503, detail=f"{gateway} not configured")
+    try:
+        order = await db.online_orders.find_one({"_id": ObjectId(req.order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("payment_status") == "paid":
+        raise HTTPException(status_code=400, detail="Order already paid")
+    if float(order.get("total_price", 0)) <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+    cfg = await get_gateway_config(gateway)
+    return await gw.create_session(order, req.order_id, req.origin_url, cfg, request)
+
+@api_router.api_route("/payments/{gateway}/return", methods=["GET", "POST"])
+async def gateway_return(gateway: str, request: Request):
+    """Unauthenticated browser-redirect target for the hosted gateways. The
+    per-gateway verification (HMAC / inquiry / pending_verification) is what
+    protects 'paid' — see the trust-model note at the top of this section."""
+    gw = GATEWAY_REGISTRY.get(gateway)
+    if not gw:
+        raise HTTPException(status_code=404, detail="Unknown gateway")
+    cfg = await get_gateway_config(gateway)
+    params: Dict[str, Any] = dict(request.query_params)
+    if request.method == "POST":
+        ctype = (request.headers.get("content-type") or "").lower()
+        try:
+            if "application/json" in ctype:
+                body = await request.json()
+                if isinstance(body, dict):
+                    params.update(body)
+            else:
+                params.update(dict(await request.form()))
+        except Exception:
+            pass
+    return await gw.handle_return(request, params, cfg)
+
+@api_router.get("/payments/{gateway}/status/{ref}")
+async def gateway_status(gateway: str, ref: str):
+    """DB-backed status (populated by the return endpoint). Same response
+    shape as the Stripe/SafePay/PayFast status endpoints so clients share
+    polling code."""
+    if gateway not in GATEWAY_REGISTRY:
+        raise HTTPException(status_code=404, detail="Unknown gateway")
+    txn = await db.payment_transactions.find_one(
+        {"gateway": gateway, "tracker": ref}, {"_id": 0})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Unknown transaction")
+    return {
+        "tracker": ref,
+        "payment_status": txn.get("payment_status") or "pending",
+        "order_id": txn.get("order_id"),
+    }
+
+# ===== END HOSTED PAYMENT GATEWAYS ===========================================
 
 # =============================================================================
 # END ONLINE SETTINGS / DELIVERY / PAYMENT

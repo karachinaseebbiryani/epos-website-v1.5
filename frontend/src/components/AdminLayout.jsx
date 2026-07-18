@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ShoppingBag, ChefHat, Tag, CalendarDays, LogOut,
   Settings, FolderTree, ShoppingCart, Package, Receipt, Truck, RotateCcw,
   History, FileBarChart, SlidersHorizontal, Diamond, Gift, MessageSquare, Bell,
-  HelpCircle,
+  HelpCircle, CreditCard,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
@@ -39,6 +39,7 @@ const ONLINE_NAV = [
   { to: "/admin/loyalty-settings", label: "Loyalty Settings", icon: Diamond, perm: "online_settings" },
   { to: "/admin/rewards",    label: "Rewards",       icon: Gift, perm: "online_settings" },
   { to: "/admin/notifications", label: "Notifications", icon: Bell, perm: "online_settings" },
+  { to: "/admin/payment-gateways", label: "Payment Gateways", icon: CreditCard, perm: "online_settings" },
   { to: "/admin/settings",   label: "Settings",      icon: Settings, perm: "online_settings" },
 ];
 

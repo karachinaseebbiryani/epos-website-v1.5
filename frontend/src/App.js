@@ -39,6 +39,7 @@ import AdminCategories from "./pages/admin/AdminCategories";
 import AdminOffers from "./pages/admin/AdminOffers";
 import AdminEvents from "./pages/admin/AdminEvents";
 import AdminSettings from "./pages/admin/AdminSettings";
+import PaymentGateways from "./pages/admin/PaymentGateways";
 import LoyaltySettings from "./pages/admin/LoyaltySettings";
 import RewardsManagement from "./pages/admin/RewardsManagement";
 import AdminNotifications from "./pages/admin/AdminNotifications";
@@ -162,6 +163,7 @@ function App() {
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
                   <Route path="/admin/notifications" element={<AdminNotifications />} />
                   <Route path="/admin/settings" element={<AdminSettings />} />
+                  <Route path="/admin/payment-gateways" element={<PaymentGateways />} />
 
                   {/* ----- POS Operations (preserved from OLD) ----- */}
                   <Route path="/admin/pos"               element={<Op perm="pos"><POSPage /></Op>} />

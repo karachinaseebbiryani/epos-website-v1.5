@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { useCart } from "../contexts/CartContext";
 import { useAuth } from "../contexts/AuthContext";
 import api, { formatApiError } from "../lib/api";
+import { submitGatewayForm } from "../lib/gatewayRedirect";
 import { toast } from "sonner";
 import { Phone, MapPin, User, MessageSquare, Tag, Banknote, ArrowLeft, CreditCard, Building2, Smartphone, Store, Navigation, Loader2, UserPlus, UserCheck, Diamond, X as XIcon } from "lucide-react";
 import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
@@ -14,6 +15,8 @@ const PAYMENT_LABELS = {
     pay_at_restaurant: { label: "Pay at Restaurant", icon: Store, desc: "Pay in person if picking up" },
     bank_transfer: { label: "Bank Transfer / EasyPaisa / JazzCash", icon: Building2, desc: "Transfer & share reference" },
     card: { label: "Pay by Card", icon: CreditCard, desc: "Visa / Mastercard via Stripe" },
+    easypaisa: { label: "EasyPaisa", icon: Smartphone, desc: "Pay online with your EasyPaisa account" },
+    jazzcash: { label: "JazzCash", icon: Smartphone, desc: "Pay online with your JazzCash wallet" },
 };
 
 const GUEST_KEY = "knb_guest_v1";
@@ -273,7 +276,13 @@ export default function CheckoutPage() {
         rewardDiscountPreview = Math.min(Number(reward.reward_value || 0), total);
     }
     const totalAfterReward = Math.max(0, total - rewardDiscountPreview);
-    const enabledMethods = settings?.payment_methods || { cod: true };
+    // Hosted wallet gateways are flagged separately from payment_methods —
+    // the backend reports them true only when enabled AND credentialed.
+    const enabledMethods = {
+        ...(settings?.payment_methods || { cod: true }),
+        easypaisa: !!settings?.easypaisa_gateway_enabled,
+        jazzcash: !!settings?.jazzcash_gateway_enabled,
+    };
 
     const submitOrder = async (e) => {
         e.preventDefault();
@@ -337,6 +346,21 @@ export default function CheckoutPage() {
                 } catch (err) {
                     toast.error("Could not initiate card payment");
                     navigate(`/order/${order.id}/success`, { state: { order } });
+                    return;
+                }
+            }
+            if (form.payment_method === "easypaisa" || form.payment_method === "jazzcash") {
+                try {
+                    const { data: sess } = await api.post(`/payments/${form.payment_method}/create-session`, {
+                        order_id: order.id,
+                        origin_url: window.location.origin,
+                    });
+                    // Browser navigates away to the gateway's hosted page.
+                    submitGatewayForm(sess.action_url, sess.fields);
+                    return;
+                } catch (err) {
+                    toast.error("Could not start the payment. You can pay via manual transfer instead.");
+                    navigate(`/order/${order.id}/bank-payment`, { state: { order, settings } });
                     return;
                 }
             }
