@@ -68,7 +68,7 @@ class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setNavigationDelegate(NavigationDelegate(
           onNavigationRequest: (req) {
-            if (req.url.startsWith(_origin)) {
+            if (_isReturnUrl(req.url)) {
               _finish();
               return NavigationDecision.prevent;
             }
@@ -87,6 +87,21 @@ class _SafepayWebViewState extends ConsumerState<SafepayWebView> {
       if (!mounted) return;
       setState(() => _error = 'Could not start the payment.');
     }
+  }
+
+  /// True when the checkout signals completion. Two shapes exist:
+  ///  - our sentinel origin (backend-built redirect/cancel URLs), kept for
+  ///    backward compatibility, and
+  ///  - SafePay's mobile-mode return, which navigates to `/mobile?action=
+  ///    complete|cancelled` on SafePay's own domain instead of redirecting
+  ///    to the sentinel — previously undetected, leaving the customer
+  ///    stranded on the "return to your mobile application" screen.
+  bool _isReturnUrl(String url) {
+    if (url.startsWith(_origin)) return true;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    return uri.path.endsWith('/mobile') &&
+        const {'complete', 'cancelled'}.contains(uri.queryParameters['action']);
   }
 
   Future<void> _finish() async {

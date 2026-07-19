@@ -6835,9 +6835,12 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
     origin = req.origin_url.rstrip("/")
     # source=mobile makes SafePay show "return to your mobile application"
     # instead of redirecting the browser — correct ONLY for the app's webview
-    # (sentinel origin). Website checkouts must use source=web or the customer
-    # is stranded on SafePay's interstitial and the order never confirms.
-    source = "mobile" if origin.startswith("https://knb.payment.return") else "web"
+    # (sentinel origin; in mobile mode SafePay navigates to its own
+    # /mobile?action=complete|cancelled URL, which the app's webview watches).
+    # Website checkouts must use source=custom — SafePay's documented value
+    # for custom integrations; undocumented values (e.g. "web") can leave the
+    # customer stranded on SafePay's page with the redirect_url ignored.
+    source = "mobile" if origin.startswith("https://knb.payment.return") else "custom"
     from urllib.parse import urlencode
     qs = urlencode({
         "beacon": tracker,
@@ -6865,11 +6868,16 @@ async def create_safepay_session(req: SafepaySessionRequest, http_request: Reque
 async def safepay_status(tracker: str):
     """Report SafePay payment status for a tracker. Best-effort verification with
     a DB fallback (same shape as the Stripe status endpoint)."""
-    api_key = os.environ.get("SAFEPAY_API_KEY")
+    # Same effective config as create-session and the reconcile job (DB wins,
+    # env fallback). Regression fix: this endpoint previously read only the
+    # SAFEPAY_API_KEY env var and called the removed _safepay_bases() helper,
+    # so it 500/503'd and payments could never confirm from the client side.
+    cfg = await _safepay_cfg()
+    api_key = (cfg.get("api_key") or "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="SafePay not configured")
     txn = await db.payment_transactions.find_one({"tracker": tracker}, {"_id": 0})
-    api_base, _ = _safepay_bases()
+    api_base, _ = _safepay_bases_for(cfg.get("mode", "sandbox"))
     verified_paid = False
     try:
         async with httpx.AsyncClient(timeout=15) as client:
