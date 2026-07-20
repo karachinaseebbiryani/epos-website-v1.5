@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ShoppingBag, ChefHat, Tag, CalendarDays, LogOut,
   Settings, FolderTree, ShoppingCart, Package, Receipt, Truck, RotateCcw,
   History, FileBarChart, SlidersHorizontal, Diamond, Gift, MessageSquare, Bell,
-  HelpCircle, CreditCard,
+  HelpCircle, CreditCard, LayoutGrid,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import PosInstall from "./PosInstall";
@@ -14,6 +14,7 @@ import { useStaffAuth } from "../contexts/StaffAuthContext";
 // Listed FIRST per production workflow priority.
 const OPS_NAV = [
   { to: "/admin/pos",               label: "POS / Sales",      icon: ShoppingCart, perm: "pos" },
+  { to: "/admin/tables",            label: "Tables / Floor",   icon: LayoutGrid, perm: "pos" },
   { to: "/admin/dashboard-classic", label: "Classic Dashboard",icon: LayoutDashboard, perm: "dashboard" },
   { to: "/admin/menu-mgmt",         label: "Menu Management",  icon: ChefHat, perm: "menu" },
   { to: "/admin/inventory",         label: "Inventory",        icon: Package, perm: "inventory" },
@@ -129,8 +130,10 @@ export default function AdminLayout() {
       {/* Mobile bottom nav — most-used items, biased toward POS now */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-brand-ink text-white border-t border-white/10">
         <div className="flex justify-around overflow-x-auto">
+          {/* Index-picked from OPS_NAV: [0]=POS, [9]=X/Z Reports, [10]=Full Settings.
+              Keep in sync if OPS_NAV order changes (Tables/Floor was inserted at [1]). */}
           {[
-            visibleOps[0], visibleOnline[1], visibleOps[8], visibleOnline[0], visibleOps[9],
+            visibleOps[0], visibleOnline[1], visibleOps[9], visibleOnline[0], visibleOps[10],
           ].filter(Boolean).map((n) => (
             <NavLink
               key={n.to}

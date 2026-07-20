@@ -495,9 +495,57 @@ class OrderItemInput(BaseModel):
     price: float
     original_price: Optional[float] = None
     quantity: int
+    # Ingredients the customer asked to leave out for this line (allergy/preference).
+    removed_ingredients: Optional[List[str]] = None
 
 class OrderCreate(BaseModel):
     items: List[OrderItemInput]
+    payment_type: str
+    subtotal: float
+    tax: float
+    total: float
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = 0
+    discount_amount: Optional[float] = 0
+    order_type: Optional[str] = None   # dine_in / takeaway / delivery (defaults to takeaway)
+    table_id: Optional[str] = None
+
+# --- Dine-in tables + open (unpaid) order models (ported from Marhaba) ---
+class TableCreate(BaseModel):
+    name: str
+    section: Optional[str] = "Main Hall"
+    capacity: Optional[int] = 4
+    status: Optional[str] = "available"  # available / occupied / reserved / cleaning
+
+class TableUpdate(BaseModel):
+    name: Optional[str] = None
+    section: Optional[str] = None
+    capacity: Optional[int] = None
+    status: Optional[str] = None
+
+class OpenOrderItem(BaseModel):
+    uid: Optional[str] = None          # stable per-line id (frontend generated)
+    item_id: str
+    name: str
+    price: float
+    original_price: Optional[float] = None
+    quantity: int
+    removed_ingredients: Optional[List[str]] = None
+    kitchen_status: Optional[str] = "new"  # new / sent
+
+class OpenOrderCreate(BaseModel):
+    table_id: str
+
+class OpenOrderItemsUpdate(BaseModel):
+    items: List[OpenOrderItem]
+    subtotal: Optional[float] = 0
+    tax: Optional[float] = 0
+    total: Optional[float] = 0
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = 0
+    discount_amount: Optional[float] = 0
+
+class OpenOrderPay(BaseModel):
     payment_type: str
     subtotal: float
     tax: float
@@ -1271,29 +1319,37 @@ async def update_stock(item_id: str, su: StockUpdate, request: Request):
     return {"message": "Stock updated", "stock": su.stock}
 
 # --- Orders ---
-@api_router.post("/orders")
-async def create_order(order: OrderCreate, request: Request):
-    user = await get_current_user(request)
+async def _finalize_pos_order(items, payment_type, subtotal, tax, total,
+                              discount_type, discount_value, discount_amount, user,
+                              order_type="takeaway", table_id=None):
+    """Shared finalisation for a completed POS sale. Decrements stock, records the
+    order in db.orders (the collection every report reads), and posts vendor
+    transactions for any outsourced items. Used by both the quick-sale /orders
+    endpoint and the dine-in table 'pay' endpoint so their behaviour is identical.
+
+    `items` is a list of plain dicts: {item_id, name, price, original_price,
+    quantity, removed_ingredients}. Any extra keys (e.g. kitchen_status) are ignored.
+    """
     # Track outsourced items so we can post one vendor_transaction per vendor.
     outsourced_by_vendor = {}  # {vendor_id: {"items": [...], "total": float}}
-    for oi in order.items:
+    for oi in items:
         try:
-            item = await db.menu_items.find_one({"_id": ObjectId(oi.item_id)})
+            item = await db.menu_items.find_one({"_id": ObjectId(oi["item_id"])})
             if item:
-                await db.menu_items.update_one({"_id": ObjectId(oi.item_id)}, {"$set": {"stock": max(0, item.get("stock", 0) - oi.quantity)}})
+                await db.menu_items.update_one({"_id": ObjectId(oi["item_id"])}, {"$set": {"stock": max(0, item.get("stock", 0) - oi["quantity"])}})
                 # Outsourced -> accumulate vendor payable
                 if item.get("is_outsourced") and item.get("outsourced_vendor_id"):
                     vid = item["outsourced_vendor_id"]
                     unit_cost = item.get("outsourced_unit_cost")
                     if unit_cost is None:
-                        unit_cost = float(oi.original_price or oi.price or item.get("price", 0))
-                    line_total = round(float(unit_cost) * int(oi.quantity), 2)
+                        unit_cost = float(oi.get("original_price") or oi.get("price") or item.get("price", 0))
+                    line_total = round(float(unit_cost) * int(oi["quantity"]), 2)
                     bucket = outsourced_by_vendor.setdefault(vid, {"items": [], "total": 0.0})
                     bucket["items"].append({
-                        "name": oi.name,
-                        "quantity": int(oi.quantity),
+                        "name": oi["name"],
+                        "quantity": int(oi["quantity"]),
                         "unit_price": float(unit_cost),
-                        "menu_item_id": oi.item_id,
+                        "menu_item_id": oi["item_id"],
                     })
                     bucket["total"] = round(bucket["total"] + line_total, 2)
         except Exception:
@@ -1301,9 +1357,9 @@ async def create_order(order: OrderCreate, request: Request):
     now = datetime.now(timezone.utc)
     # Stock just changed on the items above — bust the menu cache so the next
     # /menu or /menu-items call sees the new stock figures instead of stale.
-    if order.items:
+    if items:
         _menu_cache_bust_all()
-    doc = {"items": [{"item_id": oi.item_id, "name": oi.name, "price": oi.price, "original_price": oi.original_price or oi.price, "quantity": oi.quantity} for oi in order.items], "payment_type": order.payment_type, "subtotal": order.subtotal, "tax": order.tax, "total": order.total, "discount_type": order.discount_type, "discount_value": order.discount_value or 0, "discount_amount": order.discount_amount or 0, "cashier_id": user["_id"], "cashier_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
+    doc = {"items": [{"item_id": oi["item_id"], "name": oi["name"], "price": oi["price"], "original_price": oi.get("original_price") or oi["price"], "quantity": oi["quantity"], "removed_ingredients": [str(x).strip() for x in (oi.get("removed_ingredients") or []) if str(x).strip()]} for oi in items], "payment_type": payment_type, "subtotal": subtotal, "tax": tax, "total": total, "discount_type": discount_type, "discount_value": discount_value or 0, "discount_amount": discount_amount or 0, "order_type": order_type, "table_id": table_id, "status": "paid", "cashier_id": user["_id"], "cashier_name": user.get("name", ""), "created_at": now.isoformat(), "date": now.strftime("%Y-%m-%d")}
     result = await db.orders.insert_one(doc)
     order_id = str(result.inserted_id)
     order_receipt_no = order_id[-6:].upper()
@@ -1352,17 +1408,223 @@ async def create_order(order: OrderCreate, request: Request):
             pass
     
     return {
-        "id": order_id, 
-        "items": doc["items"], 
-        "payment_type": order.payment_type, 
-        "subtotal": order.subtotal, 
-        "tax": order.tax, 
-        "total": order.total, 
-        "discount_amount": order.discount_amount or 0, 
-        "cashier_name": user.get("name", ""), 
+        "id": order_id,
+        "items": doc["items"],
+        "payment_type": payment_type,
+        "subtotal": subtotal,
+        "tax": tax,
+        "total": total,
+        "discount_amount": discount_amount or 0,
+        "order_type": order_type,
+        "table_id": table_id,
+        "cashier_name": user.get("name", ""),
         "created_at": now.isoformat(),
         "vendor_tickets": vendor_tickets  # NEW: vendor tickets for auto-printing
     }
+
+@api_router.post("/orders")
+async def create_order(order: OrderCreate, request: Request):
+    user = await get_current_user(request)
+    items = [{"item_id": oi.item_id, "name": oi.name, "price": oi.price, "original_price": oi.original_price, "quantity": oi.quantity, "removed_ingredients": oi.removed_ingredients or []} for oi in order.items]
+    return await _finalize_pos_order(
+        items, order.payment_type, order.subtotal, order.tax, order.total,
+        order.discount_type, order.discount_value, order.discount_amount, user,
+        order_type=getattr(order, "order_type", None) or "takeaway", table_id=getattr(order, "table_id", None),
+    )
+
+# =============================================================================
+# DINE-IN: restaurant tables (floor) + open (unpaid) orders  (ported from Marhaba)
+# =============================================================================
+def _serialize_table(t):
+    return {"id": str(t["_id"]), "name": t.get("name", ""), "section": t.get("section", "Main Hall"),
+            "capacity": t.get("capacity", 4), "status": t.get("status", "available")}
+
+def _serialize_open_order(o):
+    return {"id": str(o["_id"]), "order_type": o.get("order_type", "dine_in"), "table_id": o.get("table_id"),
+            "status": o.get("status", "open"), "items": o.get("items", []),
+            "subtotal": o.get("subtotal", 0), "tax": o.get("tax", 0), "total": o.get("total", 0),
+            "discount_type": o.get("discount_type"), "discount_value": o.get("discount_value", 0),
+            "discount_amount": o.get("discount_amount", 0), "created_at": o.get("created_at", "")}
+
+@api_router.get("/tables")
+async def list_tables(request: Request):
+    await get_current_user(request)
+    tables = await db.restaurant_tables.find({}).to_list(1000)
+    tables.sort(key=lambda t: (t.get("section", ""), t.get("name", "")))
+    # Attach a live-order summary per table so the floor can flag an unpaid running
+    # tab INDEPENDENTLY of the table's status colour (a mis-tapped status must never
+    # hide the fact that money is still owed on that table).
+    open_orders = await db.open_orders.find({"status": "open"}).to_list(5000)
+    by_table = {}
+    for o in open_orders:
+        tid = o.get("table_id")
+        if not tid:
+            continue
+        items = o.get("items", [])
+        by_table[tid] = {
+            "open_order_id": str(o["_id"]),
+            "item_count": sum(int(it.get("quantity", 0)) for it in items),
+            "has_items": len(items) > 0,
+            "unsent_count": sum(1 for it in items if (it.get("kitchen_status") or "new") == "new"),
+            "total": o.get("total", 0),
+            "created_at": o.get("created_at", ""),
+        }
+    out = []
+    for t in tables:
+        st = _serialize_table(t)
+        st["open_order"] = by_table.get(st["id"])  # None when no live tab
+        out.append(st)
+    return out
+
+@api_router.post("/tables")
+async def create_table(body: TableCreate, request: Request):
+    await get_current_user(request)
+    doc = {"name": body.name.strip(), "section": (body.section or "Main Hall").strip(),
+           "capacity": int(body.capacity or 4), "status": body.status or "available",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    res = await db.restaurant_tables.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return _serialize_table(doc)
+
+@api_router.put("/tables/{table_id}")
+async def update_table(table_id: str, body: TableUpdate, request: Request):
+    await get_current_user(request)
+    updates = {k: v for k, v in body.dict().items() if v is not None}
+    if "name" in updates: updates["name"] = updates["name"].strip()
+    if "capacity" in updates: updates["capacity"] = int(updates["capacity"])
+    if updates:
+        await db.restaurant_tables.update_one({"_id": ObjectId(table_id)}, {"$set": updates})
+    t = await db.restaurant_tables.find_one({"_id": ObjectId(table_id)})
+    if not t: raise HTTPException(status_code=404, detail="Table not found")
+    return _serialize_table(t)
+
+@api_router.delete("/tables/{table_id}")
+async def delete_table(table_id: str, request: Request):
+    await get_current_user(request)
+    # Guard: don't delete a table that still has an open order.
+    open_o = await db.open_orders.find_one({"table_id": table_id, "status": "open"})
+    if open_o:
+        raise HTTPException(status_code=400, detail="Table has an open order — settle it first")
+    await db.restaurant_tables.delete_one({"_id": ObjectId(table_id)})
+    return {"message": "Table deleted"}
+
+@api_router.post("/open-orders")
+async def create_open_order(body: OpenOrderCreate, request: Request):
+    """Open a dine-in tab for a table. If one already exists (occupied table),
+    return it — enforcing one open order per table. Marks the table occupied."""
+    user = await get_current_user(request)
+    table = await db.restaurant_tables.find_one({"_id": ObjectId(body.table_id)})
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    existing = await db.open_orders.find_one({"table_id": body.table_id, "status": "open"})
+    if existing:
+        return _serialize_open_order(existing)
+    now = datetime.now(timezone.utc)
+    doc = {"order_type": "dine_in", "table_id": body.table_id, "status": "open",
+           "items": [], "subtotal": 0, "tax": 0, "total": 0,
+           "discount_type": None, "discount_value": 0, "discount_amount": 0,
+           "cashier_id": user["_id"], "cashier_name": user.get("name", ""),
+           "created_at": now.isoformat()}
+    res = await db.open_orders.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    await db.restaurant_tables.update_one({"_id": ObjectId(body.table_id)}, {"$set": {"status": "occupied"}})
+    return _serialize_open_order(doc)
+
+@api_router.get("/open-orders/by-table/{table_id}")
+async def get_open_order_by_table(table_id: str, request: Request):
+    await get_current_user(request)
+    o = await db.open_orders.find_one({"table_id": table_id, "status": "open"})
+    if not o: raise HTTPException(status_code=404, detail="No open order for this table")
+    return _serialize_open_order(o)
+
+@api_router.get("/open-orders/{open_order_id}")
+async def get_open_order(open_order_id: str, request: Request):
+    await get_current_user(request)
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    if not o: raise HTTPException(status_code=404, detail="Open order not found")
+    return _serialize_open_order(o)
+
+@api_router.put("/open-orders/{open_order_id}")
+async def update_open_order_items(open_order_id: str, body: OpenOrderItemsUpdate, request: Request):
+    """Persist the current cart to the tab. Item kitchen_status is taken as-is from
+    the client (new lines default to 'new'; already-sent lines stay 'sent')."""
+    await get_current_user(request)
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    if not o: raise HTTPException(status_code=404, detail="Open order not found")
+    if o.get("status") != "open":
+        raise HTTPException(status_code=400, detail="Order is not open")
+    items = [{"uid": it.uid, "item_id": it.item_id, "name": it.name, "price": it.price,
+              "original_price": it.original_price if it.original_price is not None else it.price,
+              "quantity": it.quantity,
+              "removed_ingredients": [str(x).strip() for x in (it.removed_ingredients or []) if str(x).strip()],
+              "kitchen_status": it.kitchen_status or "new"} for it in body.items]
+    await db.open_orders.update_one({"_id": ObjectId(open_order_id)}, {"$set": {
+        "items": items, "subtotal": body.subtotal or 0, "tax": body.tax or 0, "total": body.total or 0,
+        "discount_type": body.discount_type, "discount_value": body.discount_value or 0,
+        "discount_amount": body.discount_amount or 0,
+        "updated_at": datetime.now(timezone.utc).isoformat()}})
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    return _serialize_open_order(o)
+
+@api_router.post("/open-orders/{open_order_id}/send-kitchen")
+async def send_open_order_to_kitchen(open_order_id: str, request: Request):
+    """Return the items whose kitchen_status is 'new', then mark them 'sent'.
+    Already-sent items are never returned again (no duplicate sends)."""
+    await get_current_user(request)
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    if not o: raise HTTPException(status_code=404, detail="Open order not found")
+    items = o.get("items", [])
+    new_items = [it for it in items if (it.get("kitchen_status") or "new") == "new"]
+    if not new_items:
+        return {"new_items": [], "message": "No new items to send"}
+    for it in items:
+        if (it.get("kitchen_status") or "new") == "new":
+            it["kitchen_status"] = "sent"
+    await db.open_orders.update_one({"_id": ObjectId(open_order_id)}, {"$set": {
+        "items": items, "kitchen_sent_at": datetime.now(timezone.utc).isoformat()}})
+    return {"new_items": new_items, "message": f"Sent {len(new_items)} item(s) to kitchen"}
+
+@api_router.post("/open-orders/{open_order_id}/pay")
+async def pay_open_order(open_order_id: str, body: OpenOrderPay, request: Request):
+    """Close a dine-in tab: finalise it as a normal paid order (stock, vendor
+    tickets, reports), mark the tab paid, and free the table."""
+    user = await get_current_user(request)
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    if not o: raise HTTPException(status_code=404, detail="Open order not found")
+    if o.get("status") != "open":
+        raise HTTPException(status_code=400, detail="Order is not open")
+    items = o.get("items", [])
+    if not items:
+        raise HTTPException(status_code=400, detail="Cannot pay an empty order")
+    result = await _finalize_pos_order(
+        items, body.payment_type, body.subtotal, body.tax, body.total,
+        body.discount_type, body.discount_value, body.discount_amount, user,
+        order_type="dine_in", table_id=o.get("table_id"),
+    )
+    await db.open_orders.update_one({"_id": ObjectId(open_order_id)}, {"$set": {
+        "status": "paid", "final_order_id": result["id"],
+        "paid_at": datetime.now(timezone.utc).isoformat()}})
+    if o.get("table_id"):
+        await db.restaurant_tables.update_one({"_id": ObjectId(o["table_id"])}, {"$set": {"status": "available"}})
+    return result
+
+@api_router.post("/open-orders/{open_order_id}/cancel")
+async def cancel_open_order(open_order_id: str, request: Request):
+    """Cancel a dine-in tab that has NO items (customer left before ordering) and
+    free the table — no payment required. Refuses if the tab already has items,
+    which must go through the normal payment workflow instead."""
+    await get_current_user(request)
+    o = await db.open_orders.find_one({"_id": ObjectId(open_order_id)})
+    if not o: raise HTTPException(status_code=404, detail="Open order not found")
+    if o.get("status") != "open":
+        raise HTTPException(status_code=400, detail="Order is not open")
+    if o.get("items"):
+        raise HTTPException(status_code=400, detail="Order has items — settle it via payment instead")
+    await db.open_orders.update_one({"_id": ObjectId(open_order_id)}, {"$set": {
+        "status": "cancelled", "cancelled_at": datetime.now(timezone.utc).isoformat()}})
+    if o.get("table_id"):
+        await db.restaurant_tables.update_one({"_id": ObjectId(o["table_id"])}, {"$set": {"status": "available"}})
+    return {"message": "Order cancelled, table cleared", "table_id": o.get("table_id")}
 
 @api_router.get("/orders/today")
 async def get_today_orders(request: Request):
@@ -6141,6 +6403,20 @@ async def seed_online_data():
                 "updated_at": now_iso,
             })
         logger.info(f"Seeded {len(_starter_areas)} delivery areas")
+    # Seed dine-in tables only if empty (T1-T6 across two sections). Never
+    # overwrites the operator's own floor layout (Admin → Tables / Floor).
+    if await db.restaurant_tables.count_documents({}) == 0:
+        default_tables = [
+            {"name": "T1", "section": "Main Hall", "capacity": 2},
+            {"name": "T2", "section": "Main Hall", "capacity": 4},
+            {"name": "T3", "section": "Main Hall", "capacity": 4},
+            {"name": "T4", "section": "Main Hall", "capacity": 6},
+            {"name": "T5", "section": "Outdoor", "capacity": 4},
+            {"name": "T6", "section": "Outdoor", "capacity": 2},
+        ]
+        for t in default_tables:
+            await db.restaurant_tables.insert_one({**t, "status": "available", "created_at": datetime.now(timezone.utc).isoformat()})
+        logger.info(f"Seeded {len(default_tables)} dine-in tables")
     # Backfill: any pre-existing offer whose code starts with WELCOME or FIRST is treated
     # as one-time-per-customer by default. Without this, the WELCOME100 code in production
     # could be reused indefinitely by the same customer — straight revenue leak.

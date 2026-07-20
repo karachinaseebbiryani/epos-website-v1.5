@@ -55,6 +55,7 @@ import AdminLayout from "./components/AdminLayout";
 
 // --- Operational POS pages (preserved from OLD system, lazy-loaded) ---
 const POSPage = lazy(() => import("./pages/legacy/POSPage"));
+const TablesPage = lazy(() => import("./pages/legacy/TablesPage"));
 const ClassicDashboardPage = lazy(() => import("./pages/legacy/DashboardPage"));
 const MenuManagement = lazy(() => import("./pages/legacy/MenuManagement"));
 const InventoryPage = lazy(() => import("./pages/legacy/InventoryPage"));
@@ -167,6 +168,7 @@ function App() {
 
                   {/* ----- POS Operations (preserved from OLD) ----- */}
                   <Route path="/admin/pos"               element={<Op perm="pos"><POSPage /></Op>} />
+                  <Route path="/admin/tables"            element={<Op perm="pos"><TablesPage /></Op>} />
                   <Route path="/admin/dashboard-classic" element={<Op perm="dashboard"><ClassicDashboardPage /></Op>} />
                   <Route path="/admin/menu-mgmt"         element={<Op perm="menu"><MenuManagement /></Op>} />
                   <Route path="/admin/inventory"         element={<Op perm="inventory"><InventoryPage /></Op>} />
