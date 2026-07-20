@@ -127,9 +127,14 @@ class TestSubscribeUnsubscribe:
         )
         assert r.status_code in (200, 204, 404), r.text
 
-    def test_subscribe_requires_auth(self):
-        # Confirm endpoint correctly gates anonymous calls — this matches the 401 the
-        # frontend now expects when a user hasn't signed in yet.
+    def test_subscribe_allows_guests(self):
+        # Policy change (2026-07-19, visitor opt-in banner): anonymous browsers CAN
+        # subscribe now. Guest subs are stored without a customer_id — they receive
+        # only "Send to all" marketing broadcasts, never order-status pushes, and
+        # upgrade automatically (same endpoint upsert) when the visitor signs in.
         payload = {"endpoint": "https://fcm.googleapis.com/fcm/send/TEST_anon", "keys": self._fake_keys()}
         r = requests.post(f"{BASE_URL}/api/push/subscribe", json=payload, timeout=10)
-        assert r.status_code in (401, 403)
+        assert r.status_code in (200, 201), f"guest subscribe should succeed: {r.status_code} {r.text[:200]}"
+        # Cleanup — guest can also unsubscribe without auth.
+        requests.post(f"{BASE_URL}/api/push/unsubscribe",
+                      json={"endpoint": payload["endpoint"]}, timeout=10)

@@ -1,12 +1,25 @@
+import { useEffect } from "react";
 import { Clock, AlertTriangle } from "lucide-react";
 import useBusinessHours from "../hooks/useBusinessHours";
+import { syncOpeningHoursSchema } from "../lib/seo";
 
 /**
  * Banner shown across the customer site (and inline on checkout) when the
  * restaurant is currently closed. Reads from /api/public/business-hours.
+ *
+ * Side duty: this is the one component that polls business hours on every
+ * public page, so it also keeps the Restaurant JSON-LD's opening hours in
+ * sync with the admin-managed schedule (see syncOpeningHoursSchema).
  */
 export default function ClosedBanner({ inline = false }) {
     const bh = useBusinessHours();
+
+    // Keep SEO schema hours in lock-step with the live schedule — runs even
+    // while the restaurant is open (when the banner itself renders nothing).
+    useEffect(() => {
+        if (bh?.weekly_schedule) syncOpeningHoursSchema(bh.weekly_schedule);
+    }, [bh]);
+
     if (!bh || !bh.enabled || bh.is_open) return null;
 
     const todayOpenAt = bh?.today?.open;

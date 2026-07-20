@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import api, { resolveImageUrl } from "../lib/api";
 import { fetchCached, getCached } from "../lib/menuCache";
@@ -32,6 +32,47 @@ export default function HomePage() {
         api.get("/offers").then((r) => setOffers(r.data)).catch(() => { });
         api.get("/reviews").then((r) => setReviews(r.data)).catch(() => { });
     }, []);
+
+    // Aggregate of ALL fetched reviews — one source of truth shared by the
+    // JSON-LD below AND the visible "based on N reviews" line in the reviews
+    // section. Google's review-snippet policy requires the marked-up rating to
+    // be visible on the page, so the two must never diverge.
+    const ratingAgg = useMemo(() => {
+        const ratings = reviews.map((r) => r.rating).filter((n) => typeof n === "number");
+        if (ratings.length < 3) return null;
+        const avg = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+        return { value: Math.round(avg * 10) / 10, count: ratings.length };
+    }, [reviews]);
+
+    // AggregateRating JSON-LD — the ⭐ stars next to us in Google results.
+    // Computed from the REAL reviews rendered in the section below (Google's
+    // policy: the rating must match review content visible on the page), and
+    // only emitted once there are enough reviews to be meaningful. The name/url
+    // match the static Restaurant schema in index.html so Google merges this
+    // into the same entity instead of seeing a duplicate restaurant.
+    useEffect(() => {
+        if (!ratingAgg) return;
+        const tag = document.createElement("script");
+        tag.type = "application/ld+json";
+        tag.setAttribute("data-rating-jsonld", "1");
+        tag.textContent = JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "Restaurant",
+            "name": "Karachi Naseeb Biryani and Murg Pulao",
+            "url": "https://www.karachinaseebbiryani.com/",
+            "aggregateRating": {
+                "@type": "AggregateRating",
+                "ratingValue": ratingAgg.value,
+                "reviewCount": ratingAgg.count,
+                "bestRating": 5,
+                "worstRating": 1,
+            },
+        });
+        document.head.appendChild(tag);
+        return () => {
+            document.querySelectorAll('script[data-rating-jsonld="1"]').forEach((n) => n.remove());
+        };
+    }, [ratingAgg]);
 
     const popular = menuData.items.filter((i) => i.is_popular).slice(0, 6);
 
@@ -178,6 +219,15 @@ export default function HomePage() {
                 <div className="text-center mb-12">
                     <span className="text-brand-red text-xs uppercase tracking-[0.2em] font-bold">Customer Love</span>
                     <h2 className="font-display font-black text-3xl md:text-5xl text-brand-ink mt-2">What Our Guests Say</h2>
+                    {/* Visible aggregate — must stay in sync with the AggregateRating
+                        JSON-LD (same ratingAgg source). Google requires marked-up
+                        ratings to be shown on the page, not just in the head. */}
+                    {ratingAgg && (
+                        <p className="mt-3 inline-flex items-center gap-1.5 text-brand-ink font-semibold" data-testid="reviews-aggregate">
+                            <Star className="w-5 h-5 fill-brand-yellow text-brand-yellow" />
+                            {ratingAgg.value} / 5 &middot; based on {ratingAgg.count} reviews
+                        </p>
+                    )}
                 </div>
                 {reviews.length === 0 ? (
                     <p className="text-center text-neutral-500">Be the first to leave a review after your order!</p>

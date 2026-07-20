@@ -7,6 +7,7 @@ import {
   HelpCircle, CreditCard,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
+import PosInstall from "./PosInstall";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
 
 // Operational POS pages preserved from the old fully-operational system.
@@ -112,6 +113,9 @@ export default function AdminLayout() {
             </>
           )}
         </nav>
+
+        {/* One-click desktop POS install + closed-browser order alerts */}
+        <PosInstall />
 
         <button
           onClick={logout}

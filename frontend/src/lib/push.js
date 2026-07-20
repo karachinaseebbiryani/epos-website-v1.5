@@ -83,8 +83,11 @@ async function getVapidPublicKey({ forceRefresh = false } = {}) {
  * @param {object} opts
  *   - silent (default true): don't auto-prompt. Pass false to fire the permission
  *     dialog (must be called from a user-gesture handler — e.g. a button click).
+ *   - subscribePath (default "/push/subscribe"): backend endpoint that stores the
+ *     subscription. Admin POS devices pass "/admin/push/subscribe" so the backend
+ *     tags them role:"admin" and targets them with new-order/pending alerts.
  */
-export async function ensurePushSubscription({ silent = true } = {}) {
+export async function ensurePushSubscription({ silent = true, subscribePath = "/push/subscribe" } = {}) {
     if (!(await isPushSupported())) return "unsupported";
     let reg;
     try {
@@ -123,7 +126,7 @@ export async function ensurePushSubscription({ silent = true } = {}) {
                 try { await existing.unsubscribe(); } catch { /* ignore */ }
             } else {
                 const sub = existing.toJSON();
-                await api.post("/push/subscribe", { endpoint: sub.endpoint, keys: sub.keys }).catch(() => {});
+                await api.post(subscribePath, { endpoint: sub.endpoint, keys: sub.keys }).catch(() => {});
                 return "subscribed";
             }
         }
@@ -132,7 +135,7 @@ export async function ensurePushSubscription({ silent = true } = {}) {
             applicationServerKey: urlBase64ToUint8Array(serverPubKey),
         });
         const j = sub.toJSON();
-        await api.post("/push/subscribe", { endpoint: j.endpoint, keys: j.keys });
+        await api.post(subscribePath, { endpoint: j.endpoint, keys: j.keys });
         return "subscribed";
     } catch (e) {
         return "error";

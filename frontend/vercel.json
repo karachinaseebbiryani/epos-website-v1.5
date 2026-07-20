@@ -1,5 +1,8 @@
 {
   "rewrites": [
+    { "source": "/sitemap.xml", "destination": "https://knb-backend.fly.dev/api/sitemap.xml" },
+    { "source": "/robots.txt", "destination": "https://knb-backend.fly.dev/api/robots.txt" },
+    { "source": "/llms.txt", "destination": "https://knb-backend.fly.dev/api/llms.txt" },
     { "source": "/((?!static/).*)", "destination": "/index.html" }
   ]
 }

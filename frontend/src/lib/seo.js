@@ -111,4 +111,55 @@ export function useSeo({ title, description, path = "/", image } = {}) {
   }, [title, description, path, image]);
 }
 
+const DAY_NAMES = {
+  mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday",
+  fri: "Friday", sat: "Saturday", sun: "Sunday",
+};
+
+/**
+ * Sync the static Restaurant JSON-LD's openingHoursSpecification with the
+ * admin-managed weekly schedule (the SAME data that gates online ordering and
+ * feeds llms.txt — single source of truth for business hours).
+ *
+ * index.html ships a static fallback copy of the hours (for non-JS crawlers);
+ * this rewrites it in place as soon as /public/business-hours loads, so
+ * Googlebot (which renders JS) always indexes the live hours. Called from
+ * ClosedBanner because that component already polls the endpoint on every
+ * public page — no extra network request.
+ *
+ * Grouping: days sharing identical open/close collapse into one
+ * OpeningHoursSpecification with a dayOfWeek array (schema.org idiom); closed
+ * days are simply omitted.
+ */
+export function syncOpeningHoursSchema(weeklySchedule) {
+  try {
+    if (!weeklySchedule || typeof weeklySchedule !== "object") return;
+    // Build spec groups from the live schedule.
+    const groups = new Map(); // "open|close" -> [DayName, ...]
+    for (const [key, name] of Object.entries(DAY_NAMES)) {
+      const d = weeklySchedule[key];
+      if (!d || d.closed || !d.open || !d.close) continue;
+      const k = `${d.open}|${d.close}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(name);
+    }
+    if (groups.size === 0) return; // fully closed / malformed — keep static fallback
+    const spec = [...groups.entries()].map(([k, days]) => {
+      const [opens, closes] = k.split("|");
+      return { "@type": "OpeningHoursSpecification", dayOfWeek: days, opens, closes };
+    });
+
+    // Locate the static Restaurant block (the one carrying an address — the
+    // runtime AggregateRating block deliberately has no hours/address).
+    for (const tag of document.querySelectorAll('script[type="application/ld+json"]')) {
+      let data;
+      try { data = JSON.parse(tag.textContent); } catch { continue; }
+      if (data?.["@type"] !== "Restaurant" || !data.address) continue;
+      const next = JSON.stringify({ ...data, openingHoursSpecification: spec });
+      if (tag.textContent !== next) tag.textContent = next; // idempotent
+      return;
+    }
+  } catch { /* schema patching must never break the page */ }
+}
+
 export default useSeo;

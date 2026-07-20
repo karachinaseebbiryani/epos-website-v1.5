@@ -2790,6 +2790,10 @@ async def _do_startup():
         # docstring). Every 2 min, only recent initiated SafePay txns.
         scheduler.add_job(_reconcile_safepay_payments, "interval", minutes=2,
                           id="reconcile_safepay", replace_existing=True)
+        # Closed-browser POS alert: while any order sits pending (not accepted),
+        # re-push admin devices every 2 min. No-op if no admin subscribed.
+        scheduler.add_job(_remind_admins_pending_orders, "interval", minutes=2,
+                          id="remind_admins_pending", replace_existing=True)
     except Exception as e:
         logger.error(f"Scheduler start failed: {e}")
     # Start tunnel watcher in background
@@ -4149,6 +4153,14 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         asyncio.create_task(send_whatsapp(order.phone, msg))
     except Exception as e:
         logger.warning(f"WhatsApp confirmation failed: {e}")
+    # Admin push alert (fire-and-forget) — only when the order enters the staff
+    # queue immediately (COD etc.). Gateway orders start awaiting_payment and
+    # alert from _release_online_order once the payment confirms instead.
+    if initial_status == "pending":
+        try:
+            asyncio.create_task(_notify_admins_new_order(doc))
+        except Exception as e:
+            logger.warning(f"Admin new-order push failed: {e}")
     return serialized
 
 @api_router.get("/online-orders/me")
@@ -4692,14 +4704,52 @@ async def _notify_customer_order_status(order_doc: dict, new_status: str):
         logger.warning(f"_notify_customer_order_status FCM failed: {e}")
 
 
-@api_router.post("/push/subscribe")
-async def push_subscribe(body: PushSubscriptionIn, request: Request):
-    """Register the caller's browser push subscription so we can notify them when their
-    order status changes. Requires a signed-in customer — guests don't get push (we have
-    no stable identity for them across devices)."""
-    cust = await get_optional_customer(request)
-    if not cust:
-        raise HTTPException(status_code=401, detail="Sign in to enable order notifications.")
+async def _notify_admins_new_order(order_doc: dict) -> None:
+    """Web-push every admin device that opted in (role:"admin" subscriptions —
+    see /admin/push/subscribe) when an order enters the staff queue. This is the
+    closed-browser counterpart of the in-page GlobalOrderAlert ring: the OS shows
+    the notification even when no admin tab is open (browser background process
+    permitting). Best-effort and fire-and-forget — never blocks order creation."""
+    try:
+        receipt = str(order_doc.get("_id", ""))[-6:].upper()
+        total = order_doc.get("total_price")
+        body = f"Order #{receipt}" + (f" — Rs {total:g}" if total else "") + ". Tap to open the POS queue."
+        subs = await db.push_subscriptions.find({"role": "admin"}).to_list(50)
+        for s in subs:
+            await _send_web_push(s, "🔔 New online order", body, "/admin/orders")
+    except Exception as e:
+        logger.warning(f"_notify_admins_new_order failed: {e}")
+
+
+async def _remind_admins_pending_orders() -> None:
+    """Scheduler job (every 2 min): re-ring admin devices via web push while any
+    order is still pending (not yet accepted). Mimics the POS ringing loop for
+    the closed-browser case; goes quiet the moment the queue is empty. No-op
+    when nobody has opted in, so it costs nothing on default deploys."""
+    try:
+        count = await db.online_orders.count_documents({"status": "pending"})
+        if not count:
+            return
+        subs = await db.push_subscriptions.find({"role": "admin"}).to_list(50)
+        if not subs:
+            return
+        plural = "s" if count != 1 else ""
+        body = f"{count} pending order{plural} waiting to be accepted."
+        for s in subs:
+            await _send_web_push(s, "⏰ Orders waiting", body, "/admin/orders")
+    except Exception as e:
+        logger.warning(f"_remind_admins_pending_orders failed: {e}")
+
+
+@api_router.post("/admin/push/subscribe")
+async def admin_push_subscribe(body: PushSubscriptionIn, request: Request):
+    """Register a staff browser for new-order push alerts. Same collection and
+    upsert semantics as the customer /push/subscribe, plus role:"admin" so the
+    new-order/pending-reminder fan-outs can target staff devices only. Gated on
+    the online_orders permission — the same one that guards the orders queue."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to receive order alerts.")
     if not body.endpoint or not body.keys.get("p256dh") or not body.keys.get("auth"):
         raise HTTPException(status_code=400, detail="Invalid subscription payload.")
     now = datetime.now(timezone.utc).isoformat()
@@ -4708,9 +4758,39 @@ async def push_subscribe(body: PushSubscriptionIn, request: Request):
         {"$set": {
             "endpoint": body.endpoint,
             "keys": body.keys,
-            "customer_id": str(cust["_id"]),
+            "role": "admin",
+            "admin_user_id": str(user["_id"]),
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api_router.post("/push/subscribe")
+async def push_subscribe(body: PushSubscriptionIn, request: Request):
+    """Register the caller's browser push subscription. Signed-in customers get
+    order-status pushes (keyed by customer_id). Guests are ALSO accepted (since
+    the visitor opt-in banner): stored without a customer_id, they receive only
+    the admin "Send to all" marketing broadcasts. If a guest later signs in, the
+    silent re-subscribe on sign-in upserts the same endpoint with their
+    customer_id — the subscription upgrades automatically. Guests re-subscribing
+    never SET customer_id to null, so a signed-out revisit can't unlink an
+    endpoint that already belongs to a customer."""
+    cust = await get_optional_customer(request)
+    if not body.endpoint or not body.keys.get("p256dh") or not body.keys.get("auth"):
+        raise HTTPException(status_code=400, detail="Invalid subscription payload.")
+    now = datetime.now(timezone.utc).isoformat()
+    fields = {
+        "endpoint": body.endpoint,
+        "keys": body.keys,
+        "updated_at": now,
+    }
+    if cust:
+        fields["customer_id"] = str(cust["_id"])
+    await db.push_subscriptions.update_one(
+        {"endpoint": body.endpoint},
+        {"$set": fields, "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
     return {"ok": True}
@@ -5798,6 +5878,130 @@ async def robots_txt(request: Request):
     return Response(content=body, media_type="text/plain",
                     headers={"Cache-Control": "public, max-age=3600"})
 
+
+@api_router.get("/llms.txt", response_class=Response)
+async def llms_txt(request: Request):
+    """llms.txt — a Markdown briefing for AI assistants (ChatGPT, Perplexity,
+    Claude, Gemini) following the https://llmstxt.org convention. When someone
+    nearby asks an AI 'best biryani delivery in Lahore', this file gives the
+    model clean, current facts (menu + prices, delivery areas, hours, contact)
+    to recommend and cite us. Generated from live DB data so it never goes
+    stale; served at the site root via a Vercel rewrite (see vercel.json)."""
+    base = _abs_origin(request)
+    s = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+    name = s.get("restaurant_name") or DEFAULT_SETTINGS["restaurant_name"]
+    address = s.get("restaurant_address") or DEFAULT_SETTINGS["restaurant_address"]
+    phone = s.get("restaurant_phone") or DEFAULT_SETTINGS["restaurant_phone"]
+
+    # Live opening hours from the admin-managed weekly schedule (the same data
+    # that actually gates online ordering) — never a hardcoded copy that drifts.
+    hours_line = "See website for opening hours"
+    try:
+        osett = await get_online_settings_doc()
+        sched = osett.get("weekly_schedule") or {}
+        spans = {}
+        for day in DAY_KEYS:
+            d = sched.get(day) or {}
+            key = "Closed" if d.get("closed") else f"{d.get('open', '?')}–{d.get('close', '?')}"
+            spans.setdefault(key, []).append(day.capitalize())
+        if len(spans) == 1:
+            only = next(iter(spans))
+            hours_line = f"{only}, every day" if only != "Closed" else "Temporarily closed"
+        else:
+            hours_line = "; ".join(f"{'/'.join(days)}: {span}" for span, days in spans.items())
+        if "?" in hours_line:  # malformed/missing schedule — don't publish garbage
+            hours_line = "See website for opening hours"
+    except Exception:
+        pass
+
+    lines = [
+        f"# {name.title()}",
+        "",
+        f"> Authentic Karachi-style biryani, murgh pulao, BBQ and karahi in Lahore, "
+        f"Pakistan — order online for delivery or pickup at {base}/menu. "
+        "Cash on Delivery, live order tracking, loyalty rewards.",
+        "",
+        f"- Address: {address}",
+        f"- Phone / WhatsApp: {phone}",
+        f"- Hours (Pakistan time): {hours_line}",
+        f"- Order online: {base}/menu",
+        "- Payment: Cash on Delivery, cards and Pakistani wallets (SafePay), bank transfer",
+        "",
+    ]
+
+    # Real customer rating — only stated when there are enough reviews to be
+    # meaningful (mirrors the aggregateRating rule for schema.org markup).
+    try:
+        revs = await db.reviews.find({}, {"rating": 1}).to_list(1000)
+        ratings = [r.get("rating") for r in revs if isinstance(r.get("rating"), (int, float))]
+        if len(ratings) >= 3:
+            avg = sum(ratings) / len(ratings)
+            lines += [f"- Customer rating: {avg:.1f}/5 from {len(ratings)} reviews", ""]
+    except Exception:
+        pass
+
+    # Menu snapshot: category -> a few dishes with PKR prices.
+    try:
+        cats = await db.categories.find({}).sort("sort_order", 1).to_list(50)
+        items = await db.menu_items.find({}).sort("sort_order", 1).to_list(500)
+        by_cat: dict = {}
+        for i in items:
+            by_cat.setdefault(str(i.get("category_id") or i.get("category") or ""), []).append(i)
+        lines += ["## Menu highlights", ""]
+        for c in cats[:12]:
+            cat_items = by_cat.get(str(c["_id"]), []) or by_cat.get(c.get("name", ""), [])
+            if not cat_items:
+                continue
+            dishes = ", ".join(
+                f"{i.get('name')} (Rs {int(float(i.get('price') or 0))})"
+                for i in cat_items[:5]
+                if i.get("name") and float(i.get("price") or 0) > 0
+            )
+            if not dishes:
+                continue
+            lines.append(f"- **{c.get('name', 'Menu')}**: {dishes}")
+        lines += ["", f"Full menu with photos and live prices: {base}/menu", ""]
+    except Exception:
+        pass
+
+    # Delivery areas — the strongest "near me" signal for AI answers.
+    try:
+        areas = await db.delivery_areas.find({"enabled": True}).sort("sort_order", 1).to_list(100)
+        area_names = [a.get("name") for a in areas if a.get("name")]
+        if area_names:
+            lines += ["## Delivery areas in Lahore", "",
+                      ", ".join(area_names), "",
+                      f"Details: {base}/delivery", ""]
+    except Exception:
+        pass
+
+    # Top FAQs — direct answers AI assistants can quote.
+    try:
+        faqs = await db.faqs.find({"enabled": True}).sort("sort_order", 1).to_list(10)
+        if faqs:
+            lines += ["## FAQ", ""]
+            for f in faqs:
+                q = (f.get("question") or "").strip()
+                a = " ".join((f.get("answer") or "").split())[:300]
+                if q and a:
+                    lines.append(f"- **{q}** {a}")
+            lines += ["", f"More: {base}/faq", ""]
+    except Exception:
+        pass
+
+    lines += [
+        "## Key pages",
+        "",
+        f"- [Menu & online ordering]({base}/menu)",
+        f"- [Current offers & deals]({base}/offers)",
+        f"- [Delivery areas]({base}/delivery)",
+        f"- [About us]({base}/about)",
+        f"- [Contact]({base}/contact)",
+        "",
+    ]
+    return Response(content="\n".join(lines), media_type="text/plain; charset=utf-8",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
 # --- Event Bookings ---
 @api_router.post("/event-bookings")
 async def create_event_booking(req: EventBookingCreate, request: Request):
@@ -6276,6 +6480,13 @@ async def _release_online_order(order_id) -> None:
         )
         if res.modified_count:
             logger.info(f"Order {order_id} released to restaurant queue after payment")
+            # Gateway-paid order just entered the staff queue — ring admin
+            # devices via push (same alert COD orders get at creation).
+            try:
+                released = await db.online_orders.find_one({"_id": oid}, {"total_price": 1})
+                asyncio.create_task(_notify_admins_new_order(released or {"_id": oid}))
+            except Exception as e:
+                logger.warning(f"Admin release push failed: {e}")
     except Exception as e:
         logger.error(f"Failed to release order {order_id}: {e}")
 

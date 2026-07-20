@@ -72,6 +72,42 @@ Faisal Town, Iqbal Town, Township, DHA…) with optional notes like "Free delive
   Town, DHA) auto-seed on your **next backend deploy** (only if the list is empty — it never
   overwrites your edits). Edit/reorder/remove them in **Admin → Delivery Areas**.
 
+## ✅ Also done (session 4 — 2026-07-19)
+
+- **Dynamic sitemap + robots.txt finally LIVE** — the backend has always generated a fresh
+  sitemap (menu categories, offers, FAQs auto-included) at `/api/sitemap.xml`, but Vercel
+  was serving a stale 5-URL static file because the rewrite was never added. Fixed:
+  `frontend/vercel.json` now rewrites `/sitemap.xml`, `/robots.txt` and `/llms.txt` to the
+  Fly backend, and the shadowing static files in `frontend/public/` were deleted.
+- **`llms.txt` (NEW — AI search)** — `/api/llms.txt` in `backend/server.py` generates a live
+  Markdown briefing for AI assistants (ChatGPT, Perplexity, Claude, Gemini): address, phone,
+  hours, real customer rating, menu highlights with prices, delivery areas, top FAQs, key
+  links. This is what gets you recommended when someone asks an AI "best biryani delivery
+  near me in Lahore". Auto-updates from the DB — keep menu/areas/FAQs current in admin.
+- **⭐ aggregateRating schema** — HomePage now emits AggregateRating JSON-LD computed from
+  the REAL reviews displayed on the page (only when ≥3 reviews; matches Google's policy that
+  the rating must reflect visible review content). Merges into the existing Restaurant
+  entity via matching name/url.
+- **Geo meta tags** — `geo.region` (PK-PB), `geo.placename` (Lahore), `geo.position`/ICBM
+  coordinates added to `index.html` for Bing/legacy/directory crawlers.
+- **Single source of truth for hours** — the Restaurant JSON-LD's `openingHoursSpecification`
+  is now rewritten at runtime from the admin-managed weekly schedule (`syncOpeningHoursSchema`
+  in `src/lib/seo.js`, driven by ClosedBanner's existing `/public/business-hours` poll — no
+  extra request). llms.txt reads the same schedule server-side. Changing hours in
+  **Admin → Settings** now updates ordering gates, the closed banner, JSON-LD and llms.txt
+  together. The static hours in `index.html` remain only as a non-JS-crawler fallback —
+  keep them roughly in sync if you permanently change your schedule.
+
+**Deploy required:** backend (Fly) for llms.txt + frontend (Vercel) for rewrites/schema.
+**Verify after deploy:** `https://www.karachinaseebbiryani.com/sitemap.xml` should list menu
+categories; `/llms.txt` should show your live menu; test the homepage in Google's Rich
+Results Test to confirm the star rating is picked up.
+
+⚠️ If you later activate the social pre-render below, MERGE its rewrite into the new
+`vercel.json` (keep the sitemap/robots/llms.txt lines above the catch-all) — don't replace it.
+
+---
+
 ## 🔲 Pre-rendering — needs YOU to deploy + test (not auto-applied)
 
 react-snap does **not** work on React 19, so I did not use it. Instead I added a
