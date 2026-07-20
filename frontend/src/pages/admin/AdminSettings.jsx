@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import api, { formatApiError } from "../../lib/api";
 import { toast } from "sonner";
 import { Save, MapPin, Truck, CreditCard, Building2, Globe, Clock, FileText } from "lucide-react";
+import PosDeviceSetup from "../../components/PosDeviceSetup";
 
 export default function AdminSettings() {
     const [s, setS] = useState(null);
@@ -39,6 +40,12 @@ export default function AdminSettings() {
         <div data-testid="admin-settings-page">
             <h1 className="font-display font-black text-3xl md:text-4xl text-brand-ink mb-2">Online Settings</h1>
             <p className="text-neutral-500 mb-8">Configure restaurant location, delivery zones, and payment options</p>
+
+            {/* This device: POS desktop app install + order-alert status/enable.
+                Deliberately outside the settings <form> — device-level, not saved config. */}
+            <div className="max-w-3xl mb-6">
+                <PosDeviceSetup showAlerts={true} />
+            </div>
 
             <form onSubmit={save} className="space-y-6 max-w-3xl">
                 {/* Restaurant Info */}

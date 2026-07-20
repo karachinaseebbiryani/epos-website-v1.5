@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { Eye, EyeOff, Lock } from "lucide-react";
 import { toast } from "sonner";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
+import PosDeviceSetup from "../components/PosDeviceSetup";
 
 /**
  * UnifiedLoginPage — single staff/admin sign-in.
@@ -172,6 +173,14 @@ export default function UnifiedLoginPage() {
         <p className="text-center text-xs text-neutral-400 mt-1">
           Customer ordering? <a href="/login" className="text-brand-red font-semibold">Customer login →</a>
         </p>
+
+        {/* POS desktop install — offered BEFORE login on purpose: installing
+            grants zero access (the app opens right back on this sign-in screen),
+            and staff setting up a new till shouldn't need to hunt for it.
+            Alert enabling stays post-login (it needs an authenticated session). */}
+        <div className="mt-6">
+          <PosDeviceSetup showAlerts={false} />
+        </div>
       </div>
     </div>
   );
