@@ -142,7 +142,11 @@ export default function AdminNotifications() {
 
             {/* Subscriber stats */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
-                <StatCard icon={<Users className="w-5 h-5" />} label="Subscribers" value={loading ? "—" : stats.subscriber_count} testid="admin-notif-subscribers" />
+                <StatCard icon={<Users className="w-5 h-5" />} label="Subscribers"
+                    value={loading ? "—" : (stats.web_subscribers != null
+                        ? `${stats.web_subscribers} web · ${stats.app_devices || 0} app`
+                        : stats.subscriber_count)}
+                    testid="admin-notif-subscribers" />
                 <StatCard icon={<Send className="w-5 h-5" />} label="Last sent" value={stats.last_broadcast ? `${stats.last_broadcast.sent} of ${stats.last_broadcast.audience_size}` : "Never"} testid="admin-notif-last-sent" />
                 <StatCard icon={<History className="w-5 h-5" />} label="Broadcasts logged" value={history.length} testid="admin-notif-history-count" />
             </div>

@@ -66,7 +66,7 @@ class OrderTrackingScreen extends ConsumerWidget {
               ),
             ),
           ),
-          data: (order) => _TrackingBody(order: order),
+          data: (order) => _TrackingBody(order: order, trackToken: trackToken),
         ),
       ),
     );
@@ -74,8 +74,9 @@ class OrderTrackingScreen extends ConsumerWidget {
 }
 
 class _TrackingBody extends StatelessWidget {
-  const _TrackingBody({required this.order});
+  const _TrackingBody({required this.order, required this.trackToken});
   final Order order;
+  final String trackToken;
 
   @override
   Widget build(BuildContext context) {
@@ -161,6 +162,8 @@ class _TrackingBody extends StatelessWidget {
           _row('Payment status', prettyPaymentStatus(order.paymentStatus)),
         if (order.diamondsEarned > 0)
           _row('Diamonds earned', '${order.diamondsEarned} 💎'),
+        const SizedBox(height: 16),
+        _RefundSection(order: order, trackToken: trackToken),
         if (order.status == 'delivered') ...[
           const SizedBox(height: 24),
           _ReviewSection(orderId: order.id),
@@ -181,6 +184,137 @@ class _TrackingBody extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// Refunds — request (paid, non-cash orders) and lifecycle display. Mirrors the
+/// website's tracking page: requested → approved (2-3 business days back to the
+/// payment method) → refunded, or rejected with the restaurant's note.
+class _RefundSection extends ConsumerStatefulWidget {
+  const _RefundSection({required this.order, required this.trackToken});
+  final Order order;
+  final String trackToken;
+
+  @override
+  ConsumerState<_RefundSection> createState() => _RefundSectionState();
+}
+
+class _RefundSectionState extends ConsumerState<_RefundSection> {
+  bool _busy = false;
+
+  Future<void> _request() async {
+    final controller = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Request a refund'),
+        content: TextField(
+          controller: controller,
+          maxLines: 3,
+          maxLength: 500,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'e.g. Order arrived cold / items were missing…',
+            helperText:
+                'Approved refunds return to your payment method in 2-3 business days.',
+            helperMaxLines: 2,
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Send request')),
+        ],
+      ),
+    );
+    if (reason == null) return;
+    if (reason.length < 5) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Please describe the problem in a few words.')));
+      }
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await ref.read(orderRepositoryProvider).requestRefund(
+          orderId: widget.order.id,
+          reason: reason,
+          trackToken: widget.trackToken);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Refund request sent — we'll update you here.")));
+      // Force an immediate re-read so the status card appears without waiting
+      // for the next poll (or at all, if the order is terminal).
+      ref.invalidate(orderTrackingStreamProvider(
+          '${widget.order.id}|${widget.trackToken}'));
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not send the request.')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rr = widget.order.refundRequest;
+    if (rr != null) {
+      final (icon, title, body) = switch (rr.status) {
+        'requested' => (
+            Icons.hourglass_top,
+            'Refund requested',
+            "We're reviewing your request — you'll get an update here and by notification.",
+          ),
+        'approved' => (
+            Icons.thumb_up_alt_outlined,
+            'Refund approved',
+            'Rs ${rr.amount.toStringAsFixed(0)} will be returned to your payment method within 2-3 business days. Bank statements can take a few extra days to show it.',
+          ),
+        'refunded' => (
+            Icons.check_circle_outline,
+            'Refund completed',
+            'Rs ${rr.amount.toStringAsFixed(0)} was sent back to your payment method. It may take a few days to appear on your statement.',
+          ),
+        'rejected' => (
+            Icons.cancel_outlined,
+            'Refund request declined',
+            rr.adminNote.isNotEmpty
+                ? 'Reason: ${rr.adminNote}. Please call us if you would like to discuss.'
+                : 'Please call us if you would like to discuss this.',
+          ),
+        _ => (Icons.info_outline, 'Refund', rr.status),
+      };
+      return Card(
+        child: ListTile(
+          leading: Icon(icon),
+          title: Text(title),
+          subtitle: Text(body),
+          isThreeLine: true,
+        ),
+      );
+    }
+    final eligible = widget.order.paymentStatus == 'paid' &&
+        !const {'cod', 'pay_at_restaurant'}
+            .contains(widget.order.paymentMethod);
+    if (!eligible) return const SizedBox.shrink();
+    return OutlinedButton.icon(
+      onPressed: _busy ? null : _request,
+      icon: _busy
+          ? const SizedBox(
+              width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+          : const Icon(Icons.currency_exchange),
+      label: const Text('Problem with this order? Request a refund'),
+    );
+  }
 }
 
 /// Small "live" pill shown while the tracker is actively polling, mirroring the

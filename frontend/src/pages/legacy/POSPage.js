@@ -16,12 +16,26 @@ import VoiceAssistantModal from "../../components/legacy/VoiceAssistantModal";
 import { printVendorTickets } from "../../utils/vendorTicketPrint";
 import { printKitchenTicket } from "../../utils/kitchenTicketPrint";
 
-// A POS cart line is keyed by item id (+ removals when present) so custom lines
-// tally independently. Ported from Marhaba alongside the dine-in feature.
+// A POS cart line is keyed by item id + chosen size variation + the sorted set of
+// removed ingredients, so "Biryani Large (no onion)" and a plain "Biryani Regular"
+// are separate lines that tally independently. Ported from Marhaba.
 const posLineKey = (c) => {
+  const varPart = c.variation_name ? `::${c.variation_name}` : "";
   const remPart = (c.removed_ingredients && c.removed_ingredients.length) ? `::-${[...c.removed_ingredients].sort().join("|")}` : "";
-  return `${c.item_id}${remPart}`;
+  return `${c.item_id}${varPart}${remPart}`;
 };
+
+// KNB stores ingredients as {id, name, removable} objects (richer than Marhaba's
+// plain string list) — the customise dialog only offers the removable ones.
+const removableIngredientNames = (item) =>
+  (Array.isArray(item?.ingredients) ? item.ingredients : [])
+    .filter((ing) => ing && ing.name && ing.removable !== false)
+    .map((ing) => ing.name);
+
+// Variations are offered only when the item has them AND they're active (the
+// admin can pause variations per item without deleting them).
+const activeVariations = (item) =>
+  (item?.variations_active !== false && Array.isArray(item?.variations)) ? item.variations : [];
 
 // Stable per-line id used in dine-in mode so a "sent" line and a fresh "new" line
 // of the same dish can coexist (and be updated/removed independently). In plain
@@ -96,6 +110,11 @@ export default function POSPage() {
   const [newPrice, setNewPrice] = useState("");
   const [voiceOpen, setVoiceOpen] = useState(false);
 
+  // Customise dialog: pick a size variation and/or remove ingredients (allergy/preference).
+  const [customiseItem, setCustomiseItem] = useState(null); // the menu item being customised
+  const [customiseRemoved, setCustomiseRemoved] = useState([]); // ingredient names to leave out
+  const [customiseVariation, setCustomiseVariation] = useState(null); // chosen {name, price} or null
+
   // --- Dine-in table mode ---------------------------------------------------
   // When the POS is opened from the Tables screen with ?openOrder=<id>&table=<name>
   // it binds to that table's OPEN order: items load from the server, adds persist
@@ -145,6 +164,8 @@ export default function POSPage() {
         const loaded = (data.items || []).map((it) => ({
           item_id: it.item_id,
           name: it.name,
+          base_name: it.name,
+          variation_name: null,
           price: Number(it.price),
           original_price: Number(it.original_price != null ? it.original_price : it.price),
           quantity: Number(it.quantity),
@@ -204,24 +225,47 @@ export default function POSPage() {
   // Used only by category tabs (active state) – tiny use, OK to keep inline
   const getTextColor = luminanceTextColor;
 
-  const addToCart = useCallback((item) => {
+  // Add an item to the cart with an optional size variation and set of removed
+  // ingredients. Lines with a different size or removals are tracked separately.
+  const commitToCart = useCallback((item, removed = [], variation = null) => {
     if (item.stock <= 0) { toast.error(`${item.name} is out of stock!`); return; }
+    const removals = Array.isArray(removed) ? removed.filter(Boolean) : [];
+    const variation_name = variation?.name || null;
+    const unitPrice = variation ? Number(variation.price) : Number(item.price);
+    const key = posLineKey({ item_id: item.id, variation_name, removed_ingredients: removals });
     setCart((prev) => {
       // Only merge into a line that hasn't been sent to the kitchen yet. In dine-in
       // mode a "sent" line is frozen, so tapping the dish again starts a fresh "new"
       // line (which the Send New button can then send). In quick-sale mode no line
       // is ever "sent", so this matches the previous merge behaviour exactly.
-      const existing = prev.find((c) => c.item_id === item.id && (c.kitchen_status || "new") === "new");
+      const existing = prev.find((c) => posLineKey(c) === key && (c.kitchen_status || "new") === "new");
       if (existing) {
         if (existing.quantity >= item.stock) { toast.error(`Only ${item.stock} in stock`); return prev; }
         return prev.map((c) => c === existing ? { ...c, quantity: c.quantity + 1 } : c);
       }
       if (item.stock <= item.low_stock_threshold) toast.warning(`Low stock: ${item.name} (${item.stock} left)`);
-      const line = { item_id: item.id, name: item.name, price: item.price, original_price: item.price, quantity: 1 };
+      let name = variation_name ? `${item.name} (${variation_name})` : item.name;
+      if (removals.length) name += ` (no ${removals.join(", no ")})`;
+      const line = { item_id: item.id, name, base_name: item.name, variation_name, price: unitPrice, original_price: unitPrice, quantity: 1, removed_ingredients: removals };
       if (isTableMode) { line.uid = makeUid(); line.kitchen_status = "new"; }
       return [...prev, line];
     });
   }, [isTableMode]);
+
+  // Tapping a POS tile. If the item has active size variations or removable
+  // ingredients, open the customise dialog first; otherwise add directly.
+  const addToCart = useCallback((item) => {
+    if (item.stock <= 0) { toast.error(`${item.name} is out of stock!`); return; }
+    const variations = activeVariations(item);
+    const removable = removableIngredientNames(item);
+    if (variations.length > 0 || removable.length > 0) {
+      setCustomiseItem(item);
+      setCustomiseRemoved([]);
+      setCustomiseVariation(variations.length > 0 ? variations[0] : null);
+      return;
+    }
+    commitToCart(item, [], null);
+  }, [commitToCart]);
 
   const updateQty = (key, delta) => { setCart((prev) => prev.map((c) => lineId(c) === key ? { ...c, quantity: c.quantity + delta } : c).filter((c) => c.quantity > 0)); };
   const removeFromCart = (key) => { setCart((prev) => prev.filter((c) => lineId(c) !== key)); };
@@ -503,7 +547,8 @@ export default function POSPage() {
                 <div key={ck} data-testid={`cart-item-${ck}`} className="p-2 rounded-lg border border-[#E5E2DC] bg-[#F9F8F6]">
                   <div className="flex items-center justify-between mb-1">
                     <p className="text-sm font-semibold flex items-center gap-1.5" style={{ color: "#1A1D1A" }}>
-                      {ci.name}
+                      {/* base name + size; removals render on their own red line below */}
+                      {ci.variation_name ? `${ci.base_name || ci.name} (${ci.variation_name})` : (ci.base_name || ci.name)}
                       {isTableMode && ((ci.kitchen_status || "new") === "sent"
                         ? <Badge className="text-[9px] py-0 px-1" style={{ background: "#EAF4EB", color: "#1E3F20", border: "none" }}>sent</Badge>
                         : <Badge className="text-[9px] py-0 px-1" style={{ background: "#FDF2E9", color: "#D97736", border: "none" }}>new</Badge>)}
@@ -638,6 +683,81 @@ export default function POSPage() {
           <DialogFooter>
             <Button data-testid="reset-price-btn" onClick={() => setNewPrice(String(priceEditItem?.original_price || 0))} variant="outline" className="border-[#E5E2DC]">Reset</Button>
             <Button data-testid="apply-price-btn" onClick={applyPriceChange} className="text-white font-semibold" style={{ background: "#1E3F20" }}>Apply</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Customise Dialog — pick a size variation and/or remove ingredients (ported from Marhaba;
+          removable list derives from KNB's {name, removable} ingredient objects) */}
+      <Dialog open={!!customiseItem} onOpenChange={(v) => { if (!v) setCustomiseItem(null); }}>
+        <DialogContent className="border-[#E5E2DC] max-w-sm">
+          <DialogHeader>
+            <DialogTitle style={{ fontFamily: "Manrope" }}>Customise — {customiseItem?.name}</DialogTitle>
+            <DialogDescription>
+              {(activeVariations(customiseItem).length ? "Choose a size" : "")}
+              {(activeVariations(customiseItem).length && removableIngredientNames(customiseItem).length) ? " · " : ""}
+              {(removableIngredientNames(customiseItem).length ? "Anything to leave out?" : "")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 max-h-72 overflow-y-auto">
+            {/* Size variations */}
+            {activeVariations(customiseItem).length > 0 && (
+              <div>
+                <p className="text-xs font-bold mb-2" style={{ color: "#5C5F5C" }}>SIZE</p>
+                <div className="space-y-2">
+                  {activeVariations(customiseItem).map((v) => {
+                    const on = customiseVariation?.name === v.name;
+                    return (
+                      <button key={v.name} type="button" data-testid={`pos-variation-${v.name}`}
+                        onClick={() => setCustomiseVariation(v)}
+                        className={`w-full flex items-center justify-between p-3 rounded-lg border text-left text-sm font-medium transition-colors ${on ? "border-transparent" : "border-[#E5E2DC] hover:bg-[#F9F8F6]"}`}
+                        style={on ? { background: "#EAF4EB", borderColor: "#1E3F20", color: "#1A1D1A" } : { color: "#1A1D1A" }}>
+                        <span className="flex items-center gap-2">
+                          <span className="w-4 h-4 rounded-full border flex items-center justify-center" style={{ borderColor: on ? "#1E3F20" : "#C9C6C0" }}>
+                            {on && <span className="w-2 h-2 rounded-full" style={{ background: "#1E3F20" }} />}
+                          </span>
+                          {v.name}
+                        </span>
+                        <span className="font-bold" style={{ color: "#1E3F20" }}>{currency} {Number(v.price).toFixed(2)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Removable ingredients */}
+            {removableIngredientNames(customiseItem).length > 0 && (
+              <div>
+                <p className="text-xs font-bold mb-2" style={{ color: "#5C5F5C" }}>REMOVE (ALLERGY / PREFERENCE)</p>
+                <div className="space-y-2">
+                  {removableIngredientNames(customiseItem).map((ing) => {
+                    const on = customiseRemoved.includes(ing);
+                    return (
+                      <button key={ing} type="button" data-testid={`pos-remove-${ing}`}
+                        onClick={() => setCustomiseRemoved((prev) => on ? prev.filter((x) => x !== ing) : [...prev, ing])}
+                        className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left text-sm font-medium transition-colors ${on ? "text-white border-transparent" : "border-[#E5E2DC] hover:bg-[#F9F8F6]"}`}
+                        style={on ? { background: "#A63D31" } : { color: "#1A1D1A" }}>
+                        <span className={`w-4 h-4 rounded border flex items-center justify-center ${on ? "bg-white" : ""}`} style={{ borderColor: on ? "white" : "#C9C6C0" }}>
+                          {on && <Check className="w-3 h-3" style={{ color: "#A63D31" }} />}
+                        </span>
+                        {on ? `No ${ing}` : ing}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            {(!activeVariations(customiseItem).length) && (
+              <Button data-testid="pos-customise-plain" variant="outline" className="border-[#E5E2DC]"
+                onClick={() => { const it = customiseItem; setCustomiseItem(null); commitToCart(it, [], null); }}>Add as is</Button>
+            )}
+            <Button data-testid="pos-customise-add" className="text-white font-semibold" style={{ background: "#1E3F20" }}
+              onClick={() => { const it = customiseItem; const rem = customiseRemoved; const varn = customiseVariation; setCustomiseItem(null); commitToCart(it, rem, varn); }}>
+              Add to Order{customiseVariation ? ` · ${currency} ${Number(customiseVariation.price).toFixed(2)}` : ""}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

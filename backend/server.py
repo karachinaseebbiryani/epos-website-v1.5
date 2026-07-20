@@ -904,6 +904,11 @@ async def get_menu_items(request: Request, response: Response):
         "category_id": i["category_id"], "stock": i.get("stock", 0),
         "low_stock_threshold": i.get("low_stock_threshold", 10), "color": i.get("color"),
         "sort_order": i.get("sort_order", 0), "variations": i.get("variations", []),
+        # POS customise dialog (ported from Marhaba): variations are offered only
+        # when active, and removable ingredients drive the "leave out" checklist.
+        # Additive fields — older clients simply ignore them.
+        "variations_active": i.get("variations_active", True),
+        "ingredients": i.get("ingredients", []),
         "discount_type": i.get("discount_type"), "discount_value": i.get("discount_value", 0),
         "is_bestseller": i.get("is_bestseller", False), "is_popular": i.get("is_popular", False),
         "image_url": i.get("image_url", ""), "image_type": i.get("image_type", "url"),
@@ -3556,6 +3561,11 @@ async def delete_customer_account(request: Request):
     # Personal data: gone.
     await db.personal_coupons.delete_many({"customer_id": {"$in": [cid_str, cid_obj]}})
     await db.loyalty_transactions.delete_many({"customer_id": {"$in": [cid_str, cid_obj]}})
+    # Web push subscriptions registered by this customer's browsers. (FCM tokens
+    # live inside the customer doc and vanish with it below; these live in their
+    # own collection and previously survived deletion — the docstring's "push
+    # tokens removed" promise now actually holds for both kinds.)
+    await db.push_subscriptions.delete_many({"customer_id": {"$in": [cid_str, cid_obj]}})
     await db.reviews.update_many(
         {"customer_id": {"$in": [cid_str, cid_obj]}},
         {"$set": {"customer_id": None, "customer_name": "Deleted account"}})
@@ -4910,7 +4920,15 @@ async def _send_fcm_to_customer(customer_id, title: str, body: str, order_id: st
                     token=tok,
                     notification=_fcm_msg.Notification(title=title, body=body),
                     data={"order_id": str(order_id), "type": "order_status"},
-                    android=_fcm_msg.AndroidConfig(priority="high"),
+                    # channel_id must match the high-importance channel the app
+                    # creates in MainActivity — that's what makes the push show
+                    # as a heads-up banner and on the LOCK SCREEN instead of
+                    # landing silently in the tray on FCM's default channel.
+                    android=_fcm_msg.AndroidConfig(
+                        priority="high",
+                        notification=_fcm_msg.AndroidNotification(
+                            channel_id="knb_orders", sound="default"),
+                    ),
                 ))
             except Exception as e:
                 name = type(e).__name__
@@ -4927,6 +4945,69 @@ async def _send_fcm_to_customer(customer_id, title: str, body: str, order_id: st
             )
     except Exception as e:
         logger.warning(f"FCM send failed for customer {customer_id}: {e}")
+
+
+async def _send_fcm_broadcast(title: str, body: str, url: str = "/", customer_ids: Optional[list] = None) -> tuple[int, int]:
+    """Marketing fan-out to APP devices: send an FCM notification to every
+    registered fcm_token (or only those of `customer_ids` when given — used by
+    the admin "Send test"). Returns (sent, failed). Best-effort, prunes dead
+    tokens per customer, and is a silent no-op when FCM isn't configured —
+    mirroring _send_fcm_to_customer so web broadcasts never fail because of it."""
+    if not _init_fcm():
+        return 0, 0
+    try:
+        from firebase_admin import messaging as _fcm_msg
+    except Exception:
+        return 0, 0
+    query: dict = {"fcm_tokens": {"$exists": True, "$ne": []}}
+    if customer_ids is not None:
+        try:
+            query["_id"] = {"$in": [ObjectId(str(c)) for c in customer_ids]}
+        except Exception:
+            return 0, 0
+    custs = await db.customers.find(query, {"fcm_tokens": 1}).to_list(10000)
+    if not custs:
+        return 0, 0
+
+    def _send_for(tokens: list) -> tuple[int, list]:
+        ok, stale = 0, []
+        for tok in tokens:
+            try:
+                _fcm_msg.send(_fcm_msg.Message(
+                    token=tok,
+                    notification=_fcm_msg.Notification(title=title, body=body),
+                    data={"type": "broadcast", "url": str(url or "/")},
+                    # Same high-importance channel as order pushes — heads-up +
+                    # lock-screen visibility (see MainActivity channel setup).
+                    android=_fcm_msg.AndroidConfig(
+                        priority="high",
+                        notification=_fcm_msg.AndroidNotification(
+                            channel_id="knb_orders", sound="default"),
+                    ),
+                ))
+                ok += 1
+            except Exception as e:
+                name = type(e).__name__
+                if "NotRegistered" in name or "InvalidArgument" in name or "Unregistered" in name:
+                    stale.append(tok)
+        return ok, stale
+
+    sent, failed = 0, 0
+    for cust in custs:
+        tokens = list(cust.get("fcm_tokens") or [])
+        if not tokens:
+            continue
+        try:
+            ok, stale = await asyncio.to_thread(_send_for, tokens)
+            sent += ok
+            failed += len(tokens) - ok
+            if stale:
+                await db.customers.update_one(
+                    {"_id": cust["_id"]}, {"$pull": {"fcm_tokens": {"$in": stale}}})
+        except Exception as e:
+            failed += len(tokens)
+            logger.warning(f"FCM broadcast failed for customer {cust.get('_id')}: {e}")
+    return sent, failed
 
 
 async def _notify_customer_order_status(order_doc: dict, new_status: str):
@@ -5029,6 +5110,211 @@ async def admin_push_subscribe(body: PushSubscriptionIn, request: Request):
     return {"ok": True}
 
 
+# =============================================================================
+# CUSTOMER REFUND REQUESTS (paid online orders)
+# =============================================================================
+# Customers request a refund from the tracking page (web + app); staff action it
+# from Admin → Online Orders. Money moves manually in the SafePay dashboard
+# (full/partial refund back to the payment method) — this system tracks the
+# request lifecycle and keeps the customer informed at every step via
+# WhatsApp (works for guests) + email/web-push/FCM (signed-in customers).
+# State lives in an additive `refund_request` subdoc on the order:
+#   {status: requested|approved|refunded|rejected, reason, amount, admin_note,
+#    requested_at, updated_at, refunded_at, acted_by}
+# Order `status`/`payment_status` are intentionally untouched — reports and the
+# tracking timeline keep their existing meaning.
+
+REFUND_WINDOW_DAYS = int(os.environ.get("REFUND_WINDOW_DAYS", "7"))
+
+class RefundRequestIn(BaseModel):
+    reason: str
+
+class RefundActionIn(BaseModel):
+    action: str            # approved | rejected | refunded
+    note: Optional[str] = ""
+
+async def _email_customer(to: str, subject: str, body_text: str) -> None:
+    """Best-effort transactional email using the SMTP settings the daily-report
+    emails already use. Silent no-op when SMTP isn't configured."""
+    if not to:
+        return
+    try:
+        s = await db.settings.find_one({"key": "global"}, {"_id": 0}) or {}
+        host, user_, pw = s.get("smtp_host"), s.get("smtp_user"), s.get("smtp_password")
+        if not (host and user_ and pw):
+            return
+        await asyncio.to_thread(
+            _send_email_sync, host, s.get("smtp_port", 587), user_, pw,
+            s.get("smtp_use_tls", True), s.get("smtp_from") or user_,
+            [to], subject, body_text, None)
+    except Exception as e:
+        logger.warning(f"refund email to {to} failed: {e}")
+
+async def _notify_customer_refund(order: dict, status: str, note: str = "") -> None:
+    """Tell the customer where their refund stands. WhatsApp reaches everyone
+    (guests included); email + web push + FCM additionally reach signed-in
+    customers. Best-effort — never raises."""
+    rr = order.get("refund_request") or {}
+    amount = rr.get("amount") or order.get("total_price", 0)
+    receipt = str(order.get("_id", ""))[-6:].upper()
+    msgs = {
+        "requested": ("Refund request received",
+            f"We received your refund request for order #{receipt} (Rs {amount:g}). "
+            "We'll review it and update you shortly."),
+        "approved": ("Refund approved",
+            f"Good news — your refund of Rs {amount:g} for order #{receipt} is approved and will be "
+            "processed within 2-3 business days back to your original payment method. "
+            "Depending on your bank, it can take a few more days to appear on your statement."),
+        "refunded": ("Refund completed",
+            f"Rs {amount:g} for order #{receipt} has been sent back to your payment method. "
+            "Depending on your bank it may take a few days to appear on your statement."),
+        "rejected": ("Refund request declined",
+            f"Your refund request for order #{receipt} was declined."
+            + (f" Reason: {note}" if note else "")
+            + " Please call us if you'd like to discuss this."),
+    }
+    title, body = msgs.get(status, (None, None))
+    if not title:
+        return
+    try:
+        asyncio.create_task(send_whatsapp(order.get("phone", ""), f"{title}\n{body}"))
+    except Exception:
+        pass
+    cid = order.get("customer_id")
+    if not cid:
+        return
+    url = f"/track/{order.get('_id')}"
+    try:
+        subs = await db.push_subscriptions.find({"customer_id": str(cid)}).to_list(20)
+        for s in subs:
+            await _send_web_push(s, title, body, url)
+    except Exception as e:
+        logger.warning(f"refund web push failed: {e}")
+    try:
+        await _send_fcm_to_customer(cid, title, body, str(order.get("_id")))
+    except Exception as e:
+        logger.warning(f"refund FCM failed: {e}")
+    try:
+        cust = await db.customers.find_one({"_id": ObjectId(str(cid))}, {"email": 1})
+        if cust and cust.get("email"):
+            await _email_customer(cust["email"], f"{title} — order #{receipt}", body)
+    except Exception as e:
+        logger.warning(f"refund email lookup failed: {e}")
+
+async def _push_admins(title: str, body: str, url: str = "/admin/orders") -> None:
+    """Push to staff devices that opted in (role:"admin" subscriptions)."""
+    try:
+        subs = await db.push_subscriptions.find({"role": "admin"}).to_list(50)
+        for s in subs:
+            await _send_web_push(s, title, body, url)
+    except Exception as e:
+        logger.warning(f"_push_admins failed: {e}")
+
+@api_router.post("/online-orders/{order_id}/refund-request")
+async def request_order_refund(order_id: str, body: RefundRequestIn, request: Request, t: Optional[str] = None):
+    """Customer asks for their money back on a PAID online order. Authorization
+    mirrors /track/{order_id}: signed-in owner/admin, or the per-order
+    track_token (guests) — 404 on failure so order ids can't be enumerated."""
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    # --- auth (same 2 layers as public_track_order) ---
+    authorized = False
+    try:
+        user = await get_current_user(request)
+        if user.get("role") == "admin":
+            authorized = True
+    except HTTPException:
+        pass
+    if not authorized:
+        try:
+            cust = await get_current_customer(request)
+            if cust and o.get("customer_id") and str(o.get("customer_id")) == str(cust.get("_id")):
+                authorized = True
+        except HTTPException:
+            pass
+    if not authorized:
+        tok = o.get("track_token") or ""
+        if not (t and tok and secrets.compare_digest(str(t), str(tok))):
+            raise HTTPException(status_code=404, detail="Order not found")
+    # --- eligibility ---
+    reason = (body.reason or "").strip()
+    if len(reason) < 5:
+        raise HTTPException(status_code=400, detail="Please describe the problem (at least a few words).")
+    if o.get("payment_method") in ("cod", "pay_at_restaurant"):
+        raise HTTPException(status_code=400, detail="Cash orders are settled in person — please call the restaurant.")
+    if o.get("payment_status") != "paid":
+        raise HTTPException(status_code=400, detail="Only paid orders can request a refund.")
+    if o.get("refund_request"):
+        raise HTTPException(status_code=400, detail="A refund request already exists for this order.")
+    try:
+        created = datetime.fromisoformat(str(o.get("created_at", "")).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - created).days > REFUND_WINDOW_DAYS:
+            raise HTTPException(status_code=400, detail=f"Refunds can be requested within {REFUND_WINDOW_DAYS} days of the order.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # unparseable created_at → don't block the customer on our bug
+    now = datetime.now(timezone.utc).isoformat()
+    rr = {
+        "status": "requested",
+        "reason": reason[:500],
+        "amount": float(o.get("total_price", 0)),
+        "admin_note": "",
+        "requested_at": now,
+        "updated_at": now,
+    }
+    await db.online_orders.update_one({"_id": o["_id"]}, {"$set": {"refund_request": rr}})
+    o["refund_request"] = rr
+    receipt = str(o["_id"])[-6:].upper()
+    await _push_admins("💸 Refund requested",
+                       f"Order #{receipt} — Rs {rr['amount']:g}. Reason: {reason[:80]}")
+    await _notify_customer_refund(o, "requested")
+    return {"ok": True, "refund_request": rr}
+
+@api_router.post("/admin/online-orders/{order_id}/refund-action")
+async def admin_refund_action(order_id: str, body: RefundActionIn, request: Request):
+    """Staff moves a refund request through its lifecycle:
+    requested → approved | rejected;  approved → refunded | rejected.
+    'refunded' means the money was actually sent from the SafePay dashboard.
+    Every transition notifies the customer (WhatsApp/email/push)."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to manage refunds.")
+    action = (body.action or "").strip().lower()
+    if action not in ("approved", "rejected", "refunded"):
+        raise HTTPException(status_code=400, detail="Invalid action.")
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o or not o.get("refund_request"):
+        raise HTTPException(status_code=404, detail="No refund request on this order.")
+    rr = o["refund_request"]
+    cur = rr.get("status")
+    allowed = {"requested": {"approved", "rejected", "refunded"},
+               "approved": {"refunded", "rejected"}}
+    if action not in allowed.get(cur, set()):
+        raise HTTPException(status_code=400, detail=f"Cannot move a '{cur}' request to '{action}'.")
+    now = datetime.now(timezone.utc).isoformat()
+    rr.update({
+        "status": action,
+        "admin_note": (body.note or "").strip()[:500],
+        "acted_by": user.get("name", "") or user.get("email", ""),
+        "updated_at": now,
+    })
+    if action == "refunded":
+        rr["refunded_at"] = now
+    await db.online_orders.update_one({"_id": o["_id"]}, {"$set": {"refund_request": rr}})
+    o["refund_request"] = rr
+    await _notify_customer_refund(o, action, rr["admin_note"])
+    return {"ok": True, "refund_request": rr}
+
 @api_router.post("/push/subscribe")
 async def push_subscribe(body: PushSubscriptionIn, request: Request):
     """Register the caller's browser push subscription. Signed-in customers get
@@ -5093,16 +5379,19 @@ async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request)
         raise HTTPException(status_code=400, detail="Title and message are required.")
     url = body.url or "/"
     image = (body.image or "").strip() or None
+    # Audience = WEB subscribers (push_subscriptions) + APP devices (fcm_tokens
+    # on customer docs). Test mode narrows both to the admin's own customer
+    # account so they can preview on their real browser + phone.
+    fcm_customer_ids: Optional[list] = None  # None = all app devices
     if body.test_only:
         admin_email = (user.get("email") or "").lower().strip()
         cust = await db.customers.find_one({"email": admin_email}) if admin_email else None
         if not cust:
             raise HTTPException(status_code=400, detail=f"No customer account found for {admin_email}. Create one and enable notifications on your phone to receive test pushes.")
         subs = await db.push_subscriptions.find({"customer_id": str(cust["_id"])}).to_list(20)
+        fcm_customer_ids = [str(cust["_id"])]
     else:
         subs = await db.push_subscriptions.find({}).to_list(10000)
-    if not subs:
-        raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order.")
     sent, failed = 0, 0
     errors: list[str] = []
     for s in subs:
@@ -5113,18 +5402,26 @@ async def admin_broadcast_notification(body: AdminBroadcastIn, request: Request)
             failed += 1
             if err and len(errors) < 5:
                 errors.append(err)
+    # App devices via FCM. No-op when Firebase isn't configured, so web-only
+    # deploys behave exactly as before.
+    app_sent, app_failed = await _send_fcm_broadcast(title, notif_body, url, customer_ids=fcm_customer_ids)
+    audience = len(subs) + app_sent + app_failed
+    if audience == 0:
+        raise HTTPException(status_code=400, detail="No subscribers found yet. Ask your customers to enable order alerts after placing an order, or to sign in on the app.")
     if not body.test_only:
         try:
             await db.notification_broadcasts.insert_one({
                 "title": title, "body": notif_body, "url": url, "image": image,
-                "sent": sent, "failed": failed, "audience_size": len(subs),
+                "sent": sent, "failed": failed, "audience_size": audience,
+                "app_sent": app_sent, "app_failed": app_failed,
                 "errors_sample": errors,
                 "sent_by": user.get("email", ""),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:
             logger.warning(f"broadcast log insert failed: {e}")
-    return {"ok": True, "sent": sent, "failed": failed, "audience_size": len(subs), "test_only": body.test_only, "errors_sample": errors}
+    return {"ok": True, "sent": sent, "failed": failed, "app_sent": app_sent, "app_failed": app_failed,
+            "audience_size": audience, "test_only": body.test_only, "errors_sample": errors}
 
 
 @api_router.get("/admin/notifications/history")
@@ -5144,10 +5441,23 @@ async def admin_notification_stats(request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-    """Subscriber count + last broadcast summary, shown on the admin notifications page."""
-    sub_count = await db.push_subscriptions.count_documents({})
+    """Subscriber counts + last broadcast summary, shown on the admin notifications page.
+    subscriber_count stays the combined total for backward compatibility; the web/app
+    split is exposed separately so the UI can show "X web · Y app"."""
+    web_count = await db.push_subscriptions.count_documents({})
+    app_count = 0
+    try:
+        agg = await db.customers.aggregate([
+            {"$match": {"fcm_tokens": {"$exists": True, "$ne": []}}},
+            {"$project": {"n": {"$size": "$fcm_tokens"}}},
+            {"$group": {"_id": None, "total": {"$sum": "$n"}}},
+        ]).to_list(1)
+        app_count = int(agg[0]["total"]) if agg else 0
+    except Exception as e:
+        logger.warning(f"app device count failed: {e}")
     last = await db.notification_broadcasts.find({}).sort("created_at", -1).limit(1).to_list(1)
-    return {"subscriber_count": sub_count, "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
+    return {"subscriber_count": web_count + app_count, "web_subscribers": web_count, "app_devices": app_count,
+            "last_broadcast": ({"id": str(last[0]["_id"]), **{k: v for k, v in last[0].items() if k != "_id"}} if last else None)}
 
 
 @api_router.get("/admin/push/vapid/status")
@@ -8664,6 +8974,10 @@ async def public_track_order(order_id: str, request: Request, t: Optional[str] =
         "modification_pending": bool(o.get("modification_pending", False)),
         "rejection_reason": o.get("rejection_reason", ""),
         "accepted_at": o.get("accepted_at", ""),
+        # Refund lifecycle (customer-requested; see /online-orders/{id}/refund-request).
+        # Visible to token viewers too — status/amount only, nothing more personal
+        # than the rest of this masked response already reveals.
+        "refund_request": o.get("refund_request"),
         # V2: live prep time + countdown helpers
         "prep_time_min": int(o.get("prep_time_min") or 30),  # default 30 min
         "prep_time_updated_at": o.get("prep_time_updated_at", ""),

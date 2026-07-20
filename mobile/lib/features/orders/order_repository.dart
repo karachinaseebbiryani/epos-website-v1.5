@@ -120,6 +120,24 @@ class OrderRepository {
     throwIfError(res);
   }
 
+  /// Ask for a refund on a paid order. Same authorization as tracking: the
+  /// signed-in owner, or the per-order track token for guest orders.
+  Future<void> requestRefund({
+    required String orderId,
+    required String reason,
+    String? trackToken,
+  }) async {
+    final res = await _api.dio.post(
+      '/online-orders/$orderId/refund-request',
+      data: {'reason': reason},
+      queryParameters: {
+        if (trackToken != null && trackToken.isNotEmpty) 't': trackToken,
+      },
+      options: Options(extra: {'showLoading': true}),
+    );
+    throwIfError(res);
+  }
+
   Future<List<Order>> myOrders() async {
     final res = await _api.dio.get('/online-orders/me');
     throwIfError(res);

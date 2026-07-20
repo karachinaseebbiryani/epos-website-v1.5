@@ -37,6 +37,14 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- FCM: route notifications WITHOUT an explicit channel_id to our
+             high-importance channel (created in MainActivity) instead of the
+             SDK's default-importance fallback — keeps heads-up + lock-screen
+             behaviour even for older backend messages. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="knb_orders" />
+
         <!-- Facebook Login. Auto-init/auto-logging are OFF so the placeholder
              App ID in strings.xml can't crash the app at launch; sign-in stays
              inert until real credentials are provided (see login_screen.dart). -->

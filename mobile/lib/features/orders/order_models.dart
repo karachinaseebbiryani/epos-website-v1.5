@@ -77,6 +77,7 @@ class Order {
     this.phone = '',
     this.address = '',
     this.createdAt = '',
+    this.refundRequest,
   });
 
   final String id;
@@ -98,6 +99,9 @@ class Order {
   final String phone;
   final String address;
   final String createdAt;
+
+  /// Customer-requested refund lifecycle (null until a request exists).
+  final RefundRequest? refundRequest;
 
   factory Order.fromJson(Map<String, dynamic> j) {
     final items = ((j['items'] as List?) ?? [])
@@ -130,8 +134,37 @@ class Order {
       phone: (j['phone'] ?? '').toString(),
       address: (j['address'] ?? '').toString(),
       createdAt: (j['created_at'] ?? '').toString(),
+      refundRequest: j['refund_request'] is Map
+          ? RefundRequest.fromJson(Map<String, dynamic>.from(j['refund_request']))
+          : null,
     );
   }
+}
+
+/// Refund request state as reported by the backend
+/// (`requested` → `approved` | `rejected`; `approved` → `refunded`).
+class RefundRequest {
+  const RefundRequest({
+    required this.status,
+    required this.reason,
+    required this.amount,
+    this.adminNote = '',
+    this.refundedAt = '',
+  });
+
+  final String status; // requested | approved | refunded | rejected
+  final String reason;
+  final double amount;
+  final String adminNote;
+  final String refundedAt;
+
+  factory RefundRequest.fromJson(Map<String, dynamic> j) => RefundRequest(
+        status: (j['status'] ?? '').toString(),
+        reason: (j['reason'] ?? '').toString(),
+        amount: _toDouble(j['amount']),
+        adminNote: (j['admin_note'] ?? '').toString(),
+        refundedAt: (j['refunded_at'] ?? '').toString(),
+      );
 }
 
 /// Response of POST /api/delivery/quote.

@@ -170,6 +170,27 @@ export default function AdminOrders() {
         }
     };
 
+    // Refund lifecycle: requested → approved|rejected; approved → refunded|rejected.
+    // "Mark refunded" is pressed AFTER actually sending the money from the SafePay
+    // dashboard — the backend then confirms to the customer (WhatsApp/email/push).
+    const refundAction = async (id, action) => {
+        let note = "";
+        if (action === "rejected") {
+            note = window.prompt("Reason for declining (this is sent to the customer):") || "";
+            if (!note.trim()) return;
+        }
+        if (action === "refunded" && !window.confirm("Confirm you HAVE sent the money from the SafePay dashboard. Customer will be told the refund is complete.")) return;
+        try {
+            await api.post(`/admin/online-orders/${id}/refund-action`, { action, note });
+            toast.success(action === "approved" ? "Refund approved — customer notified"
+                : action === "rejected" ? "Request declined — customer notified"
+                : "Marked refunded — customer notified");
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        }
+    };
+
     const viewScreenshot = async (path) => {
         try {
             const token = localStorage.getItem("knb_admin_token");
@@ -253,6 +274,7 @@ export default function AdminOrders() {
                             onVerifyPayment={() => verifyPayment(o.id)}
                             onViewScreenshot={viewScreenshot}
                             onPrint={() => handlePrint(o)}
+                            onRefundAction={(action) => refundAction(o.id, action)}
                         />
                     ))}
                 </div>
@@ -336,7 +358,7 @@ function StatusStepper({ order, onUpdateStatus, busy }) {
     );
 }
 
-function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, onVerifyPayment, onViewScreenshot, onPrint }) {
+function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, onVerifyPayment, onViewScreenshot, onPrint, onRefundAction }) {
     const isPending = o.status === "pending";
     const isRejected = o.status === "rejected";
     const isAccepted = o.status === "accepted";
@@ -402,6 +424,39 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                             {o.reward_applied.reward_type === "discount_percent" && ` — ${o.reward_applied.reward_value}% off`}
                             {o.reward_applied.reward_type === "discount_fixed" && ` — Rs. ${o.reward_applied.reward_value} off`}
                             {o.reward_applied.diamonds_spent ? ` (customer paid ${o.reward_applied.diamonds_spent} 💎)` : ""}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Customer refund request — visible until resolved, with the actions
+                allowed from its current state. "Mark refunded" comes AFTER sending
+                the money in the SafePay dashboard. */}
+            {o.refund_request && (
+                <div className={`mt-2 text-xs border p-2.5 rounded space-y-1.5 ${
+                    o.refund_request.status === "requested" ? "bg-purple-50 border-purple-300 text-purple-900"
+                    : o.refund_request.status === "approved" ? "bg-blue-50 border-blue-200 text-blue-900"
+                    : o.refund_request.status === "refunded" ? "bg-green-50 border-green-200 text-green-900"
+                    : "bg-neutral-50 border-neutral-200 text-neutral-600"}`}
+                    data-testid={`order-refund-${o.id}`}>
+                    <div className="font-bold uppercase tracking-wider text-[10px]">
+                        💸 Refund {o.refund_request.status} · Rs. {Number(o.refund_request.amount || 0).toFixed(0)}
+                    </div>
+                    <div>“{o.refund_request.reason}”</div>
+                    {o.refund_request.admin_note && <div className="italic">Note: {o.refund_request.admin_note}</div>}
+                    {o.refund_request.status === "requested" && (
+                        <div className="flex gap-2 pt-1">
+                            <button onClick={() => onRefundAction("approved")} data-testid={`refund-approve-${o.id}`}
+                                className="bg-emerald-600 text-white rounded-full px-3 py-1 font-bold">Approve</button>
+                            <button onClick={() => onRefundAction("rejected")} data-testid={`refund-reject-${o.id}`}
+                                className="bg-red-600 text-white rounded-full px-3 py-1 font-bold">Decline</button>
+                        </div>
+                    )}
+                    {o.refund_request.status === "approved" && (
+                        <div className="flex gap-2 pt-1 items-center">
+                            <button onClick={() => onRefundAction("refunded")} data-testid={`refund-done-${o.id}`}
+                                className="bg-green-700 text-white rounded-full px-3 py-1 font-bold">Mark Refunded (money sent)</button>
+                            <span className="text-[10px]">→ send Rs. {Number(o.refund_request.amount || 0).toFixed(0)} from the SafePay dashboard first</span>
                         </div>
                     )}
                 </div>

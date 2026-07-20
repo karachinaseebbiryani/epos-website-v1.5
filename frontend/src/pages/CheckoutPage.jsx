@@ -17,7 +17,7 @@ const PAYMENT_LABELS = {
     card: { label: "Pay by Card", icon: CreditCard, desc: "Visa / Mastercard via Stripe" },
     easypaisa: { label: "EasyPaisa", icon: Smartphone, desc: "Pay online with your EasyPaisa account" },
     jazzcash: { label: "JazzCash", icon: Smartphone, desc: "Pay online with your JazzCash wallet" },
-    safepay: { label: "Pay Online (SafePay)", icon: CreditCard, desc: "Card / wallet via SafePay secure checkout" },
+    safepay: { label: "Pay by Card / Wallet", icon: CreditCard, desc: "Visa / Mastercard / wallets — SafePay secure checkout" },
 };
 
 const GUEST_KEY = "knb_guest_v1";
@@ -285,6 +285,12 @@ export default function CheckoutPage() {
         jazzcash: !!settings?.jazzcash_gateway_enabled,
         safepay: !!settings?.safepay_gateway_enabled,
     };
+    // One online-payment option only: SafePay's hosted page already takes
+    // Visa/Mastercard, so showing the separate Stripe "card" entry next to it
+    // just confuses customers. Stripe stays as an automatic fallback whenever
+    // SafePay is disabled/uncredentialed. WEB-ONLY rule — the mobile app's
+    // card option maps payment_methods.card → SafePay and is unaffected.
+    if (enabledMethods.safepay) enabledMethods.card = false;
 
     const submitOrder = async (e) => {
         e.preventDefault();

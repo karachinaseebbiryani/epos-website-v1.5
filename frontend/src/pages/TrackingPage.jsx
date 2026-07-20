@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../lib/api";
-import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation } from "lucide-react";
+import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import EnableNotificationsCard from "../components/EnableNotificationsCard";
 import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
@@ -35,6 +35,33 @@ export default function TrackingPage() {
     const [error, setError] = useState(null);
     const [restaurantPhone, setRestaurantPhone] = useState("+923004928411");
     const [locSubmitting, setLocSubmitting] = useState(false);
+    const [refundOpen, setRefundOpen] = useState(false);
+    const [refundReason, setRefundReason] = useState("");
+    const [refundSubmitting, setRefundSubmitting] = useState(false);
+
+    const requestRefund = async () => {
+        if (refundReason.trim().length < 5) {
+            toast.error("Please describe the problem (at least a few words).");
+            return;
+        }
+        setRefundSubmitting(true);
+        try {
+            const authToken = localStorage.getItem("knb_token");
+            const { data } = await axios.post(`${API}/online-orders/${id}/refund-request`,
+                { reason: refundReason.trim() },
+                {
+                    params: trackToken ? { t: trackToken } : undefined,
+                    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+                });
+            setOrder((o) => ({ ...o, refund_request: data.refund_request }));
+            setRefundOpen(false);
+            toast.success("Refund request sent — we'll review it and update you here.");
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "Could not send the refund request.");
+        } finally {
+            setRefundSubmitting(false);
+        }
+    };
 
     const shareLocation = async () => {
         if (!navigator.geolocation) {
@@ -298,6 +325,48 @@ export default function TrackingPage() {
                 </div>
             </div>
 
+            {/* Refunds — request (paid, non-cash orders) and live status tracking */}
+            {order.refund_request ? (
+                <RefundStatusCard rr={order.refund_request} />
+            ) : (
+                order.payment_status === "paid" && !["cod", "pay_at_restaurant"].includes(order.payment_method) && (
+                    <div className="mt-6 bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm" data-testid="refund-request-card">
+                        {refundOpen ? (
+                            <div>
+                                <h3 className="font-display font-bold text-base text-brand-ink mb-2">Request a refund</h3>
+                                <p className="text-xs text-neutral-500 mb-3">
+                                    Tell us what went wrong. Approved refunds go back to your original payment
+                                    method within 2–3 business days.
+                                </p>
+                                <textarea
+                                    value={refundReason}
+                                    onChange={(e) => setRefundReason(e.target.value)}
+                                    rows={3}
+                                    maxLength={500}
+                                    placeholder="e.g. Order arrived cold / items were missing…"
+                                    data-testid="refund-reason-input"
+                                    className="w-full border border-neutral-200 rounded-xl p-3 text-sm focus:outline-none focus:border-brand-red"
+                                />
+                                <div className="flex gap-2 mt-3">
+                                    <button onClick={requestRefund} disabled={refundSubmitting}
+                                        data-testid="refund-submit"
+                                        className="flex-1 inline-flex items-center justify-center gap-2 bg-brand-red text-white rounded-full px-4 py-2.5 text-sm font-bold disabled:opacity-60">
+                                        {refundSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                                        {refundSubmitting ? "Sending…" : "Send Request"}
+                                    </button>
+                                    <button onClick={() => setRefundOpen(false)} className="px-4 py-2.5 text-sm font-semibold text-neutral-500">Cancel</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <button onClick={() => setRefundOpen(true)} data-testid="refund-open"
+                                className="w-full inline-flex items-center justify-center gap-2 text-brand-red font-semibold text-sm">
+                                <RotateCcw className="w-4 h-4" /> Problem with this order? Request a refund
+                            </button>
+                        )}
+                    </div>
+                )
+            )}
+
             <div className="mt-8 text-center">
                 <a href={`tel:${restaurantPhone}`} data-testid="track-call-restaurant" className="inline-flex items-center gap-2 bg-neutral-100 hover:bg-brand-red hover:text-white text-brand-ink rounded-full px-6 py-3 font-semibold text-sm transition-colors">
                     <Phone className="w-4 h-4" /> Call Restaurant
@@ -307,6 +376,44 @@ export default function TrackingPage() {
             <p className="text-center text-xs text-neutral-400 mt-6">
                 Bookmark this page — updates live every 5 seconds.
             </p>
+        </div>
+    );
+}
+
+// Refund lifecycle banner — mirrors the statuses the backend sets on
+// order.refund_request. Polling keeps it live, so approvals/refusals from the
+// admin appear here within seconds.
+function RefundStatusCard({ rr }) {
+    const meta = {
+        requested: {
+            bg: "bg-amber-50 border-amber-200", fg: "text-amber-800", sub: "text-amber-700/80",
+            title: "Refund requested",
+            body: "We're reviewing your request — you'll get an update here and by notification.",
+        },
+        approved: {
+            bg: "bg-emerald-50 border-emerald-200", fg: "text-emerald-800", sub: "text-emerald-700/80",
+            title: "Refund approved",
+            body: `Rs ${Number(rr.amount || 0).toFixed(0)} will be returned to your payment method within 2–3 business days. Bank statements can take a few extra days to show it.`,
+        },
+        refunded: {
+            bg: "bg-green-50 border-green-200", fg: "text-green-800", sub: "text-green-700/80",
+            title: "Refund completed",
+            body: `Rs ${Number(rr.amount || 0).toFixed(0)} was sent back to your payment method${rr.refunded_at ? ` on ${new Date(rr.refunded_at).toLocaleDateString()}` : ""}. It may take a few days to appear on your statement.`,
+        },
+        rejected: {
+            bg: "bg-red-50 border-red-200", fg: "text-red-800", sub: "text-red-700/80",
+            title: "Refund request declined",
+            body: rr.admin_note ? `Reason: ${rr.admin_note}. Please call us if you'd like to discuss.` : "Please call us if you'd like to discuss this.",
+        },
+    }[rr.status] || null;
+    if (!meta) return null;
+    return (
+        <div className={`mt-6 border rounded-2xl p-5 ${meta.bg}`} data-testid={`refund-status-${rr.status}`}>
+            <div className={`font-display font-bold ${meta.fg} flex items-center gap-2`}>
+                <RotateCcw className="w-5 h-5" /> {meta.title}
+            </div>
+            <p className={`text-sm mt-1 ${meta.sub}`}>{meta.body}</p>
+            {rr.reason && <p className="text-xs mt-2 text-neutral-500">Your request: “{rr.reason}”</p>}
         </div>
     );
 }
