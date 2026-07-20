@@ -37,9 +37,19 @@ export default function PosInstall() {
 
   useEffect(() => {
     setStandalone(window.matchMedia?.("(display-mode: standalone)")?.matches || false);
+    // The event may have fired long before this component mounted — index.html
+    // stashes it in window.__knb_bip and re-dispatches "knb-bip" for us.
+    if (window.__knb_bip) {
+      promptRef.current = window.__knb_bip;
+      setInstallable(true);
+    }
     const onPrompt = (e) => {
-      e.preventDefault();
-      promptRef.current = e;
+      if (e?.preventDefault) e.preventDefault();
+      promptRef.current = e?.detail || window.__knb_bip || e;
+      setInstallable(true);
+    };
+    const onStashed = () => {
+      promptRef.current = window.__knb_bip;
       setInstallable(true);
     };
     const onInstalled = () => {
@@ -47,9 +57,11 @@ export default function PosInstall() {
       toast.success("KNB POS installed — find it in your Start menu / taskbar");
     };
     window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("knb-bip", onStashed);
     window.addEventListener("appinstalled", onInstalled);
     return () => {
       window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("knb-bip", onStashed);
       window.removeEventListener("appinstalled", onInstalled);
     };
   }, []);
@@ -69,13 +81,23 @@ export default function PosInstall() {
     })();
   }, []);
 
+  const [showHowTo, setShowHowTo] = useState(false);
+
   const install = async () => {
-    const ev = promptRef.current;
-    if (!ev) return;
-    ev.prompt();
-    try { await ev.userChoice; } catch { /* user dismissed */ }
-    promptRef.current = null;
-    setInstallable(false);
+    const ev = promptRef.current || window.__knb_bip;
+    if (ev) {
+      try {
+        ev.prompt();
+        await ev.userChoice;
+      } catch { /* user dismissed / event already used */ }
+      promptRef.current = null;
+      window.__knb_bip = null;
+      setInstallable(false);
+      return;
+    }
+    // No captured event (older Chrome / heuristics not met yet) — show the
+    // manual path, which always works because this page links admin-manifest.
+    setShowHowTo((v) => !v);
   };
 
   const enableAlerts = async () => {
@@ -92,7 +114,9 @@ export default function PosInstall() {
     }
   };
 
-  const showInstall = installable && !standalone;
+  // Always offer install when not already running as the installed app — the
+  // one-click browser prompt when we captured the event, manual steps otherwise.
+  const showInstall = !standalone;
   const showAlerts = alerts === "off" || alerts === "on";
   if (!showInstall && !showAlerts) return null;
 
@@ -106,6 +130,14 @@ export default function PosInstall() {
         >
           <MonitorDown className="w-4 h-4" /> Install POS on Desktop
         </button>
+      )}
+      {showInstall && showHowTo && !installable && (
+        <div className="px-4 py-3 rounded-xl bg-white/10 text-white/80 text-[11px] leading-relaxed space-y-1.5" data-testid="pos-install-howto">
+          <p className="font-bold text-white/90">Install from the browser menu:</p>
+          <p><span className="font-semibold text-white/90">Chrome:</span> look for the install icon at the right end of the address bar — or menu ⋮ → Cast, save and share → <em>Install page as app…</em></p>
+          <p><span className="font-semibold text-white/90">Edge:</span> menu ⋯ → Apps → <em>Install this site as an app</em></p>
+          <p>Stay on this admin page while installing so it installs the POS app (not the customer site).</p>
+        </div>
       )}
       {alerts === "off" && (
         <button

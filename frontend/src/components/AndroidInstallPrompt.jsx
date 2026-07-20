@@ -41,12 +41,23 @@ export default function AndroidInstallPrompt() {
     useEffect(() => {
         if (isInStandaloneMode()) return;
         if (dismissedRecently()) return;
+        // The event may have fired before mount — index.html stashes it in
+        // window.__knb_bip and re-dispatches "knb-bip" (see early-capture script).
+        if (window.__knb_bip) {
+            setDeferred(window.__knb_bip);
+            setVisible(true);
+        }
         const handler = (e) => {
             e.preventDefault();
             setDeferred(e);
             setVisible(true);
         };
+        const onStashed = () => {
+            setDeferred(window.__knb_bip);
+            setVisible(true);
+        };
         window.addEventListener("beforeinstallprompt", handler);
+        window.addEventListener("knb-bip", onStashed);
         // Once installed (user accepted), hide forever.
         const installed = () => {
             setVisible(false);
@@ -55,6 +66,7 @@ export default function AndroidInstallPrompt() {
         window.addEventListener("appinstalled", installed);
         return () => {
             window.removeEventListener("beforeinstallprompt", handler);
+            window.removeEventListener("knb-bip", onStashed);
             window.removeEventListener("appinstalled", installed);
         };
     }, []);

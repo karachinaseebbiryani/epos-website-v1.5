@@ -17,6 +17,12 @@ self.addEventListener("activate", (event) => {
     event.waitUntil(self.clients.claim());
 });
 
+// No-op fetch handler: we don't intercept anything (no respondWith = the
+// browser fetches normally), but its PRESENCE satisfies the PWA
+// installability check in Chrome versions that still require a fetch
+// handler before offering "Install app". Zero behaviour change otherwise.
+self.addEventListener("fetch", () => { });
+
 self.addEventListener("push", (event) => {
     let data = {};
     try { data = event.data ? event.data.json() : {}; } catch (e) { data = { title: "Karachi Naseeb", body: event.data ? event.data.text() : "Order update" }; }

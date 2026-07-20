@@ -131,6 +131,19 @@
     }
     </script>
 
+    <script>
+        // Capture the PWA install event AS EARLY AS POSSIBLE — Chrome often
+        // fires `beforeinstallprompt` before React mounts, and a listener
+        // attached at component-mount time simply misses it (the reason the
+        // "Install POS" button sometimes never appeared). Components read
+        // window.__knb_bip and also listen for the re-dispatch below.
+        window.addEventListener("beforeinstallprompt", function (e) {
+            e.preventDefault();
+            window.__knb_bip = e;
+            try { window.dispatchEvent(new CustomEvent("knb-bip")); } catch (err) { /* */ }
+        });
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
