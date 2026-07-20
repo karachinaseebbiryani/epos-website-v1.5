@@ -6369,6 +6369,7 @@ async def sitemap_xml(request: Request):
         {"loc": f"{base}/privacy",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/terms",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/refunds",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/ownership",         "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/feedback",          "changefreq": "monthly", "priority": "0.4", "lastmod": today},
         {"loc": f"{base}/login",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
         {"loc": f"{base}/register",          "changefreq": "yearly",  "priority": "0.3", "lastmod": today},

@@ -97,6 +97,22 @@ export const POLICY_PAGES = {
               body: "Refund questions: call +92 300 4928411 or email karachinaseebbiryani599@gmail.com. Office: 68 Chatri Chowk, Punjab Small Industry, D Block, Lahore. We respond within 1 business day." },
         ],
     },
+    ownership: {
+        slug: "ownership",
+        title: "Ownership Statement",
+        description: "Who owns and operates karachinaseebbiryani.com — legal identity, physical address and contact details of Karachi Naseeb Biryani and Murg Pulao, Lahore.",
+        updated: "July 2026",
+        sections: [
+            { heading: "Website ownership",
+              body: "This website, www.karachinaseebbiryani.com, and the Karachi Naseeb mobile application are owned and operated by Karachi Naseeb Biryani and Murg Pulao, a restaurant business based in Lahore, Pakistan. All orders placed through this website or app are fulfilled directly by us — no third party sells through this site." },
+            { heading: "Business details",
+              body: "Business name: Karachi Naseeb Biryani and Murg Pulao. Physical address: 68 Chatri Chowk, Punjab Small Industry, D Block, Lahore, Punjab, Pakistan. All food is prepared at and delivered from this location." },
+            { heading: "Contact",
+              body: "Phone / WhatsApp: +92 300 4928411. Email: karachinaseebbiryani599@gmail.com. We respond to enquiries within 1 business day." },
+            { heading: "Payments",
+              body: "Online payments on this website are processed by our licensed payment partners (including SafePay). Charges on your statement will reference the payment processor and/or Karachi Naseeb. All prices are in Pakistani Rupees (PKR)." },
+        ],
+    },
     "rewards-program": {
         slug: "rewards-program",
         title: "Rewards Program — Diamonds",
