@@ -264,6 +264,43 @@ class _RefundSectionState extends ConsumerState<_RefundSection> {
     }
   }
 
+  Future<void> _sendMessage() async {
+    final controller = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Message the restaurant'),
+        content: TextField(
+          controller: controller,
+          maxLines: 3,
+          maxLength: 500,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Write your message…'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text.trim()), child: const Text('Send')),
+        ],
+      ),
+    );
+    if (text == null || text.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(orderRepositoryProvider).sendRefundMessage(
+          orderId: widget.order.id, text: text, trackToken: widget.trackToken);
+      if (!mounted) return;
+      ref.invalidate(orderTrackingStreamProvider('${widget.order.id}|${widget.trackToken}'));
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not send message.')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final rr = widget.order.refundRequest;
@@ -293,13 +330,61 @@ class _RefundSectionState extends ConsumerState<_RefundSection> {
           ),
         _ => (Icons.info_outline, 'Refund', rr.status),
       };
-      return Card(
-        child: ListTile(
-          leading: Icon(icon),
-          title: Text(title),
-          subtitle: Text(body),
-          isThreeLine: true,
-        ),
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Card(
+            child: ListTile(
+              leading: Icon(icon),
+              title: Text(title),
+              subtitle: Text(rr.refundMethod == 'wallet' && rr.status == 'refunded'
+                  ? 'Rs ${rr.amount.toStringAsFixed(0)} was credited to your wallet — use it on your next order.'
+                  : body),
+              isThreeLine: true,
+            ),
+          ),
+          // Conversation with the restaurant (they may ask for a photo of the
+          // order as proof; reply here). Photos sent from the website link show
+          // as attachments for staff either way.
+          if (rr.messages.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Messages', style: Theme.of(context).textTheme.labelLarge),
+                    const SizedBox(height: 6),
+                    for (final m in rr.messages.take(20))
+                      Align(
+                        alignment: m.from == 'customer' ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: m.from == 'customer'
+                                ? Theme.of(context).colorScheme.primaryContainer
+                                : Theme.of(context).colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(m.text.isNotEmpty ? m.text : '📷 photo attached'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (rr.status == 'requested' || rr.status == 'approved') ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _sendMessage,
+              icon: const Icon(Icons.chat_bubble_outline, size: 18),
+              label: const Text('Message the restaurant'),
+            ),
+          ],
+        ],
       );
     }
     final eligible = widget.order.paymentStatus == 'paid' &&

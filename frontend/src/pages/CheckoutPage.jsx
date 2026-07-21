@@ -44,6 +44,9 @@ function saveGuestPrefill(form) {
 export default function CheckoutPage() {
     const { items, subtotal, clear } = useCart();
     const { user } = useAuth();
+    // Wallet redemption (store credit from refunds). Server-authoritative: we
+    // only send the intent; the backend atomically applies min(balance, total).
+    const [useWallet, setUseWallet] = useState(false);
     const navigate = useNavigate();
     const guest = !user ? loadGuestPrefill() : null;
     const [authChoice, setAuthChoice] = useState(() => {
@@ -326,7 +329,18 @@ export default function CheckoutPage() {
                 delivery_lat: coords?.lat || null,
                 delivery_lng: coords?.lng || null,
                 reward_id: rewardId, // NEW: Diamond reward redemption
+                use_wallet: !!(user && useWallet && Number(user.wallet_balance) > 0),
             });
+
+            // Wallet covered the whole bill → the order is already PAID on the
+            // server; skip any gateway redirect and go straight to tracking.
+            if (order.payment_status === "paid") {
+                clear();
+                if (!user) saveGuestPrefill(form);
+                toast.success("Paid with wallet credit — order placed!");
+                navigate(`/order/${order.id}/success`, { state: { order } });
+                return;
+            }
             
             // Clear selected reward after order
             localStorage.removeItem('selected_reward');
@@ -499,6 +513,26 @@ export default function CheckoutPage() {
                     {/* Payment method */}
                     <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
                         <h2 className="font-display font-bold text-lg mb-5">Payment Method</h2>
+
+                        {/* Wallet credit — signed-in customers with a balance can apply it.
+                            Covers the whole bill → order is instantly paid (no gateway);
+                            covers part → the rest is paid by the method chosen below. */}
+                        {user && Number(user.wallet_balance) > 0 && (
+                            <label data-testid="checkout-use-wallet"
+                                className={`flex items-center gap-3 p-4 mb-4 rounded-2xl border-2 cursor-pointer transition-colors ${useWallet ? "border-emerald-500 bg-emerald-50" : "border-neutral-200 hover:border-emerald-300"}`}>
+                                <input type="checkbox" checked={useWallet} onChange={(e) => setUseWallet(e.target.checked)}
+                                    className="accent-emerald-600 w-4 h-4" />
+                                <span className="text-2xl">👛</span>
+                                <span className="flex-1">
+                                    <span className="block text-sm font-bold text-brand-ink">Use wallet credit — Rs {Number(user.wallet_balance).toFixed(0)} available</span>
+                                    <span className="block text-xs text-neutral-500">
+                                        {useWallet
+                                            ? "Applied at order time. If it covers the full bill, no other payment is needed."
+                                            : "Store credit from refunds. Tick to apply it to this order."}
+                                    </span>
+                                </span>
+                            </label>
+                        )}
                         <div className="space-y-2">
                             {Object.entries(PAYMENT_LABELS).map(([key, info]) => {
                                 if (!enabledMethods[key]) return null;

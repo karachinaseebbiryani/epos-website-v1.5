@@ -150,6 +150,21 @@ export default function ProfilePage() {
                 <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-2" />
             </Link>
 
+            {/* Wallet — store credit from refunds. Shown only when non-zero so the
+                profile stays clean for the majority who have none. Spending it at
+                checkout is coming next; until then staff apply it on request. */}
+            {Number(user?.wallet_balance) > 0 && (
+                <div data-testid="profile-wallet-balance"
+                    className="inline-flex items-center gap-3 mb-8 ml-3 px-5 py-4 bg-gradient-to-br from-emerald-100 to-green-200 rounded-2xl">
+                    <span className="text-2xl">👛</span>
+                    <div>
+                        <p className="text-[10px] uppercase tracking-[0.18em] font-bold text-emerald-900/70">Wallet Credit</p>
+                        <p className="font-display font-black text-2xl text-emerald-900 leading-tight">Rs {Number(user.wallet_balance).toFixed(0)}</p>
+                        <p className="text-[10px] text-emerald-800/70">From refunds — usable on future orders</p>
+                    </div>
+                </div>
+            )}
+
             {/* Personal coupons — surface the customer's unique single-use codes (e.g. the
                 second-order bonus). They're auto-applied at checkout, but we show them
                 here too so the customer feels rewarded and remembers they have a perk. */}

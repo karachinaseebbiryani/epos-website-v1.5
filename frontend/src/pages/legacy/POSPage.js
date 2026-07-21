@@ -715,18 +715,21 @@ export default function POSPage() {
                     return (
                       <button key={v.name} type="button" data-testid={`pos-variation-${v.name}`}
                         onClick={() => setCustomiseVariation(v)}
-                        className={`w-full flex items-center justify-between p-3 rounded-lg border text-left text-sm font-bold transition-all ${on ? "border-transparent scale-[1.02] shadow-md" : "hover:opacity-90"}`}
+                        className={`w-full flex items-center justify-between gap-2 p-3 rounded-lg border text-left text-sm font-bold transition-all ${on ? "border-transparent scale-[1.02] shadow-md" : "hover:opacity-90"}`}
                         style={vColor
                           ? { background: vColor, color: vText, borderColor: on ? "#1A1D1A" : vColor, outline: on ? "3px solid #1A1D1A" : "none", outlineOffset: "-1px" }
                           : (on ? { background: "#EAF4EB", borderColor: "#1E3F20", color: "#1A1D1A" } : { color: "#1A1D1A", borderColor: "#E5E2DC" })}>
-                        <span className="flex items-center gap-2">
-                          <span className="w-4 h-4 rounded-full border flex items-center justify-center"
+                        {/* Name wraps onto multiple lines; price never shrinks —
+                            long names like "Medium Family Deal" must show fully
+                            with the price, no horizontal scrollbar. */}
+                        <span className="flex items-start gap-2 flex-1 min-w-0">
+                          <span className="w-4 h-4 mt-0.5 rounded-full border flex items-center justify-center flex-shrink-0"
                             style={{ borderColor: vColor ? vText : (on ? "#1E3F20" : "#C9C6C0"), background: "transparent" }}>
                             {on && <span className="w-2 h-2 rounded-full" style={{ background: vColor ? vText : "#1E3F20" }} />}
                           </span>
-                          {v.name}
+                          <span className="whitespace-normal break-words leading-tight">{v.name}</span>
                         </span>
-                        <span className="font-black" style={{ color: vColor ? vText : "#1E3F20" }}>{currency} {Number(v.price).toFixed(2)}</span>
+                        <span className="font-black flex-shrink-0 whitespace-nowrap" style={{ color: vColor ? vText : "#1E3F20" }}>{currency} {Number(v.price).toFixed(2)}</span>
                       </button>
                     );
                   })}
@@ -793,21 +796,29 @@ export default function POSPage() {
         currency={currency}
         menuItems={menuItems}
         onConfirm={(items) => {
-          // Merge voice-parsed items into cart
+          // Merge voice-parsed items into cart. Voice lines carry the parsed
+          // variation (size), so they behave exactly like lines added through
+          // the customise dialog — same keying, same price, same KOT name.
           setCart((prev) => {
             const next = [...prev];
             items.forEach((vi) => {
               const menuItem = menuItems.find((m) => m.id === vi.item_id);
+              const viVar = vi.variation_name || null;
               // Never merge into a line already sent to the kitchen (dine-in) —
-              // start a fresh "new" line instead, same rule as tapping a tile.
-              const existing = next.find((c) => c.item_id === vi.item_id && (c.kitchen_status || "new") === "new");
+              // and only merge lines of the SAME size.
+              const existing = next.find((c) =>
+                c.item_id === vi.item_id &&
+                (c.variation_name || null) === viVar &&
+                (c.kitchen_status || "new") === "new");
               if (existing) existing.quantity += vi.quantity;
               else {
                 const line = {
                   item_id: vi.item_id,
                   name: vi.name,
+                  base_name: vi.base_name || menuItem?.name || vi.name,
+                  variation_name: viVar,
                   price: vi.price,
-                  original_price: menuItem?.price ?? vi.price,
+                  original_price: vi.price,
                   quantity: vi.quantity,
                 };
                 if (isTableMode) { line.uid = makeUid(); line.kitchen_status = "new"; }

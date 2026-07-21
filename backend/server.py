@@ -3169,6 +3169,7 @@ class OnlineOrderCreate(BaseModel):
     delivery_lat: Optional[float] = None
     delivery_lng: Optional[float] = None
     reward_id: Optional[str] = None  # NEW: Loyalty reward redemption
+    use_wallet: Optional[bool] = False  # apply store-credit wallet (signed-in only)
 
     @field_validator("phone")
     @classmethod
@@ -3447,7 +3448,9 @@ async def customer_me(request: Request):
     cust = await get_current_customer(request)
     return {"id": cust["_id"], "email": cust["email"], "name": cust.get("name", ""),
             "phone": cust.get("phone", ""), "allergens": cust.get("allergens", []),
-            "email_verified": _customer_email_verified(cust)}
+            "email_verified": _customer_email_verified(cust),
+            # Store-credit wallet (credited by refunds; spendable on future orders).
+            "wallet_balance": float(cust.get("wallet_balance", 0) or 0)}
 
 @api_router.post("/customer/verify-email")
 async def customer_verify_email(req: VerifyEmailRequest, request: Request):
@@ -4379,6 +4382,35 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # confirmation path (_release_online_order). COD / pay-at-restaurant /
     # manual bank transfer keep the existing immediate flow.
     initial_status = "awaiting_payment" if pmethod in GATEWAY_PAYMENT_METHODS else "pending"
+
+    # --- WALLET REDEMPTION (store credit from refunds) ---
+    # Signed-in customers can apply their wallet balance to this order. The
+    # deduction is ATOMIC (filtered $inc) so a double-submit or stale balance
+    # can never spend more than they have — on any race the wallet is simply
+    # not applied and the customer pays the full amount by their chosen method.
+    # Covers-everything → order is instantly PAID (no gateway trip, straight to
+    # the staff queue). Covers-part → total_price becomes the REMAINDER, which
+    # flows through the normal payment path (gateway sessions already charge
+    # order.total_price). Wallet money was already real revenue when the
+    # original order was paid, so reduced totals keep reports conservative.
+    wallet_applied = 0.0
+    if getattr(order, "use_wallet", False) and cust:
+        try:
+            balance = float(cust.get("wallet_balance", 0) or 0)
+            applied = round(min(balance, final_total), 2)
+            if applied > 0:
+                res = await db.customers.update_one(
+                    {"_id": cust["_id"], "wallet_balance": {"$gte": applied}},
+                    {"$inc": {"wallet_balance": -applied}})
+                if res.modified_count:
+                    wallet_applied = applied
+                    final_total = round(final_total - applied, 2)
+        except Exception as e:
+            logger.warning(f"wallet redemption failed (order proceeds without): {e}")
+    if wallet_applied > 0 and final_total <= 0:
+        payment_status = "paid"
+        initial_status = "pending"  # fully covered — straight to the staff queue
+
     now = datetime.now(timezone.utc)
     # Per-order unguessable share token. The /api/track endpoint requires this on
     # every unauthenticated request to close the IDOR — without it, anyone who
@@ -4411,6 +4443,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "reward_applied": reward_applied,  # NEW: Loyalty reward info
         "diamonds_earned": diamonds_earned,  # NEW: Diamonds earned from this order
         "status": initial_status,
+        "wallet_applied": wallet_applied,  # store credit used on this order
         "printed": False,
         "track_token": track_token,
         "created_at": now.isoformat(),
@@ -4419,6 +4452,16 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     result = await db.online_orders.insert_one(doc)
     doc["_id"] = result.inserted_id
     order_id = str(result.inserted_id)
+
+    # Ledger entry for the wallet spend (auditable next to refund credits).
+    if wallet_applied > 0:
+        try:
+            await db.wallet_transactions.insert_one({
+                "customer_id": str(cust["_id"]), "type": "spend", "amount": -wallet_applied,
+                "order_id": order_id, "note": f"Applied to order #{order_id[-6:].upper()}",
+                "created_at": now.isoformat()})
+        except Exception as e:
+            logger.warning(f"wallet spend ledger failed: {e}")
 
     # Mark personal coupon as used so it can't be redeemed twice.
     if personal_coupon_id:
@@ -4733,6 +4776,8 @@ async def reject_online_order(order_id: str, body: OrderRejectRequest, request: 
         {"_id": ObjectId(order_id)},
         {"$set": {"status": "rejected", "rejection_reason": reason, "rejected_by": user.get("name", ""), "rejected_at": now_iso, "updated_at": now_iso}},
     )
+    # Rejected order → any wallet credit spent on it goes straight back.
+    await _restore_order_wallet(order)
     refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     try:
         msg = _format_status_update(refreshed, "rejected", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
@@ -5158,6 +5203,14 @@ class RefundRequestIn(BaseModel):
 class RefundActionIn(BaseModel):
     action: str            # approved | rejected | refunded
     note: Optional[str] = ""
+    # How the money goes back when action == "refunded":
+    #   gateway = sent from the SafePay dashboard (default, works for guests)
+    #   wallet  = store credit into the customer's account wallet (signed-in only)
+    method: Optional[str] = "gateway"
+
+class RefundMessageIn(BaseModel):
+    text: Optional[str] = ""
+    image: Optional[str] = None  # data: URL — persisted to disk, never stored inline
 
 async def _email_customer(to: str, subject: str, body_text: str) -> None:
     """Best-effort transactional email using the SMTP settings the daily-report
@@ -5198,6 +5251,9 @@ async def _notify_customer_refund(order: dict, status: str, note: str = "") -> N
             f"Your refund request for order #{receipt} was declined."
             + (f" Reason: {note}" if note else "")
             + " Please call us if you'd like to discuss this."),
+        "refunded_wallet": ("Refund credited to your wallet",
+            f"Rs {amount:g} for order #{receipt} has been credited to your account wallet — "
+            "you can use it on your next order. Open the app or sign in on the website to see your balance."),
     }
     title, body = msgs.get(status, (None, None))
     if not title:
@@ -5334,12 +5390,167 @@ async def admin_refund_action(order_id: str, body: RefundActionIn, request: Requ
         "acted_by": user.get("name", "") or user.get("email", ""),
         "updated_at": now,
     })
+    wallet_credited = False
     if action == "refunded":
         rr["refunded_at"] = now
+        rr["refund_method"] = (body.method or "gateway").strip().lower()
+        # Store-credit refund: money goes into the customer's wallet instead of
+        # back through the gateway. Signed-in customers only (guests have no
+        # account to hold the balance).
+        if rr["refund_method"] == "wallet":
+            cid = o.get("customer_id")
+            if not cid:
+                raise HTTPException(status_code=400, detail="Guest order — wallet refunds need a customer account. Refund via SafePay instead.")
+            amount = float(rr.get("amount") or 0)
+            res = await db.customers.update_one(
+                {"_id": ObjectId(str(cid))}, {"$inc": {"wallet_balance": amount}})
+            if not res.matched_count:
+                raise HTTPException(status_code=400, detail="Customer account no longer exists — refund via SafePay instead.")
+            await db.wallet_transactions.insert_one({
+                "customer_id": str(cid), "type": "refund_credit", "amount": amount,
+                "order_id": str(o["_id"]), "note": f"Refund for order #{str(o['_id'])[-6:].upper()}",
+                "created_by": user.get("name", "") or user.get("email", ""),
+                "created_at": now,
+            })
+            wallet_credited = True
     await db.online_orders.update_one({"_id": o["_id"]}, {"$set": {"refund_request": rr}})
     o["refund_request"] = rr
-    await _notify_customer_refund(o, action, rr["admin_note"])
+    await _notify_customer_refund(o, "refunded_wallet" if wallet_credited else action, rr["admin_note"])
     return {"ok": True, "refund_request": rr}
+
+@api_router.get("/admin/refund-requests")
+async def admin_list_refund_requests(request: Request, status: str = "all"):
+    """The admin Refund Requests page: every order carrying a refund_request,
+    newest first, with everything staff need in one place — customer identity
+    (and whether they ordered as GUEST, i.e. no account/history on their side),
+    contact, items, totals, the conversation, and the current state."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view refunds.")
+    q: dict = {"refund_request": {"$exists": True, "$ne": None}}
+    if status != "all":
+        q["refund_request.status"] = status
+    orders = await db.online_orders.find(q).sort("refund_request.requested_at", -1).to_list(300)
+    out = []
+    for o in orders:
+        out.append({
+            "order_id": str(o["_id"]),
+            "receipt_no": str(o["_id"])[-6:].upper(),
+            "customer_name": o.get("customer_name", ""),
+            "phone": o.get("phone", ""),
+            "address": o.get("address", ""),
+            "is_guest": not bool(o.get("customer_id")),
+            "customer_id": str(o.get("customer_id")) if o.get("customer_id") else None,
+            "payment_method": o.get("payment_method", ""),
+            "payment_status": o.get("payment_status", ""),
+            "order_status": o.get("status", ""),
+            "items": o.get("items", []),
+            "total_price": o.get("total_price", 0),
+            "order_created_at": o.get("created_at", ""),
+            "refund_request": o.get("refund_request"),
+        })
+    counts = {}
+    try:
+        async for grp in db.online_orders.aggregate([
+            {"$match": {"refund_request": {"$exists": True, "$ne": None}}},
+            {"$group": {"_id": "$refund_request.status", "n": {"$sum": 1}}},
+        ]):
+            counts[grp["_id"]] = grp["n"]
+    except Exception:
+        pass
+    return {"requests": out, "counts": counts}
+
+async def _append_refund_message(o: dict, sender: str, sender_name: str, text: str, image_data_url: Optional[str]) -> dict:
+    """Append one message to the refund conversation. Images arrive as data:
+    URLs and are persisted to disk via the same helper the menu uses — the DB
+    only ever stores a small URL."""
+    text = (text or "").strip()[:1000]
+    image_url = ""
+    if image_data_url and str(image_data_url).startswith("data:"):
+        try:
+            image_url = _persist_data_url_image(image_data_url, kind="refund")
+        except Exception as e:
+            logger.warning(f"refund image persist failed: {e}")
+    if not text and not image_url:
+        raise HTTPException(status_code=400, detail="Message is empty.")
+    msg = {"from": sender, "name": sender_name, "text": text,
+           "image_url": image_url if image_url.startswith("/api/uploads/") else "",
+           "at": datetime.now(timezone.utc).isoformat()}
+    rr = o.get("refund_request") or {}
+    msgs = list(rr.get("messages") or [])
+    msgs.append(msg)
+    rr["messages"] = msgs[-50:]  # cap the thread
+    rr["updated_at"] = msg["at"]
+    await db.online_orders.update_one({"_id": o["_id"]}, {"$set": {"refund_request": rr}})
+    o["refund_request"] = rr
+    return msg
+
+@api_router.post("/online-orders/{order_id}/refund-message")
+async def customer_refund_message(order_id: str, body: RefundMessageIn, request: Request, t: Optional[str] = None):
+    """Customer side of the refund conversation (proof photos welcome).
+    Same authorization as the refund request itself."""
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o or not o.get("refund_request"):
+        raise HTTPException(status_code=404, detail="No refund request on this order.")
+    authorized = False
+    try:
+        user = await get_current_user(request)
+        if user.get("role") == "admin":
+            authorized = True
+    except HTTPException:
+        pass
+    if not authorized:
+        try:
+            cust = await get_current_customer(request)
+            if cust and o.get("customer_id") and str(o.get("customer_id")) == str(cust.get("_id")):
+                authorized = True
+        except HTTPException:
+            pass
+    if not authorized:
+        tok = o.get("track_token") or ""
+        if not (t and tok and secrets.compare_digest(str(t), str(tok))):
+            raise HTTPException(status_code=404, detail="Order not found")
+    msg = await _append_refund_message(o, "customer", o.get("customer_name", "Customer"), body.text, body.image)
+    receipt = str(o["_id"])[-6:].upper()
+    await _push_admins("💬 Refund message", f"Order #{receipt}: {msg['text'][:80] or 'photo attached'}", "/admin/refund-requests")
+    return {"ok": True, "message": msg, "refund_request": o["refund_request"]}
+
+@api_router.post("/admin/online-orders/{order_id}/refund-message")
+async def admin_refund_message(order_id: str, body: RefundMessageIn, request: Request):
+    """Staff side of the refund conversation. Customer is notified so they come
+    back to the thread (tracking page / app)."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to manage refunds.")
+    try:
+        o = await db.online_orders.find_one({"_id": ObjectId(order_id)})
+    except Exception:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not o or not o.get("refund_request"):
+        raise HTTPException(status_code=404, detail="No refund request on this order.")
+    msg = await _append_refund_message(o, "staff", user.get("name", "") or "Restaurant", body.text, body.image)
+    receipt = str(o["_id"])[-6:].upper()
+    note = f"Message about your refund for order #{receipt}: {msg['text'][:200]}"
+    try:
+        asyncio.create_task(send_whatsapp(o.get("phone", ""), note))
+    except Exception:
+        pass
+    cid = o.get("customer_id")
+    if cid:
+        try:
+            subs = await db.push_subscriptions.find({"customer_id": str(cid)}).to_list(20)
+            for s in subs:
+                await _send_web_push(s, "Message from the restaurant", msg["text"][:120] or "Photo attached", f"/track/{o['_id']}")
+        except Exception:
+            pass
+        try:
+            await _send_fcm_to_customer(cid, "Message from the restaurant", msg["text"][:120] or "Photo attached", str(o["_id"]))
+        except Exception:
+            pass
+    return {"ok": True, "message": msg, "refund_request": o["refund_request"]}
 
 @api_router.post("/push/subscribe")
 async def push_subscribe(body: PushSubscriptionIn, request: Request):
@@ -7103,6 +7314,28 @@ async def _release_online_order(order_id) -> None:
     except Exception as e:
         logger.error(f"Failed to release order {order_id}: {e}")
 
+async def _restore_order_wallet(o: dict) -> None:
+    """Give back wallet credit spent on an order that will never be fulfilled
+    (rejected / cancelled / abandoned checkout). Idempotent via the
+    wallet_restored flag, so multiple cancel paths can call it safely."""
+    try:
+        amt = float(o.get("wallet_applied") or 0)
+        cid = o.get("customer_id")
+        if amt <= 0 or not cid or o.get("wallet_restored"):
+            return
+        res = await db.online_orders.update_one(
+            {"_id": o["_id"], "wallet_restored": {"$ne": True}},
+            {"$set": {"wallet_restored": True}})
+        if not res.modified_count:
+            return  # another path already restored it
+        await db.customers.update_one({"_id": ObjectId(str(cid))}, {"$inc": {"wallet_balance": amt}})
+        await db.wallet_transactions.insert_one({
+            "customer_id": str(cid), "type": "restore", "amount": amt,
+            "order_id": str(o["_id"]), "note": "Order not fulfilled — credit returned",
+            "created_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        logger.error(f"wallet restore failed for order {o.get('_id')}: {e}")
+
 async def _expire_abandoned_gateway_orders() -> None:
     """Cancel awaiting_payment orders whose gateway checkout was abandoned
     (no payment confirmation within PAYMENT_ABANDON_MINUTES, default 30).
@@ -7112,9 +7345,14 @@ async def _expire_abandoned_gateway_orders() -> None:
     minutes = int(os.environ.get("PAYMENT_ABANDON_MINUTES", "30"))
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
     try:
+        q = {"status": "awaiting_payment", "created_at": {"$lt": cutoff},
+             "payment_status": {"$nin": ["paid", "pending_verification"]}}
+        # Give back any wallet credit applied to these doomed orders BEFORE
+        # cancelling them — abandoned checkouts must never eat store credit.
+        async for wo in db.online_orders.find({**q, "wallet_applied": {"$gt": 0}}):
+            await _restore_order_wallet(wo)
         res = await db.online_orders.update_many(
-            {"status": "awaiting_payment", "created_at": {"$lt": cutoff},
-             "payment_status": {"$nin": ["paid", "pending_verification"]}},
+            q,
             {"$set": {"status": "cancelled",
                       "cancel_reason": "payment_not_completed",
                       "cancelled_at": datetime.now(timezone.utc).isoformat()}},

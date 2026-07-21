@@ -31,6 +31,7 @@ const OPS_NAV = [
 const ONLINE_NAV = [
   { to: "/admin",            label: "Dashboard",     icon: LayoutDashboard, end: true, perm: "online_dashboard" },
   { to: "/admin/orders",     label: "Online Orders", icon: ShoppingBag, perm: "online_orders" },
+  { to: "/admin/refund-requests", label: "Refund Requests", icon: RotateCcw, perm: "online_orders" },
   { to: "/admin/menu",       label: "Menu",          icon: ChefHat, perm: "online_menu" },
   { to: "/admin/categories", label: "Categories",    icon: FolderTree, perm: "online_menu" },
   { to: "/admin/offers",     label: "Offers",        icon: Tag, perm: "online_offers" },
@@ -55,8 +56,13 @@ export default function AdminLayout() {
   // window ("knb_foodpanda") is reused on every click, so staff get ONE
   // FoodPanda window next to the POS, not a pile of tabs. Login persists via
   // the browser profile. Both partner accounts are switched inside FP's own UI.
-  const openFoodpanda = () => {
-    window.open("https://partner.foodpanda.com/dashboard", "knb_foodpanda",
+  // Two partner accounts → two separately-named windows, so both stay open
+  // side by side and re-clicking focuses the right one instead of stacking
+  // tabs. NOTE: the browser shares login cookies across windows of the same
+  // profile — to keep BOTH accounts signed in at once, log into FP 2's window
+  // via a second browser profile (or Edge, if FP 1 lives in Chrome).
+  const openFoodpanda = (n) => {
+    window.open("https://partner.foodpanda.com/dashboard", `knb_foodpanda_${n}`,
       "popup,width=1100,height=800");
   };
 
@@ -110,15 +116,18 @@ export default function AdminLayout() {
               {visibleOps.map((n) => (
                 <NavItem key={n.to} item={n} testidPrefix="admin-nav" />
               ))}
-              {/* External: FoodPanda partner dashboard in its own reusable window */}
-              <button
-                onClick={openFoodpanda}
-                data-testid="admin-nav-foodpanda"
-                className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors text-white/70 hover:text-white hover:bg-white/5"
-              >
-                <Bike className="w-4 h-4" style={{ color: "#D70F64" }} /> FoodPanda Orders
-                <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">↗</span>
-              </button>
+              {/* External: both FoodPanda partner accounts, each in its own reusable window */}
+              {[1, 2].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => openFoodpanda(n)}
+                  data-testid={`admin-nav-foodpanda-${n}`}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors text-white/70 hover:text-white hover:bg-white/5"
+                >
+                  <Bike className="w-4 h-4" style={{ color: "#D70F64" }} /> FoodPanda {n}
+                  <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">↗</span>
+                </button>
+              ))}
             </>
           )}
 

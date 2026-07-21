@@ -255,6 +255,29 @@ export default function OrdersPage() {
                                         <Package className="w-3.5 h-3.5" /> Track Order
                                     </Link>
                                     
+                                    {/* Refunds: request lives on the tracking page (full UI +
+                                        chat with the restaurant); from history we deep-link
+                                        there. Existing requests show their live status. */}
+                                    {order.refund_request ? (
+                                        <Link
+                                            to={order.track_token ? `/track/${order.id}?t=${encodeURIComponent(order.track_token)}` : `/track/${order.id}`}
+                                            data-testid={`refund-status-${order.id}`}
+                                            className={`inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-semibold transition-colors ${
+                                                order.refund_request.status === "refunded" ? "bg-green-100 text-green-800"
+                                                : order.refund_request.status === "rejected" ? "bg-neutral-200 text-neutral-600"
+                                                : "bg-purple-100 text-purple-800 hover:bg-purple-200"}`}>
+                                            💸 Refund: {order.refund_request.status}
+                                        </Link>
+                                    ) : (
+                                        order.payment_status === "paid" && !["cod", "pay_at_restaurant"].includes(order.payment_method) && (
+                                            <Link
+                                                to={order.track_token ? `/track/${order.id}?t=${encodeURIComponent(order.track_token)}` : `/track/${order.id}`}
+                                                data-testid={`request-refund-${order.id}`}
+                                                className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 hover:bg-red-100 text-brand-red rounded-full text-sm font-semibold transition-colors">
+                                                💸 Request Refund
+                                            </Link>
+                                        )
+                                    )}
                                     {["delivered", "cancelled", "rejected"].includes(order.status) && (
                                         <button
                                             onClick={() => repeatOrder(order)}

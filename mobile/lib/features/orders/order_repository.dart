@@ -138,6 +138,25 @@ class OrderRepository {
     throwIfError(res);
   }
 
+  /// Send a message on the refund conversation (text; optional image as a
+  /// data: URL). Same authorization as requestRefund.
+  Future<void> sendRefundMessage({
+    required String orderId,
+    required String text,
+    String? imageDataUrl,
+    String? trackToken,
+  }) async {
+    final res = await _api.dio.post(
+      '/online-orders/$orderId/refund-message',
+      data: {'text': text, if (imageDataUrl != null) 'image': imageDataUrl},
+      queryParameters: {
+        if (trackToken != null && trackToken.isNotEmpty) 't': trackToken,
+      },
+      options: Options(extra: {'showLoading': true}),
+    );
+    throwIfError(res);
+  }
+
   Future<List<Order>> myOrders() async {
     final res = await _api.dio.get('/online-orders/me');
     throwIfError(res);

@@ -327,7 +327,11 @@ export default function TrackingPage() {
 
             {/* Refunds — request (paid, non-cash orders) and live status tracking */}
             {order.refund_request ? (
-                <RefundStatusCard rr={order.refund_request} />
+                <>
+                    <RefundStatusCard rr={order.refund_request} />
+                    <RefundChat orderId={id} trackToken={trackToken} rr={order.refund_request}
+                        onUpdate={(rr) => setOrder((o) => ({ ...o, refund_request: rr }))} />
+                </>
             ) : (
                 order.payment_status === "paid" && !["cod", "pay_at_restaurant"].includes(order.payment_method) && (
                     <div className="mt-6 bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm" data-testid="refund-request-card">
@@ -414,6 +418,79 @@ function RefundStatusCard({ rr }) {
             </div>
             <p className={`text-sm mt-1 ${meta.sub}`}>{meta.body}</p>
             {rr.reason && <p className="text-xs mt-2 text-neutral-500">Your request: “{rr.reason}”</p>}
+        </div>
+    );
+}
+
+// Two-way conversation on a refund request: the restaurant may ask for proof
+// (e.g. a photo of the incomplete order) and the customer replies here — text
+// and/or an image. Poll-refresh keeps both sides in sync.
+function RefundChat({ orderId, trackToken, rr, onUpdate }) {
+    const [msg, setMsg] = useState("");
+    const [attach, setAttach] = useState(null); // data URL
+    const [sending, setSending] = useState(false);
+    const fileRef = { current: null };
+
+    const pickImage = (e) => {
+        const f = e.target.files?.[0];
+        e.target.value = "";
+        if (!f) return;
+        if (f.size > 5 * 1024 * 1024) { toast.error("Image too large — max 5 MB"); return; }
+        const reader = new FileReader();
+        reader.onload = () => setAttach(reader.result);
+        reader.readAsDataURL(f);
+    };
+
+    const send = async () => {
+        if (!msg.trim() && !attach) return;
+        setSending(true);
+        try {
+            const authToken = localStorage.getItem("knb_token");
+            const { data } = await axios.post(`${API}/online-orders/${orderId}/refund-message`,
+                { text: msg.trim(), image: attach },
+                {
+                    params: trackToken ? { t: trackToken } : undefined,
+                    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+                });
+            onUpdate(data.refund_request);
+            setMsg(""); setAttach(null);
+        } catch (err) {
+            toast.error(err?.response?.data?.detail || "Could not send message");
+        } finally { setSending(false); }
+    };
+
+    const msgs = rr.messages || [];
+    return (
+        <div className="mt-3 bg-white border border-neutral-100 rounded-2xl p-4 shadow-sm" data-testid="refund-chat">
+            <p className="text-[10px] uppercase tracking-wider font-bold text-neutral-400 mb-2">Messages with the restaurant</p>
+            <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                {msgs.length === 0 && <p className="text-xs text-neutral-400 italic">No messages yet. If we need anything (like a photo), we'll ask here.</p>}
+                {msgs.map((m, i) => (
+                    <div key={i} className={`max-w-[85%] rounded-xl px-3 py-2 text-sm ${m.from === "customer" ? "ml-auto bg-brand-red/10 text-brand-ink" : "bg-neutral-100 text-neutral-800"}`}>
+                        <div className="text-[10px] text-neutral-400 mb-0.5">{m.from === "customer" ? "You" : "Restaurant"} · {m.at ? new Date(m.at).toLocaleString() : ""}</div>
+                        {m.text && <div>{m.text}</div>}
+                        {m.image_url && (
+                            <a href={`${API}${m.image_url.replace(/^\/api/, "")}`} target="_blank" rel="noreferrer">
+                                <img src={`${API}${m.image_url.replace(/^\/api/, "")}`} alt="attachment" className="mt-1 rounded-lg max-h-40" />
+                            </a>
+                        )}
+                    </div>
+                ))}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+                <label className={`w-9 h-9 rounded-full border flex items-center justify-center cursor-pointer flex-shrink-0 ${attach ? "border-brand-red text-brand-red" : "border-neutral-200 text-neutral-400"}`} title="Attach a photo (e.g. proof)">
+                    <input type="file" accept="image/*" className="hidden" ref={(el) => { fileRef.current = el; }} onChange={pickImage} />
+                    📷
+                </label>
+                <input value={msg} onChange={(e) => setMsg(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
+                    placeholder={attach ? "Photo attached — add a note…" : "Write a message or attach a photo…"}
+                    data-testid="refund-chat-input"
+                    className="flex-1 border border-neutral-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:border-brand-red" />
+                <button onClick={send} disabled={sending || (!msg.trim() && !attach)} data-testid="refund-chat-send"
+                    className="bg-brand-red text-white rounded-full px-4 py-2 text-sm font-bold disabled:opacity-40">
+                    {sending ? "…" : "Send"}
+                </button>
+            </div>
         </div>
     );
 }

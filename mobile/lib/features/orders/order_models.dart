@@ -150,6 +150,8 @@ class RefundRequest {
     required this.amount,
     this.adminNote = '',
     this.refundedAt = '',
+    this.refundMethod = '',
+    this.messages = const [],
   });
 
   final String status; // requested | approved | refunded | rejected
@@ -158,12 +160,45 @@ class RefundRequest {
   final String adminNote;
   final String refundedAt;
 
+  /// "wallet" when the refund was credited as store credit; "gateway" or empty
+  /// when sent back via SafePay.
+  final String refundMethod;
+
+  /// Conversation with the restaurant (proof requests/photos etc.).
+  final List<RefundMessage> messages;
+
   factory RefundRequest.fromJson(Map<String, dynamic> j) => RefundRequest(
         status: (j['status'] ?? '').toString(),
         reason: (j['reason'] ?? '').toString(),
         amount: _toDouble(j['amount']),
         adminNote: (j['admin_note'] ?? '').toString(),
         refundedAt: (j['refunded_at'] ?? '').toString(),
+        refundMethod: (j['refund_method'] ?? '').toString(),
+        messages: ((j['messages'] as List?) ?? [])
+            .whereType<Map>()
+            .map((m) => RefundMessage.fromJson(Map<String, dynamic>.from(m)))
+            .toList(),
+      );
+}
+
+class RefundMessage {
+  const RefundMessage({
+    required this.from,
+    required this.text,
+    this.imageUrl = '',
+    this.at = '',
+  });
+
+  final String from; // customer | staff
+  final String text;
+  final String imageUrl; // /api/uploads/... (relative)
+  final String at;
+
+  factory RefundMessage.fromJson(Map<String, dynamic> j) => RefundMessage(
+        from: (j['from'] ?? '').toString(),
+        text: (j['text'] ?? '').toString(),
+        imageUrl: (j['image_url'] ?? '').toString(),
+        at: (j['at'] ?? '').toString(),
       );
 }
 

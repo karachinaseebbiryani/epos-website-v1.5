@@ -93,18 +93,45 @@ export default function VoiceAssistantModal({ open, onClose, onConfirm, currency
 
   // ---------- Menu index (skeleton token arrays) ----------
   // Each item contributes its MENU NAME plus every admin-defined VOICE ALIAS
-  // (Menu Management → "Voice names"). Aliases capture what customers actually
-  // say — "adhi deg", "sada chawal", Urdu-script spellings — and match with
-  // the same phonetic machinery. All spellings resolve to the same item id.
+  // (Menu Management → "Voice names"), and — when the item has POS variations —
+  // one extra entry PER VARIATION so "half biryani" / "biryani half" rings up
+  // the Half size at the Half price. Variation entries are generated in both
+  // word orders and also from each alias ("adhi deg half"). All spellings of
+  // one size resolve to the same {item id + variation}.
   const nameIndex = useMemo(() => {
     const entries = [];
     for (const it of menuItems || []) {
       const spellings = [String(it.name || ""), ...(Array.isArray(it.voice_aliases) ? it.voice_aliases : [])];
-      for (const sp of spellings) {
-        const tokens = String(sp || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+      const variations = Array.isArray(it.pos_variations) ? it.pos_variations : [];
+      const push = (spoken, price, variationName) => {
+        const tokens = String(spoken || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
         const skels = tokens.map(skeleton).filter(Boolean);
-        if (!skels.length) continue;
-        entries.push({ id: it.id, name: it.name, price: Number(it.price) || 0, tokens, skels });
+        if (!skels.length) return;
+        entries.push({
+          id: it.id,
+          name: variationName ? `${it.name} (${variationName})` : it.name,
+          base_name: it.name,
+          variation_name: variationName || null,
+          price: Number(price) || 0,
+          tokens,
+          skels,
+        });
+      };
+      for (const sp of spellings) {
+        // Variation-qualified entries FIRST so "half biryani" prefers the
+        // Half size over the base item (ties broken by more tokens matched).
+        for (const v of variations) {
+          if (!v?.name) continue;
+          push(`${sp} ${v.name}`, v.price, v.name);
+          push(`${v.name} ${sp}`, v.price, v.name);
+        }
+        // Base entry: with variations defined, the first variation is the
+        // sensible default when the caller names no size.
+        if (variations.length > 0 && variations[0]?.name) {
+          push(sp, variations[0].price, variations[0].name);
+        } else {
+          push(sp, it.price, null);
+        }
       }
     }
     return entries;
@@ -202,13 +229,23 @@ export default function VoiceAssistantModal({ open, onClose, onConfirm, currency
       if (best) {
         const implicit = pendingQty === null;
         const q = pendingQty ?? 1;
-        const existing = items.find((x) => x.item_id === best.it.id);
+        // A line is item + size — "aik half biryani aur do full biryani" must
+        // stay two separate lines.
+        const existing = items.find((x) => x.item_id === best.it.id && (x.variation_name || null) === (best.it.variation_name || null));
         if (existing) {
           existing.quantity += q;
           lastItem = existing;
           lastItem._implicitQty = implicit;
         } else {
-          lastItem = { item_id: best.it.id, name: best.it.name, price: best.it.price, quantity: q, _implicitQty: implicit };
+          lastItem = {
+            item_id: best.it.id,
+            name: best.it.name,
+            base_name: best.it.base_name || best.it.name,
+            variation_name: best.it.variation_name || null,
+            price: best.it.price,
+            quantity: q,
+            _implicitQty: implicit,
+          };
           items.push(lastItem);
         }
         score += best.matched;
