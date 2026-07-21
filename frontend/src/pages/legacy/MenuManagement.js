@@ -50,7 +50,7 @@ export default function MenuManagement() {
   const [editingItem, setEditingItem] = useState(null);
   const [catName, setCatName] = useState("");
   const [catColor, setCatColor] = useState(null);
-  const [itemForm, setItemForm] = useState({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "" });
+  const [itemForm, setItemForm] = useState({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "", pos_variations: [], pos_allergies: [], voice_aliases: "" });
   const [deleteConfirm, setDeleteConfirm] = useState({ open: false, type: "", id: "", name: "" });
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -191,6 +191,15 @@ export default function MenuManagement() {
         outsourced_unit_cost: itemForm.is_outsourced && itemForm.outsourced_unit_cost !== ""
           ? parseFloat(itemForm.outsourced_unit_cost)
           : null,
+        // POS-only: colour-coded size variations + allergy "leave out" list.
+        // Independent from the online-store menu's variations/ingredients.
+        pos_variations: itemForm.pos_variations
+          .filter((v) => v.name.trim() && v.price !== "" && !isNaN(parseFloat(v.price)))
+          .map((v) => ({ name: v.name.trim(), price: parseFloat(v.price), color: v.color || null })),
+        pos_allergies: itemForm.pos_allergies.map((a) => a.trim()).filter(Boolean),
+        // Comma-separated in the form → list. Spoken names for the voice
+        // assistant (Roman or Urdu script) — e.g. "adhi deg, بریانی, biryani".
+        voice_aliases: String(itemForm.voice_aliases || "").split(",").map((a) => a.trim()).filter(Boolean),
       };
       if (editingItem) {
         await axios.put(`${API}/menu-items/${editingItem.id}`, payload, { withCredentials: true });
@@ -200,7 +209,7 @@ export default function MenuManagement() {
         toast.success("Item created");
       }
       setItemDialog(false);
-      setItemForm({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "" });
+      setItemForm({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "", pos_variations: [], pos_allergies: [], voice_aliases: "" });
       setEditingItem(null);
       fetchData();
     } catch (err) { toast.error(err.response?.data?.detail || "Failed"); }
@@ -218,6 +227,9 @@ export default function MenuManagement() {
       is_outsourced: !!item.is_outsourced,
       outsourced_vendor_id: item.outsourced_vendor_id || "",
       outsourced_unit_cost: item.outsourced_unit_cost != null ? String(item.outsourced_unit_cost) : "",
+      pos_variations: (item.pos_variations || []).map((v) => ({ name: v.name || "", price: String(v.price ?? ""), color: v.color || null })),
+      pos_allergies: (item.pos_allergies || []).slice(),
+      voice_aliases: (item.voice_aliases || []).join(", "),
     });
     setItemDialog(true);
   };
@@ -337,7 +349,7 @@ export default function MenuManagement() {
                 disabled={!canEdit}
                 onClick={() => {
                   setEditingItem(null);
-                  setItemForm({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "" });
+                  setItemForm({ name: "", price: "", price_fp1: "", price_fp2: "", category_id: "", stock: "100", low_stock_threshold: "10", color: null, is_outsourced: false, outsourced_vendor_id: "", outsourced_unit_cost: "", pos_variations: [], pos_allergies: [], voice_aliases: "" });
                   setItemDialog(true);
                 }}
                 className="flex items-center gap-2 text-white font-semibold disabled:opacity-50 shrink-0"
@@ -638,6 +650,93 @@ export default function MenuManagement() {
               </div>
             </div>
             <ColorPicker value={itemForm.color} onChange={(c) => setItemForm({ ...itemForm, color: c })} label="Item Button Color (overrides category)" />
+
+            {/* POS size variations — colour-coded, POS-ONLY (the website menu has
+                its own separate variations in Online Store → Menu). The colour
+                paints the picker button so staff can match by colour alone:
+                e.g. red = Half Rs 200, blue = Full Rs 300. */}
+            <div className="rounded-md border border-[#E5E2DC] p-3" data-testid="pos-variations-section">
+              <div className="flex items-center justify-between mb-1">
+                <Label className="font-bold" style={{ color: "#1E3F20" }}>POS Variations (sizes)</Label>
+                <Button type="button" size="sm" variant="outline" data-testid="pos-variation-add"
+                  className="h-7 text-xs border-[#E5E2DC]"
+                  onClick={() => setItemForm({ ...itemForm, pos_variations: [...itemForm.pos_variations, { name: "", price: itemForm.price || "", color: null }] })}>
+                  + Add size
+                </Button>
+              </div>
+              <p className="text-[11px] mb-2" style={{ color: "#5C5F5C" }}>
+                POS only — does not touch the website menu. With sizes set, tapping the item in POS asks which size; each size can have a colour so staff recognise it at a glance.
+              </p>
+              {itemForm.pos_variations.length === 0 && (
+                <p className="text-[11px] italic" style={{ color: "#9C8F7A" }}>No sizes — item sells at its base price with one tap.</p>
+              )}
+              <div className="space-y-2">
+                {itemForm.pos_variations.map((v, idx) => (
+                  <div key={idx} className="rounded border border-[#E5E2DC] p-2 space-y-2" data-testid={`pos-variation-row-${idx}`}
+                    style={v.color ? { borderLeft: `6px solid ${v.color}` } : undefined}>
+                    <div className="flex gap-2 items-center">
+                      <Input placeholder="Name (e.g., Half)" value={v.name} data-testid={`pos-variation-name-${idx}`}
+                        onChange={(e) => setItemForm({ ...itemForm, pos_variations: itemForm.pos_variations.map((x, i) => i === idx ? { ...x, name: e.target.value } : x) })}
+                        className="border-[#E5E2DC] flex-1" />
+                      <Input placeholder="Price" type="number" value={v.price} data-testid={`pos-variation-price-${idx}`}
+                        onChange={(e) => setItemForm({ ...itemForm, pos_variations: itemForm.pos_variations.map((x, i) => i === idx ? { ...x, price: e.target.value } : x) })}
+                        className="border-[#E5E2DC] w-24" />
+                      <button type="button" data-testid={`pos-variation-remove-${idx}`}
+                        onClick={() => setItemForm({ ...itemForm, pos_variations: itemForm.pos_variations.filter((_, i) => i !== idx) })}
+                        className="w-8 h-8 rounded flex items-center justify-center border border-[#E5E2DC] hover:bg-[#FCECEB] flex-shrink-0" style={{ color: "#A63D31" }}>✕</button>
+                    </div>
+                    <ColorPicker value={v.color} label="Size colour"
+                      onChange={(c) => setItemForm({ ...itemForm, pos_variations: itemForm.pos_variations.map((x, i) => i === idx ? { ...x, color: c } : x) })} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Voice names — what customers SAY for this item (Roman Urdu or
+                Urdu script). The voice assistant matches these phonetically in
+                addition to the item name, so "adhi deg" can ring up Half Deg. */}
+            <div className="rounded-md border border-[#E5E2DC] p-3" data-testid="voice-aliases-section">
+              <Label className="font-bold" style={{ color: "#1E3F20" }}>Voice names (spoken)</Label>
+              <p className="text-[11px] mt-1 mb-2" style={{ color: "#5C5F5C" }}>
+                How customers say this item — separate with commas. Roman Urdu and اردو both work.
+                Example: <em>adhi deg, بریانی, chawal</em>
+              </p>
+              <Input data-testid="voice-aliases-input" placeholder="e.g. adhi deg, بریانی"
+                value={itemForm.voice_aliases}
+                onChange={(e) => setItemForm({ ...itemForm, voice_aliases: e.target.value })}
+                className="border-[#E5E2DC]" dir="auto" />
+            </div>
+
+            {/* POS allergies / leave-out list — plain names staff can untick per
+                order ("no onion"). Printed highlighted on the kitchen ticket. */}
+            <div className="rounded-md border border-[#E5E2DC] p-3" data-testid="pos-allergies-section">
+              <div className="flex items-center justify-between mb-1">
+                <Label className="font-bold" style={{ color: "#1E3F20" }}>Allergies / Removable (POS)</Label>
+                <Button type="button" size="sm" variant="outline" data-testid="pos-allergy-add"
+                  className="h-7 text-xs border-[#E5E2DC]"
+                  onClick={() => setItemForm({ ...itemForm, pos_allergies: [...itemForm.pos_allergies, ""] })}>
+                  + Add
+                </Button>
+              </div>
+              <p className="text-[11px] mb-2" style={{ color: "#5C5F5C" }}>
+                Things a customer may ask to leave out (onion, nuts, chillies…). Cashier ticks them when punching the order; the kitchen ticket prints “✗ NO ONION” highlighted.
+              </p>
+              {itemForm.pos_allergies.length === 0 && (
+                <p className="text-[11px] italic" style={{ color: "#9C8F7A" }}>None — the customise screen will skip this section.</p>
+              )}
+              <div className="space-y-2">
+                {itemForm.pos_allergies.map((a, idx) => (
+                  <div key={idx} className="flex gap-2 items-center" data-testid={`pos-allergy-row-${idx}`}>
+                    <Input placeholder="e.g., Onion" value={a}
+                      onChange={(e) => setItemForm({ ...itemForm, pos_allergies: itemForm.pos_allergies.map((x, i) => i === idx ? e.target.value : x) })}
+                      className="border-[#E5E2DC] flex-1" data-testid={`pos-allergy-input-${idx}`} />
+                    <button type="button" data-testid={`pos-allergy-remove-${idx}`}
+                      onClick={() => setItemForm({ ...itemForm, pos_allergies: itemForm.pos_allergies.filter((_, i) => i !== idx) })}
+                      className="w-8 h-8 rounded flex items-center justify-center border border-[#E5E2DC] hover:bg-[#FCECEB] flex-shrink-0" style={{ color: "#A63D31" }}>✕</button>
+                  </div>
+                ))}
+              </div>
+            </div>
 
             {/* Outsourced (vendor-linked) product — auto-creates vendor payable on sale */}
             <div className="rounded-md border border-[#E5E2DC] p-3 bg-[#F4F8FB]" data-testid="outsourced-section">

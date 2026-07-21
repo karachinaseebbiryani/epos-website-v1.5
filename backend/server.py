@@ -418,6 +418,15 @@ class MenuItemVariation(BaseModel):
     name: str
     price: float
 
+class PosVariation(BaseModel):
+    """POS-only size/portion variation. Independent from the online-store
+    `variations` list so the counter menu can differ from the website. `color`
+    paints the picker button — lets staff who can't read match by colour
+    (e.g. red = Half Rs 200, blue = Full Rs 300)."""
+    name: str
+    price: float
+    color: Optional[str] = None
+
 class ModifierOption(BaseModel):
     id: Optional[str] = None
     name: str
@@ -449,6 +458,9 @@ class MenuItemCreate(BaseModel):
     color: Optional[str] = None
     variations: Optional[List[MenuItemVariation]] = None
     variations_active: Optional[bool] = True
+    pos_variations: Optional[List[PosVariation]] = None   # POS-only, colour-coded
+    pos_allergies: Optional[List[str]] = None             # POS "leave out" list (allergy/preference)
+    voice_aliases: Optional[List[str]] = None             # spoken names ("adhi deg", "بریانی") for the voice assistant
     modifier_groups: Optional[List[ModifierGroup]] = None
     ingredients: Optional[List[MenuIngredient]] = None
     discount_type: Optional[str] = None
@@ -475,6 +487,9 @@ class MenuItemUpdate(BaseModel):
     color: Optional[str] = None
     variations: Optional[List[MenuItemVariation]] = None
     variations_active: Optional[bool] = None
+    pos_variations: Optional[List[PosVariation]] = None
+    pos_allergies: Optional[List[str]] = None
+    voice_aliases: Optional[List[str]] = None
     modifier_groups: Optional[List[ModifierGroup]] = None
     ingredients: Optional[List[MenuIngredient]] = None
     discount_type: Optional[str] = None
@@ -909,6 +924,11 @@ async def get_menu_items(request: Request, response: Response):
         # Additive fields — older clients simply ignore them.
         "variations_active": i.get("variations_active", True),
         "ingredients": i.get("ingredients", []),
+        # POS-only variation/allergy lists (independent from online-store
+        # `variations`/`ingredients`; colour-coded for the counter).
+        "pos_variations": i.get("pos_variations", []),
+        "pos_allergies": i.get("pos_allergies", []),
+        "voice_aliases": i.get("voice_aliases", []),
         "discount_type": i.get("discount_type"), "discount_value": i.get("discount_value", 0),
         "is_bestseller": i.get("is_bestseller", False), "is_popular": i.get("is_popular", False),
         "image_url": i.get("image_url", ""), "image_type": i.get("image_type", "url"),
@@ -967,6 +987,10 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
         "category_id": item.category_id, "stock": item.stock, "low_stock_threshold": item.low_stock_threshold,
         "color": item.color, "variations": variations,
         "variations_active": True if item.variations_active is None else bool(item.variations_active),
+        # POS-only counterparts — never read by the customer website/app.
+        "pos_variations": [v.model_dump() for v in (item.pos_variations or [])],
+        "pos_allergies": [str(a).strip() for a in (item.pos_allergies or []) if str(a).strip()],
+        "voice_aliases": [str(a).strip() for a in (item.voice_aliases or []) if str(a).strip()],
         "modifier_groups": _norm_modifier_groups([g.model_dump() for g in (item.modifier_groups or [])]),
         "ingredients": _norm_ingredients([ing.model_dump() for ing in (item.ingredients or [])]),
         "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
@@ -990,6 +1014,8 @@ async def update_menu_item(item_id: str, item: MenuItemUpdate, request: Request)
     ud = {k: v for k, v in item.model_dump().items() if v is not None}
     if "modifier_groups" in ud: ud["modifier_groups"] = _norm_modifier_groups(ud["modifier_groups"])
     if "ingredients" in ud: ud["ingredients"] = _norm_ingredients(ud["ingredients"])
+    if "pos_allergies" in ud: ud["pos_allergies"] = [str(a).strip() for a in ud["pos_allergies"] if str(a).strip()]
+    if "voice_aliases" in ud: ud["voice_aliases"] = [str(a).strip() for a in ud["voice_aliases"] if str(a).strip()]
     # If the admin re-uploaded a photo as a base64 data: URL, persist it to disk
     # before saving, so we never store inline image bytes in MongoDB.
     if "image_url" in ud and isinstance(ud["image_url"], str) and ud["image_url"].startswith("data:"):

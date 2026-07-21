@@ -25,17 +25,17 @@ const posLineKey = (c) => {
   return `${c.item_id}${varPart}${remPart}`;
 };
 
-// KNB stores ingredients as {id, name, removable} objects (richer than Marhaba's
-// plain string list) — the customise dialog only offers the removable ones.
+// POS-ONLY customise data. The POS deliberately ignores the online-store
+// `variations`/`ingredients` fields — counter staff manage their own
+// colour-coded variations + allergy list in POS Menu Management
+// (pos_variations / pos_allergies), independent of the website menu.
 const removableIngredientNames = (item) =>
-  (Array.isArray(item?.ingredients) ? item.ingredients : [])
-    .filter((ing) => ing && ing.name && ing.removable !== false)
-    .map((ing) => ing.name);
+  (Array.isArray(item?.pos_allergies) ? item.pos_allergies : [])
+    .map((a) => String(a || "").trim())
+    .filter(Boolean);
 
-// Variations are offered only when the item has them AND they're active (the
-// admin can pause variations per item without deleting them).
 const activeVariations = (item) =>
-  (item?.variations_active !== false && Array.isArray(item?.variations)) ? item.variations : [];
+  Array.isArray(item?.pos_variations) ? item.pos_variations : [];
 
 // Stable per-line id used in dine-in mode so a "sent" line and a fresh "new" line
 // of the same dish can coexist (and be updated/removed independently). In plain
@@ -707,18 +707,26 @@ export default function POSPage() {
                 <div className="space-y-2">
                   {activeVariations(customiseItem).map((v) => {
                     const on = customiseVariation?.name === v.name;
+                    // Admin-set colour → big solid swatch even illiterate staff
+                    // can match ("red = half, blue = full"). Falls back to the
+                    // neutral radio look when no colour is set.
+                    const vColor = v.color || null;
+                    const vText = vColor ? luminanceTextColor(vColor) : "#1A1D1A";
                     return (
                       <button key={v.name} type="button" data-testid={`pos-variation-${v.name}`}
                         onClick={() => setCustomiseVariation(v)}
-                        className={`w-full flex items-center justify-between p-3 rounded-lg border text-left text-sm font-medium transition-colors ${on ? "border-transparent" : "border-[#E5E2DC] hover:bg-[#F9F8F6]"}`}
-                        style={on ? { background: "#EAF4EB", borderColor: "#1E3F20", color: "#1A1D1A" } : { color: "#1A1D1A" }}>
+                        className={`w-full flex items-center justify-between p-3 rounded-lg border text-left text-sm font-bold transition-all ${on ? "border-transparent scale-[1.02] shadow-md" : "hover:opacity-90"}`}
+                        style={vColor
+                          ? { background: vColor, color: vText, borderColor: on ? "#1A1D1A" : vColor, outline: on ? "3px solid #1A1D1A" : "none", outlineOffset: "-1px" }
+                          : (on ? { background: "#EAF4EB", borderColor: "#1E3F20", color: "#1A1D1A" } : { color: "#1A1D1A", borderColor: "#E5E2DC" })}>
                         <span className="flex items-center gap-2">
-                          <span className="w-4 h-4 rounded-full border flex items-center justify-center" style={{ borderColor: on ? "#1E3F20" : "#C9C6C0" }}>
-                            {on && <span className="w-2 h-2 rounded-full" style={{ background: "#1E3F20" }} />}
+                          <span className="w-4 h-4 rounded-full border flex items-center justify-center"
+                            style={{ borderColor: vColor ? vText : (on ? "#1E3F20" : "#C9C6C0"), background: "transparent" }}>
+                            {on && <span className="w-2 h-2 rounded-full" style={{ background: vColor ? vText : "#1E3F20" }} />}
                           </span>
                           {v.name}
                         </span>
-                        <span className="font-bold" style={{ color: "#1E3F20" }}>{currency} {Number(v.price).toFixed(2)}</span>
+                        <span className="font-black" style={{ color: vColor ? vText : "#1E3F20" }}>{currency} {Number(v.price).toFixed(2)}</span>
                       </button>
                     );
                   })}

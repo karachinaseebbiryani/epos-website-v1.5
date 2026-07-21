@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ShoppingBag, ChefHat, Tag, CalendarDays, LogOut,
   Settings, FolderTree, ShoppingCart, Package, Receipt, Truck, RotateCcw,
   History, FileBarChart, SlidersHorizontal, Diamond, Gift, MessageSquare, Bell,
-  HelpCircle, CreditCard, LayoutGrid,
+  HelpCircle, CreditCard, LayoutGrid, Bike,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import PosInstall from "./PosInstall";
@@ -49,6 +49,16 @@ export default function AdminLayout() {
   const navigate = useNavigate();
   const { user } = useStaffAuth();
   const [adminTokenOk, setAdminTokenOk] = useState(false);
+
+  // FoodPanda partner dashboard — opened as a separate popup window (FP blocks
+  // iframe embedding, and auto-accepting would breach partner terms). One named
+  // window ("knb_foodpanda") is reused on every click, so staff get ONE
+  // FoodPanda window next to the POS, not a pile of tabs. Login persists via
+  // the browser profile. Both partner accounts are switched inside FP's own UI.
+  const openFoodpanda = () => {
+    window.open("https://partner.foodpanda.com/dashboard", "knb_foodpanda",
+      "popup,width=1100,height=800");
+  };
 
   // Allow access if EITHER the online admin token (set by /admin/login)
   // OR the staff JWT (set by /admin/staff-login or /admin/sign-in) is present.
@@ -100,6 +110,15 @@ export default function AdminLayout() {
               {visibleOps.map((n) => (
                 <NavItem key={n.to} item={n} testidPrefix="admin-nav" />
               ))}
+              {/* External: FoodPanda partner dashboard in its own reusable window */}
+              <button
+                onClick={openFoodpanda}
+                data-testid="admin-nav-foodpanda"
+                className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors text-white/70 hover:text-white hover:bg-white/5"
+              >
+                <Bike className="w-4 h-4" style={{ color: "#D70F64" }} /> FoodPanda Orders
+                <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">↗</span>
+              </button>
             </>
           )}
 
