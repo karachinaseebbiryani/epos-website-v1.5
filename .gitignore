@@ -66,6 +66,9 @@ agenthub/agents/youtube/db
 
 # Archive files and large assets
 **/*.zip
+# ...except the FoodPanda till-setup pack, which the live site serves at
+# /downloads/foodpanda-windows-setup.zip (see windows-setup/FOODPANDA_TWO_ACCOUNTS.txt)
+!frontend/public/downloads/*.zip
 **/*.tar.gz
 **/*.tar
 **/*.tgz
