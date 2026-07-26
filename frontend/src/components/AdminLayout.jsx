@@ -62,7 +62,7 @@ export default function AdminLayout() {
   // profile — to keep BOTH accounts signed in at once, log into FP 2's window
   // via a second browser profile (or Edge, if FP 1 lives in Chrome).
   const openFoodpanda = (n) => {
-    window.open("https://partner.foodpanda.com/dashboard", `knb_foodpanda_${n}`,
+    window.open("https://partner.foodpanda.com/live-orders", `knb_foodpanda_${n}`,
       "popup,width=1100,height=800");
   };
 
@@ -128,6 +128,17 @@ export default function AdminLayout() {
                   <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">↗</span>
                 </button>
               ))}
+              {/* Setup pack for running BOTH FP accounts at once (Chrome-profile
+                  shortcuts). Lives on the site itself so the link can never be
+                  lost — see windows-setup/FOODPANDA_TWO_ACCOUNTS.txt. */}
+              <a
+                href="/downloads/foodpanda-windows-setup.zip"
+                download
+                data-testid="admin-nav-foodpanda-setup"
+                className="w-full flex items-center gap-3 px-4 py-1.5 rounded-xl text-[11px] font-medium transition-colors text-white/40 hover:text-white/80 hover:bg-white/5"
+              >
+                <span className="w-4" /> ⤓ 2-accounts setup (new till)
+              </a>
             </>
           )}
 

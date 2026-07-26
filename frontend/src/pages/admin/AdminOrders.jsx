@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import ReceiptModal from "../../components/legacy/ReceiptModal";
+import { resolveAlertSrc, useAlertPrefs } from "../../lib/alertSound";
 
 // Statuses surfaced as filter chips. We keep all legacy statuses so existing POS flows still work.
 const STATUSES = ["pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "rejected", "cancelled"];
@@ -22,7 +23,6 @@ const POLL_MS = 4000; // 4-second polling per requirement (3-5s)
 // Refetch the full order list only every Nth poll (safety net for edits made elsewhere);
 // new orders still refresh it immediately via latest_id. 5 × 4s ≈ every 20s.
 const LIST_REFRESH_EVERY = 5;
-const ALERT_AUDIO_SRC = "/order-alert.wav";
 
 export default function AdminOrders() {
     const [orders, setOrders] = useState([]);
@@ -34,6 +34,7 @@ export default function AdminOrders() {
     const [busyId, setBusyId] = useState(null);
     const [muted, setMuted] = useState(false);
     const [audioBlocked, setAudioBlocked] = useState(false);
+    const prefs = useAlertPrefs();
 
     const audioRef = useRef(null);
     const lastPendingIdRef = useRef(null);
@@ -93,6 +94,22 @@ export default function AdminOrders() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [muted]);
 
+    // Honour the admin's chosen alert volume (set in Full Settings).
+    useEffect(() => {
+        const el = audioRef.current;
+        if (el) el.volume = prefs.volume;
+    }, [prefs.volume]);
+
+    // Silence the ring when this screen unmounts. Chrome keeps a detached-but-
+    // referenced <audio> playing, so without this the sound loops forever after
+    // navigating away mid-ring — and GlobalOrderAlert starts a second one on top
+    // of it. The element is captured here (not read inside the cleanup) because
+    // React has already nulled the ref by the time cleanup runs on unmount.
+    useEffect(() => {
+        const el = audioRef.current;
+        return () => { if (el && !el.paused) { el.pause(); el.currentTime = 0; } };
+    }, []);
+
     const manageAlertSound = (count) => {
         const el = audioRef.current;
         if (!el) return;
@@ -112,6 +129,19 @@ export default function AdminOrders() {
         }
     };
 
+    // Re-check the pending count immediately after a staff action instead of
+    // waiting up to POLL_MS for the next tick — otherwise the ring carries on
+    // for a few seconds after the order was already accepted, which reads as
+    // "the sound doesn't stop".
+    const refreshPending = async () => {
+        try {
+            const { data } = await api.get("/online-orders/pending-count");
+            const count = data.pending_count || 0;
+            pendingCountRef.current = count;
+            manageAlertSound(count);
+        } catch { /* next poll will catch up */ }
+    };
+
     const enableAudio = () => {
         const el = audioRef.current;
         if (!el) return;
@@ -127,6 +157,7 @@ export default function AdminOrders() {
             await api.post(`/online-orders/${id}/accept`);
             toast.success("Order accepted — customer notified");
             load();
+            refreshPending();
         } catch (err) {
             toast.error(formatApiError(err.response?.data?.detail));
         } finally { setBusyId(null); }
@@ -139,6 +170,7 @@ export default function AdminOrders() {
             toast.success("Order rejected — customer notified");
             setRejectFor(null);
             load();
+            refreshPending();
         } catch (err) {
             toast.error(formatApiError(err.response?.data?.detail));
         } finally { setBusyId(null); }
@@ -215,7 +247,7 @@ export default function AdminOrders() {
     return (
         <div data-testid="admin-orders-page">
             {/* Looping ringing audio (managed by manageAlertSound) */}
-            <audio ref={audioRef} src={ALERT_AUDIO_SRC} loop preload="auto" data-testid="order-alert-audio" />
+            <audio ref={audioRef} src={resolveAlertSrc(prefs.sound)} loop preload="auto" data-testid="order-alert-audio" />
 
             <div className="flex items-end justify-between flex-wrap gap-3 mb-6">
                 <div>

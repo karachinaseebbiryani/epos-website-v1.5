@@ -1,0 +1,107 @@
+============================================================
+  KARACHI NASEEB BIRYANI AND MURG PULAO - RestoPOS
+  Running BOTH FoodPanda accounts at the same time
+============================================================
+
+THE PROBLEM
+------------------------------------------------------------
+Signing into FoodPanda 1, then opening FoodPanda 2, showed the
+SAME account again.
+
+That is not a fault in the POS. A browser keeps ONE login per
+website per profile. Both windows point at partner.foodpanda.com,
+so the browser hands them both the same session - no matter how
+many windows are opened, or which button opened them. No website
+is allowed to change this; it is the same rule that stops one
+site from stealing another site's login.
+
+The only way to hold two FoodPanda logins at once is to give the
+second account its own Chrome PROFILE. A profile has its own
+separate cookie jar, so the two accounts never see each other.
+
+
+GETTING THESE FILES ONTO THE TILL
+------------------------------------------------------------
+On the till computer, open the website and download:
+
+    https://www.karachinaseebbiryani.com/downloads/foodpanda-windows-setup.zip
+
+Right-click the downloaded zip -> Extract All. If Windows shows a
+"protected your PC" warning when running the .bat, click
+"More info" -> "Run anyway" (the files came from your own website).
+
+(You can also copy this folder over on a USB stick or WhatsApp -
+ it is only a few small files.)
+
+
+THE FIX - ONE TIME SETUP (about 3 minutes)
+------------------------------------------------------------
+
+  1. Double-click  3_FOODPANDA_WINDOWS.bat
+
+  2. It shows your Chrome profiles. Press ENTER twice to accept
+     the recommended answers:
+       - FoodPanda 1  -> your normal Chrome profile
+       - FoodPanda 2  -> a brand new profile it creates for you
+
+  3. It puts two shortcuts on the Desktop:
+       [1] FoodPanda 1   (pink icon with a 1)
+       [2] FoodPanda 2   (pink icon with a 2)
+
+  4. Say YES when it offers to open both windows, then sign in:
+       - LEFT window   -> account 1 credentials
+       - RIGHT window  -> account 2 credentials
+
+     Each window remembers its own account from now on. You will
+     not have to log in again.
+
+  5. Pin them so they live on the taskbar permanently:
+       Right-click "FoodPanda 1" -> Show more options -> Pin to taskbar
+       Right-click "FoodPanda 2" -> Show more options -> Pin to taskbar
+
+
+EVERY DAY AFTER THAT
+------------------------------------------------------------
+Click the pink [1] and pink [2] on the taskbar. They open as their
+own windows - not tabs inside a browser - with FoodPanda 1 on the
+LEFT half of the screen and FoodPanda 2 on the RIGHT half, so staff
+know instantly which account an order came in on.
+
+
+THINGS WORTH KNOWING
+------------------------------------------------------------
+* Do NOT sign account 2 into the FoodPanda 1 window. That replaces
+  the login in that profile and the confusion starts over. One
+  window, one account, always.
+
+* Both running windows show FoodPanda's own logo in the taskbar
+  once open, so the LEFT / RIGHT screen position is the reliable
+  way to tell them apart. The pink 1 and 2 icons are what you see
+  on the desktop and on the pinned taskbar buttons.
+
+* If you move to a different monitor or change screen resolution,
+  re-run 3_FOODPANDA_WINDOWS.bat to re-do the left/right split.
+
+* The "FoodPanda 1" and "FoodPanda 2" buttons inside the POS
+  sidebar still open the live orders page, but they use whichever
+  account is signed into the POS browser. For two accounts at once,
+  use the taskbar shortcuts.
+
+* Longer term, ask your FoodPanda account manager whether both
+  branches can be attached to ONE partner login. If they can, you
+  get a branch switcher inside the portal and none of the above is
+  needed.
+
+
+IF SOMETHING GOES WRONG
+------------------------------------------------------------
+"Chrome was not found"
+   Install Chrome from https://www.google.com/chrome and re-run.
+
+Both windows still show the same account
+   They are probably on the same profile. Re-run the script and
+   make sure you choose N (new profile) for FoodPanda 2.
+
+The second window asks me to log in every time
+   That happens in Incognito, not in a profile. Make sure you are
+   opening the Desktop/taskbar shortcut, not a private window.

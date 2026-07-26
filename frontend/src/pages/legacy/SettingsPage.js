@@ -12,10 +12,11 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
-import { Users, Pencil, Trash2, Shield, Percent, Save, UserPlus, Store, DollarSign, HardDrive, Download, Mail, Send, Plus, Clock, MessageCircle, QrCode, RefreshCw, PlayCircle, Globe, Copy, ExternalLink, Printer, Type, Image as ImageIcon, UploadCloud, Trash } from "lucide-react";
+import { Users, Pencil, Trash2, Shield, Percent, Save, UserPlus, Store, DollarSign, HardDrive, Download, Mail, Send, Plus, Clock, MessageCircle, QrCode, RefreshCw, PlayCircle, Globe, Copy, ExternalLink, Printer, Type, Image as ImageIcon, UploadCloud, Trash, Bell, Volume2 } from "lucide-react";
 import { toast } from "sonner";
 import ReceiptModal from "../../components/legacy/ReceiptModal";
 import { resolveImageUrl } from "../../lib/api";
+import { ALERT_SOUNDS, resolveAlertSrc, clampVolume, invalidateAlertPrefs } from "../../lib/alertSound";
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 function BrandingCard({ currentLogo, onSaved }) {
   const [preview, setPreview] = useState(currentLogo || "");
@@ -201,6 +202,10 @@ export default function SettingsPage() {
     receipt_paper_width: 300,
   });
   const [savingReceipt, setSavingReceipt] = useState(false);
+  // Order alert ring — shared by the POS shell and the online order queue
+  const [alertForm, setAlertForm] = useState({ order_alert_sound: "classic", order_alert_volume: 1 });
+  const [savingAlert, setSavingAlert] = useState(false);
+  const alertPreviewRef = React.useRef(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   // Data management
   const [dataStats, setDataStats] = useState(null);
@@ -253,6 +258,10 @@ export default function SettingsPage() {
         receipt_show_tax_line: data.receipt_show_tax_line !== false,
         receipt_footer_text: data.receipt_footer_text || "Thank you for your order!",
         receipt_paper_width: data.receipt_paper_width || 300,
+      });
+      setAlertForm({
+        order_alert_sound: data.order_alert_sound || "classic",
+        order_alert_volume: clampVolume(data.order_alert_volume ?? 1),
       });
     } catch {} finally { setLoadingSettings(false); }
   }, [testEmailTo]);
@@ -535,6 +544,30 @@ export default function SettingsPage() {
     finally { setSavingReceipt(false); }
   };
 
+  // --- Order alert sound ---
+  const previewAlert = () => {
+    const el = alertPreviewRef.current;
+    if (!el) return;
+    el.pause();
+    el.currentTime = 0;
+    el.volume = clampVolume(alertForm.order_alert_volume);
+    el.play().catch(() => toast.error("Click anywhere on the page first, then press Preview"));
+  };
+
+  const saveAlert = async () => {
+    setSavingAlert(true);
+    try {
+      await axios.put(`${API}/settings`, {
+        order_alert_sound: alertForm.order_alert_sound,
+        order_alert_volume: clampVolume(alertForm.order_alert_volume),
+      }, { withCredentials: true });
+      invalidateAlertPrefs(); // other tabs pick the new tone up on next mount
+      toast.success("Order alert sound saved — reload other POS screens to apply");
+      fetchSettings();
+    } catch (err) { toast.error(err.response?.data?.detail || "Failed to save"); }
+    finally { setSavingAlert(false); }
+  };
+
   // Sample order for preview
   const sampleOrder = {
     id: "preview123abc",
@@ -603,8 +636,65 @@ export default function SettingsPage() {
           <TabsTrigger value="whatsapp" data-testid="tab-whatsapp" className="data-[state=active]:bg-white"><MessageCircle className="w-4 h-4 mr-2" /> WhatsApp</TabsTrigger>
           <TabsTrigger value="remote" data-testid="tab-remote" className="data-[state=active]:bg-white"><Globe className="w-4 h-4 mr-2" /> Remote Access</TabsTrigger>
           <TabsTrigger value="receipt" data-testid="tab-receipt" className="data-[state=active]:bg-white"><Printer className="w-4 h-4 mr-2" /> Receipt</TabsTrigger>
+          <TabsTrigger value="alert" data-testid="tab-alert" className="data-[state=active]:bg-white"><Bell className="w-4 h-4 mr-2" /> Order Alert</TabsTrigger>
           <TabsTrigger value="data" data-testid="tab-data" className="data-[state=active]:bg-white"><HardDrive className="w-4 h-4 mr-2" /> Data Management</TabsTrigger>
         </TabsList>
+
+        {/* Order Alert Tab — the ring that plays while an online order waits */}
+        <TabsContent value="alert">
+          <Card className="border-[#E5E2DC]">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2" style={{ color: "#1A1D1A" }}>
+                <Bell className="w-5 h-5" /> Order Alert Sound
+              </CardTitle>
+              <p className="text-sm" style={{ color: "#5C5F5C" }}>
+                Loops on every admin screen while an online order is waiting to be accepted, and stops
+                the moment it's accepted or rejected. This setting applies to all tills.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-6 max-w-xl">
+              <div className="space-y-2">
+                <Label style={{ color: "#1A1D1A" }}>Tune</Label>
+                <Select
+                  value={alertForm.order_alert_sound}
+                  onValueChange={(v) => setAlertForm((p) => ({ ...p, order_alert_sound: v }))}
+                >
+                  <SelectTrigger data-testid="alert-sound-select"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {ALERT_SOUNDS.map((s) => (
+                      <SelectItem key={s.key} value={s.key}>{s.label} — {s.hint}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label style={{ color: "#1A1D1A" }}>
+                  Volume — {Math.round(clampVolume(alertForm.order_alert_volume) * 100)}%
+                </Label>
+                <input
+                  type="range" min="0" max="1" step="0.05"
+                  value={clampVolume(alertForm.order_alert_volume)}
+                  onChange={(e) => setAlertForm((p) => ({ ...p, order_alert_volume: Number(e.target.value) }))}
+                  className="w-full accent-[#1E3F20]"
+                  data-testid="alert-volume-range"
+                />
+              </div>
+
+              <div className="flex items-center gap-3">
+                <Button type="button" variant="outline" onClick={previewAlert} data-testid="alert-preview-btn">
+                  <Volume2 className="w-4 h-4 mr-2" /> Preview
+                </Button>
+                <Button onClick={saveAlert} disabled={savingAlert} data-testid="alert-save-btn">
+                  <Save className="w-4 h-4 mr-2" /> {savingAlert ? "Saving..." : "Save"}
+                </Button>
+              </div>
+
+              {/* Preview element only — the real ring lives in GlobalOrderAlert / AdminOrders */}
+              <audio ref={alertPreviewRef} src={resolveAlertSrc(alertForm.order_alert_sound)} preload="auto" />
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         {/* Users Tab */}
         <TabsContent value="users">

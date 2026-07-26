@@ -4,7 +4,9 @@ import api, { formatApiError } from "../../lib/api";
 import { toast } from "sonner";
 
 export default function AdminLoginPage() {
-    const [form, setForm] = useState({ email: "admin@restaurant.com", password: "admin123" });
+    // Start blank so the page never advertises credentials; the browser's own
+    // saved-password autofill still pre-fills them for a returning user.
+    const [form, setForm] = useState({ email: "", password: "" });
     const [loading, setLoading] = useState(false);
     const navigate = useNavigate();
 
@@ -52,9 +54,6 @@ export default function AdminLoginPage() {
                         {loading ? "Signing in..." : "Sign In"}
                     </button>
                 </form>
-                <p className="text-center text-xs text-neutral-400 mt-5">
-                    Default: admin@restaurant.com / admin123
-                </p>
             </div>
         </div>
     );

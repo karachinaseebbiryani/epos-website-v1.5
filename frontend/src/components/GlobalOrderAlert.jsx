@@ -1,19 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, Link } from "react-router-dom";
 import api from "../lib/api";
 import { toast } from "sonner";
 import { Bell, BellOff, Volume2 } from "lucide-react";
+import { resolveAlertSrc, useAlertPrefs } from "../lib/alertSound";
 
 const POLL_MS = 4000;
-const ALERT_AUDIO_SRC = "/order-alert.wav";
 
 /**
  * GlobalOrderAlert — mounted in AdminLayout, runs on EVERY admin page.
  * - Polls /api/online-orders/pending-count every 4s
  * - Loops the alert sound while there are pending orders
  * - Shows a toast each time a NEW pending order arrives (any change in latest_id)
- * - Hides itself entirely on /admin/orders so we don't double-up with that page's
- *   richer in-page alert (single source of truth on the orders screen).
+ * - Goes silent on /admin/orders so we don't double-up with that page's richer
+ *   in-page alert (single source of truth on the orders screen).
  */
 export default function GlobalOrderAlert() {
   const location = useLocation();
@@ -25,12 +25,58 @@ export default function GlobalOrderAlert() {
   const [pendingCount, setPendingCount] = useState(0);
   const [muted, setMuted] = useState(() => localStorage.getItem("knb_admin_muted") === "1");
   const [audioBlocked, setAudioBlocked] = useState(false);
+  const prefs = useAlertPrefs();
+
+  const stopSound = useCallback(() => {
+    const el = audioRef.current;
+    if (el && !el.paused) { el.pause(); el.currentTime = 0; }
+  }, []);
+
+  const manageAlertSound = useCallback((count, isMuted) => {
+    const el = audioRef.current;
+    // Never ring on the orders page — AdminOrders owns the sound there.
+    if (!el || onOrdersPage) { stopSound(); return; }
+    if (count > 0 && !isMuted) {
+      if (el.paused) {
+        el.currentTime = 0;
+        const p = el.play();
+        if (p && typeof p.then === "function") {
+          p.then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+        }
+      }
+    } else {
+      stopSound();
+    }
+  }, [onOrdersPage, stopSound]);
+
+  // Keep the element's volume in sync with the admin's chosen level.
+  useEffect(() => {
+    const el = audioRef.current;
+    if (el) el.volume = prefs.volume;
+  }, [prefs.volume]);
+
+  /**
+   * BUGFIX: the poll effect below early-returns on /admin/orders, so once the
+   * ring had started on some other admin page nothing was left to pause it —
+   * navigating to the orders queue and accepting the order stopped AdminOrders'
+   * own audio while this one looped forever. Chrome keeps a detached-but-
+   * referenced <audio> playing, so unmounting didn't save us either. This
+   * effect explicitly silences the element on every route change into the
+   * orders page, and on unmount.
+   */
+  useEffect(() => {
+    // Captured, not read inside the cleanup: on a real unmount (logout, or
+    // leaving the admin layout for the public site) React has already nulled
+    // the ref, which would make stopSound() a silent no-op.
+    const el = audioRef.current;
+    if (onOrdersPage) stopSound();
+    return () => { if (el && !el.paused) { el.pause(); el.currentTime = 0; } };
+  }, [onOrdersPage, stopSound]);
 
   useEffect(() => {
     // The orders page runs its own pending-count poller and owns the alert sound there,
-    // so polling here too would just double every pending-count request. Skip it entirely
-    // on /admin/orders (we still render the <audio> element below, just don't poll).
-    if (onOrdersPage) return;
+    // so polling here too would just double every pending-count request.
+    if (onOrdersPage) return undefined;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -46,13 +92,11 @@ export default function GlobalOrderAlert() {
           seededRef.current = true;
         } else if (data.latest_id && data.latest_id !== lastIdRef.current) {
           lastIdRef.current = data.latest_id;
-          if (!onOrdersPage) {
-            toast.info("🔔 New online order", {
-              description: "Tap to open the orders queue",
-              action: { label: "View", onClick: () => { window.location.href = "/admin/orders"; } },
-              duration: 8000,
-            });
-          }
+          toast.info("🔔 New online order", {
+            description: "Tap to open the orders queue",
+            action: { label: "View", onClick: () => { window.location.href = "/admin/orders"; } },
+            duration: 8000,
+          });
         }
 
         manageAlertSound(count, muted);
@@ -63,54 +107,41 @@ export default function GlobalOrderAlert() {
     tick();
     const t = setInterval(tick, POLL_MS);
     return () => { cancelled = true; clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [muted, onOrdersPage]);
-
-  const manageAlertSound = (count, isMuted) => {
-    const el = audioRef.current;
-    if (!el || onOrdersPage) {
-      if (el && !el.paused) { el.pause(); el.currentTime = 0; }
-      return;
-    }
-    if (count > 0 && !isMuted) {
-      if (el.paused) {
-        el.currentTime = 0;
-        const p = el.play();
-        if (p && typeof p.then === "function") {
-          p.then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
-        }
-      }
-    } else if (!el.paused) {
-      el.pause();
-      el.currentTime = 0;
-    }
-  };
+  }, [muted, onOrdersPage, manageAlertSound]);
 
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
     localStorage.setItem("knb_admin_muted", next ? "1" : "0");
+    if (next) stopSound(); // silence immediately, don't wait for the next poll
   };
 
   const enableAudio = () => {
     const el = audioRef.current;
     if (!el) return;
     el.muted = false;
-    el.play().then(() => { setAudioBlocked(false); el.pause(); manageAlertSound(pendingCount, muted); }).catch(() => {});
+    el.play()
+      .then(() => { setAudioBlocked(false); el.pause(); manageAlertSound(pendingCount, muted); })
+      .catch(() => {});
   };
 
-  // On the orders page itself, only render the floating mute toggle (no banner)
-  // so we don't fight with that page's own UI.
-  if (onOrdersPage) {
-    return <audio ref={audioRef} src={ALERT_AUDIO_SRC} loop preload="auto" data-testid="global-order-alert-audio" />;
-  }
+  // The <audio> node is rendered in the SAME position regardless of route, so
+  // React never unmounts and re-creates it. An orphaned media element is what
+  // caused the stuck ring, so keeping one stable node matters.
+  const showPill = !onOrdersPage && pendingCount > 0;
 
   return (
     <>
-      <audio ref={audioRef} src={ALERT_AUDIO_SRC} loop preload="auto" data-testid="global-order-alert-audio" />
+      <audio
+        ref={audioRef}
+        src={resolveAlertSrc(prefs.sound)}
+        loop
+        preload="auto"
+        data-testid="global-order-alert-audio"
+      />
 
       {/* Floating top-right pill: visible whenever there are pending orders */}
-      {pendingCount > 0 && (
+      {showPill && (
         <div
           data-testid="global-pending-pill"
           className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-full bg-brand-red text-white px-4 py-2 shadow-lg animate-pulse"
@@ -130,7 +161,7 @@ export default function GlobalOrderAlert() {
       )}
 
       {/* If browser blocked audio autoplay, surface a click-to-enable banner */}
-      {audioBlocked && pendingCount > 0 && !muted && (
+      {showPill && audioBlocked && !muted && (
         <button
           onClick={enableAudio}
           data-testid="global-enable-audio"

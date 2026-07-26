@@ -627,6 +627,11 @@ class SettingsUpdate(BaseModel):
     receipt_footer_text: Optional[str] = None
     receipt_paper_width: Optional[int] = None  # in mm or pixels (CSS)
     receipt_show_tax_line: Optional[bool] = None
+    # Order alert ring (POS + admin). Staff read these via GET /settings (any
+    # signed-in user); only admins can PUT. Preset key from ALERT_SOUNDS on the
+    # frontend, or a custom URL. Volume is 0.0-1.0.
+    order_alert_sound: Optional[str] = None
+    order_alert_volume: Optional[float] = None
     # Branding – custom logo (base64 data URL, e.g. "data:image/png;base64,...")
     restaurant_logo: Optional[str] = None
 
@@ -794,7 +799,7 @@ async def delete_user(user_id: str, request: Request):
     return {"message": "User deleted"}
 
 # --- Settings ---
-DEFAULT_SETTINGS = {"tax_rate": 5.0, "online_tax_rate": 0.0, "foodpanda1_tax_rate": 0.0, "foodpanda2_tax_rate": 0.0, "currency": "Rs", "restaurant_name": "KARACHI NASEEB BIRYANI AND MURG PULAO", "restaurant_address": "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore", "restaurant_phone": "+923004928411", "restaurant_email": "karachinaseebbiryani599@gmail.com", "smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_user": "", "smtp_password": "", "smtp_from": "", "smtp_use_tls": True, "email_recipients": [], "auto_email_on_z_close": False, "daily_report_time": "02:15", "daily_report_timezone": "Asia/Karachi", "auto_email_daily": False, "auto_whatsapp_daily": False, "daily_report_type": "yesterday", "whatsapp_service_url": "http://127.0.0.1:3030", "whatsapp_recipients": [], "auto_whatsapp_on_z_close": False, "tunnel_log_path": "", "tunnel_notify_on_change": True, "receipt_font_family": "Courier New", "receipt_base_size": 12, "receipt_header_size": 16, "receipt_total_size": 16, "receipt_bold_all": False, "receipt_bold_total": True, "receipt_show_logo": False, "receipt_footer_text": "Thank you for your order!", "receipt_paper_width": 300, "receipt_show_tax_line": True, "restaurant_logo": ""}
+DEFAULT_SETTINGS = {"tax_rate": 5.0, "online_tax_rate": 0.0, "foodpanda1_tax_rate": 0.0, "foodpanda2_tax_rate": 0.0, "currency": "Rs", "restaurant_name": "KARACHI NASEEB BIRYANI AND MURG PULAO", "restaurant_address": "68 Chatri Chowk, Punjab Small Industry, D Block, Lahore", "restaurant_phone": "+923004928411", "restaurant_email": "karachinaseebbiryani599@gmail.com", "smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_user": "", "smtp_password": "", "smtp_from": "", "smtp_use_tls": True, "email_recipients": [], "auto_email_on_z_close": False, "daily_report_time": "02:15", "daily_report_timezone": "Asia/Karachi", "auto_email_daily": False, "auto_whatsapp_daily": False, "daily_report_type": "yesterday", "whatsapp_service_url": "http://127.0.0.1:3030", "whatsapp_recipients": [], "auto_whatsapp_on_z_close": False, "tunnel_log_path": "", "tunnel_notify_on_change": True, "receipt_font_family": "Courier New", "receipt_base_size": 12, "receipt_header_size": 16, "receipt_total_size": 16, "receipt_bold_all": False, "receipt_bold_total": True, "receipt_show_logo": False, "receipt_footer_text": "Thank you for your order!", "receipt_paper_width": 300, "receipt_show_tax_line": True, "order_alert_sound": "classic", "order_alert_volume": 1.0, "restaurant_logo": ""}
 
 @api_router.get("/settings")
 async def get_settings(request: Request):

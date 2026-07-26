@@ -53,8 +53,10 @@ export default function UnifiedLoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, login } = useStaffAuth();
-  const [email, setEmail] = useState("admin@restaurant.com");
-  const [password, setPassword] = useState("admin123");
+  // Blank so the page never advertises credentials. The browser's own saved
+  // login still autofills for the owner's computer (his usual sign-in flow).
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
