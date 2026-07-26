@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import PosInstall from "./PosInstall";
+import { toast } from "sonner";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
 
 // Operational POS pages preserved from the old fully-operational system.
@@ -51,17 +52,20 @@ export default function AdminLayout() {
   const { user } = useStaffAuth();
   const [adminTokenOk, setAdminTokenOk] = useState(false);
 
-  // FoodPanda partner dashboard — opened as a separate popup window (FP blocks
-  // iframe embedding, and auto-accepting would breach partner terms). One named
-  // window ("knb_foodpanda") is reused on every click, so staff get ONE
-  // FoodPanda window next to the POS, not a pile of tabs. Login persists via
-  // the browser profile. Both partner accounts are switched inside FP's own UI.
-  // Two partner accounts → two separately-named windows, so both stay open
-  // side by side and re-clicking focuses the right one instead of stacking
-  // tabs. NOTE: the browser shares login cookies across windows of the same
-  // profile — to keep BOTH accounts signed in at once, log into FP 2's window
-  // via a second browser profile (or Edge, if FP 1 lives in Chrome).
+  // FoodPanda partner dashboard. Only account 1 can open from inside the POS:
+  // a web page cannot switch Chrome profiles, so anything we open here uses the
+  // POS browser's own FoodPanda login (= account 1). Account 2 lives in its own
+  // Chrome profile and can ONLY be opened from its taskbar/desktop shortcut
+  // (created by windows-setup/3_FOODPANDA_WINDOWS.bat). The FP2 button therefore
+  // points staff at the taskbar instead of silently showing the wrong account.
   const openFoodpanda = (n) => {
+    if (n === 2) {
+      toast.info("FoodPanda 2 opens from its own taskbar button (pink 2 / right side)", {
+        description: "The POS browser can only hold ONE FoodPanda login. Run the '2-accounts setup' below if the button is missing.",
+        duration: 8000,
+      });
+      return;
+    }
     window.open("https://partner.foodpanda.com/live-orders", `knb_foodpanda_${n}`,
       "popup,width=1100,height=800");
   };
@@ -116,7 +120,8 @@ export default function AdminLayout() {
               {visibleOps.map((n) => (
                 <NavItem key={n.to} item={n} testidPrefix="admin-nav" />
               ))}
-              {/* External: both FoodPanda partner accounts, each in its own reusable window */}
+              {/* External: FP1 opens here (POS browser = account 1); FP2 button
+                  explains that account 2 opens from its taskbar shortcut. */}
               {[1, 2].map((n) => (
                 <button
                   key={n}
@@ -125,7 +130,7 @@ export default function AdminLayout() {
                   className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors text-white/70 hover:text-white hover:bg-white/5"
                 >
                   <Bike className="w-4 h-4" style={{ color: "#D70F64" }} /> FoodPanda {n}
-                  <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">↗</span>
+                  <span className="ml-auto text-[9px] uppercase tracking-wider text-white/30">{n === 2 ? "taskbar" : "↗"}</span>
                 </button>
               ))}
               {/* Setup pack for running BOTH FP accounts at once (Chrome-profile

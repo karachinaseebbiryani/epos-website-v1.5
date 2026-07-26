@@ -55,9 +55,15 @@ THE FIX - ONE TIME SETUP (about 3 minutes)
      Each window remembers its own account from now on. You will
      not have to log in again.
 
-  5. Pin them so they live on the taskbar permanently:
-       Right-click "FoodPanda 1" -> Show more options -> Pin to taskbar
-       Right-click "FoodPanda 2" -> Show more options -> Pin to taskbar
+  5. Pin them so they live on the taskbar permanently.
+     IMPORTANT: pin the OPEN WINDOW, not the desktop icon (pinning
+     the desktop icon turns into a plain Chrome button):
+       - Open FoodPanda 1, right-click its TASKBAR button -> Pin to taskbar
+       - Open FoodPanda 2, right-click its TASKBAR button -> Pin to taskbar
+       - Drag the pins so 1 sits LEFT of 2
+     Both pins show FoodPanda's own logo, so remember:
+       LEFT pin = account 1, RIGHT pin = account 2
+     (same as the windows: 1 on the left half, 2 on the right half)
 
 
 EVERY DAY AFTER THAT
