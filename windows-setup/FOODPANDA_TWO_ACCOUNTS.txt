@@ -55,15 +55,25 @@ THE FIX - ONE TIME SETUP (about 3 minutes)
      Each window remembers its own account from now on. You will
      not have to log in again.
 
-  5. Pin them so they live on the taskbar permanently.
-     IMPORTANT: pin the OPEN WINDOW, not the desktop icon (pinning
-     the desktop icon turns into a plain Chrome button):
-       - Open FoodPanda 1, right-click its TASKBAR button -> Pin to taskbar
-       - Open FoodPanda 2, right-click its TASKBAR button -> Pin to taskbar
-       - Drag the pins so 1 sits LEFT of 2
-     Both pins show FoodPanda's own logo, so remember:
+  5. Pin them to the taskbar — USE CHROME'S OWN SHORTCUT TOOL.
+     (Pinning the desktop icon or the running window turns into a
+      plain Chrome button that shows the profile picker. Shortcuts
+      made BY Chrome pin correctly, with the profile baked in.)
+
+     In the FoodPanda 1 window:
+       a. Click the 3-dots menu (top right)
+            -> "Save and share" -> "Create shortcut..."
+               (older Chrome: "More tools" -> "Create shortcut...")
+       b. Name it "FoodPanda 1", TICK "Open as window", click Create
+       c. A new desktop icon appears (FoodPanda logo)
+            -> right-click it -> Pin to taskbar
+     Repeat inside the FoodPanda 2 window, name it "FoodPanda 2".
+
+     Drag the pins so 1 sits LEFT of 2, and unpin any plain Chrome
+     button left over. Both pins show FoodPanda's logo, so:
        LEFT pin = account 1, RIGHT pin = account 2
-     (same as the windows: 1 on the left half, 2 on the right half)
+     Drag each window to its half of the screen once - Chrome
+     remembers the position next time.
 
 
 EVERY DAY AFTER THAT

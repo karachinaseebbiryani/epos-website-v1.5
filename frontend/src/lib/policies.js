@@ -37,7 +37,7 @@ export const POLICY_PAGES = {
         slug: "terms",
         title: "Terms & Conditions",
         description: "The rules of using Karachi Naseeb Biryani's online ordering, Diamonds rewards and event booking services.",
-        updated: "June 2026",
+        updated: "August 2026",
         sections: [
             { heading: "Placing an order",
               body: "An order is confirmed only after the restaurant accepts it (you'll get a WhatsApp / push notification within ~2 minutes). Until accepted, you can cancel free of charge from the tracking page. Once preparation has started, we cannot offer a refund." },
@@ -53,6 +53,8 @@ export const POLICY_PAGES = {
               body: "Please do not place fraudulent orders, abuse coupons / Diamonds, harass our delivery team, or attempt to disrupt our service. We reserve the right to suspend accounts that breach these rules." },
             { heading: "Changes",
               body: "We may update these terms occasionally. Continued use of the site after an update implies acceptance. Material changes will be highlighted on this page with a revised 'Updated' date above." },
+            { heading: "Governing Law",
+              body: "These Terms and Conditions are governed by the laws of the Islamic Republic of Pakistan. You agree that the courts of Lahore (including any consumer court) will have exclusive jurisdiction in any dispute you have with us." },
         ],
     },
     delivery: {

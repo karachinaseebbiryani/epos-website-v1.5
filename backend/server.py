@@ -6608,13 +6608,13 @@ async def sitemap_xml(request: Request):
         {"loc": f"{base}/faq",               "changefreq": "weekly",  "priority": "0.7", "lastmod": today},
         {"loc": f"{base}/delivery",          "changefreq": "monthly", "priority": "0.6", "lastmod": today},
         {"loc": f"{base}/rewards-program",   "changefreq": "monthly", "priority": "0.6", "lastmod": today},
-        {"loc": f"{base}/privacy",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
-        {"loc": f"{base}/terms",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
-        {"loc": f"{base}/refunds",           "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
-        {"loc": f"{base}/ownership",         "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        {"loc": f"{base}/privacy",           "changefreq": "monthly", "priority": "0.5", "lastmod": today},
+        {"loc": f"{base}/terms",             "changefreq": "monthly", "priority": "0.5", "lastmod": today},
+        {"loc": f"{base}/refunds",           "changefreq": "monthly", "priority": "0.5", "lastmod": today},
+        {"loc": f"{base}/ownership",         "changefreq": "monthly", "priority": "0.5", "lastmod": today},
         {"loc": f"{base}/feedback",          "changefreq": "monthly", "priority": "0.4", "lastmod": today},
-        {"loc": f"{base}/login",             "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
-        {"loc": f"{base}/register",          "changefreq": "yearly",  "priority": "0.3", "lastmod": today},
+        # /login and /register intentionally excluded — thin authenticated pages
+        # that consume crawl budget without adding indexable content.
     ]
     # Include each active offer as its own URL fragment so search engines can
     # surface them individually. Same trick for menu categories.
