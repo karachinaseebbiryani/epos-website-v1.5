@@ -163,6 +163,15 @@ export default function VoiceAssistantModal({ open, onClose, onConfirm, currency
     "اور", "پلیٹ", "دینا", "دیدو", "چاہیے", "چاہئے", "والا", "والی", "جی", "بھائی", "ساتھ",
   ]), []);
 
+  // VERB_PARTICLES: Urdu/Punjabi imperative suffixes — "kar do", "kar dena",
+  // "karo" all mean "please make / give this." When "do" (which also = 2)
+  // directly follows one of these, it is the VERB form, not the number.
+  // Without this, "biryani kar do" parsed as 2 biryani instead of 1.
+  const VERB_PARTICLES = useMemo(() => new Set([
+    "kar", "kr", "karo", "karna", "krna", "kijiye", "kijye",
+    "کر", "کرو", "کرنا", "کیجیے",
+  ]), []);
+
   // ---------- Parser: transcript -> {items, subtotal, score} ----------
   const parseTranscript = (text) => {
     if (!text) return { items: [], subtotal: 0, score: 0 };
@@ -181,13 +190,21 @@ export default function VoiceAssistantModal({ open, onClose, onConfirm, currency
     let lastItem = null; // most recent matched item — receives a TRAILING quantity
     let score = 0;
     let i = 0;
+    let prevWasVerb = false;
     while (i < stream.length) {
       const w = stream[i];
       const rw = rawWords[i];
       // Fillers are transparent — they don't break the qty→item association.
-      if (FILLERS.has(w) || (rw !== undefined && FILLERS.has(rw))) { i++; continue; }
+      if (FILLERS.has(w) || (rw !== undefined && FILLERS.has(rw))) { prevWasVerb = false; i++; continue; }
+      // Verb particles ("kar", "kr") are also transparent but flag that the
+      // NEXT "do" is a command suffix ("kar do" = make it), not the number 2.
+      if (VERB_PARTICLES.has(w) || (rw !== undefined && VERB_PARTICLES.has(rw))) { prevWasVerb = true; i++; continue; }
       const qty = NUM_WORDS[w] ?? (rw !== undefined ? NUM_WORDS[rw] : undefined);
       if (qty !== undefined) {
+        if (prevWasVerb) {
+          // "biryani kar DO" — "do" is a verb particle here, not qty 2.
+          prevWasVerb = false; i++; continue;
+        }
         // Urdu/Punjabi word order puts the number AFTER the dish ("biryani do
         // dena"). If a number directly follows a matched item that was added
         // with the default qty 1, treat it as that item's quantity.
@@ -197,9 +214,11 @@ export default function VoiceAssistantModal({ open, onClose, onConfirm, currency
         } else {
           pendingQty = qty;
         }
+        prevWasVerb = false;
         i++;
         continue;
       }
+      prevWasVerb = false;
 
       // Best-scoring menu item whose skeleton tokens match the upcoming words.
       let best = null;
