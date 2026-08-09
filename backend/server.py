@@ -6616,22 +6616,10 @@ async def sitemap_xml(request: Request):
         # /login and /register intentionally excluded — thin authenticated pages
         # that consume crawl budget without adding indexable content.
     ]
-    # Include each active offer as its own URL fragment so search engines can
-    # surface them individually. Same trick for menu categories.
-    try:
-        async for o in db.offers.find({"active": True}, {"_id": 1, "coupon_code": 1}):
-            code = (o.get("coupon_code") or "").lower().strip()
-            if code:
-                urls.append({"loc": f"{base}/offers#{code}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
-    except Exception:
-        pass
-    try:
-        async for c in db.categories.find({}, {"_id": 1, "name": 1}):
-            slug = (c.get("name") or "").lower().replace(" ", "-")
-            if slug:
-                urls.append({"loc": f"{base}/menu#{slug}", "changefreq": "weekly", "priority": "0.6", "lastmod": today})
-    except Exception:
-        pass
+    # Offers and categories are discoverable from /offers and /menu respectively.
+    # Fragment (#code, #slug) URLs are INVALID in sitemaps — the spec forbids
+    # fragment identifiers; Google logs a parse error and discards the sitemap.
+    # Removed the #fragment dynamic entries; the parent pages already cover them.
 
     body_parts = ['<?xml version="1.0" encoding="UTF-8"?>',
                   '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
