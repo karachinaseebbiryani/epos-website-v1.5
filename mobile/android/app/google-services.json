@@ -12,7 +12,20 @@
           "package_name": "com.karachinaseeb.knb_customer"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "557642081718-8527od94qasaq2r8go4ebe0131nig2bi.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.karachinaseeb.knb_customer",
+            "certificate_hash": "c632bf35dc5123fac6e168efe2c4949ab6f21dc2"
+          }
+        },
+        {
+          "client_id": "557642081718-5fbtdcn4bf8fm5gtjns77ddpp4f9nbm9.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyA5Qe8euLJme8RSKKhLsos8ocVX1ojsr50"
@@ -20,7 +33,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "557642081718-5fbtdcn4bf8fm5gtjns77ddpp4f9nbm9.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

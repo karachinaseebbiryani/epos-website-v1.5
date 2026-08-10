@@ -5,7 +5,7 @@
          sign-in, then build passing FACEBOOK_APP_ID as a dart-define.
          Auto-init is disabled in AndroidManifest.xml so these placeholders can
          never crash the app at launch while sign-in stays inert. -->
-    <string name="facebook_app_id">000000000000000</string>
-    <string name="fb_login_protocol_scheme">fb000000000000000</string>
-    <string name="facebook_client_token">CHANGE_ME_CLIENT_TOKEN</string>
+    <string name="facebook_app_id">1598107361942175</string>
+    <string name="fb_login_protocol_scheme">fb1598107361942175</string>
+    <string name="facebook_client_token">31023d1d92665b6a732db37fa5bb023d</string>
 </resources>

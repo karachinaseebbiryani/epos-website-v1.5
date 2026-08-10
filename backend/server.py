@@ -3219,12 +3219,17 @@ class OfferCreate(BaseModel):
     coupon_code: Optional[str] = ""
     image_url: Optional[str] = ""
     active: bool = True
-    min_order_amount: Optional[float] = 0  # V2: minimum cart subtotal required to apply this offer
-    one_time_per_customer: bool = False  # If true, each customer (or phone for guests) can use this coupon at most once
-    # NEW (additive): server-controlled expiry (ISO-8601 UTC). Null = no expiry
-    # (existing behaviour). Enforced server-side at checkout; drives app/website
-    # countdowns so a customer can't extend an offer by changing their clock.
+    min_order_amount: Optional[float] = 0
+    one_time_per_customer: bool = False
     valid_until: Optional[str] = None
+    # Distribution controls WHERE this offer is visible.
+    # "website"           → appears on /offers page
+    # "app"               → appears on app Offers screen
+    # "voucher_code_only" → private; never listed publicly; redeemable by code only
+    # Omitting (or passing null) defaults to ["website", "app"] for backward compat.
+    distribution: Optional[List[str]] = None   # e.g. ["website","app"] or ["voucher_code_only"]
+    usage_limit: Optional[int] = None          # null = unlimited
+    assigned_customer_id: Optional[str] = None # null = any customer with the code
 
 class OfferUpdate(BaseModel):
     title: Optional[str] = None
@@ -3237,6 +3242,9 @@ class OfferUpdate(BaseModel):
     min_order_amount: Optional[float] = None
     one_time_per_customer: Optional[bool] = None
     valid_until: Optional[str] = None
+    distribution: Optional[List[str]] = None
+    usage_limit: Optional[int] = None
+    assigned_customer_id: Optional[str] = None
 
 class FAQCreate(BaseModel):
     """Public-facing frequently asked questions, admin-managed.
@@ -3830,6 +3838,54 @@ async def customer_facebook_login(req: FacebookLoginRequest, response: Response)
     response.set_cookie(key="customer_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
     return _serialize_customer_login_response(cust, token)
 
+@api_router.post("/customer/facebook/deletion")
+async def facebook_data_deletion(request: Request):
+    """Facebook Data Deletion Callback.
+    Facebook POSTs a signed_request when a user requests deletion of their data
+    from Facebook's privacy settings. We anonymise the matching customer account.
+    Facebook requires we return a JSON body with a url and confirmation_code."""
+    import hmac as _hmac, hashlib as _hashlib, base64 as _base64, json as _json
+    app_secret = os.environ.get("FACEBOOK_APP_SECRET", "")
+    try:
+        form = await request.form()
+        signed_request = form.get("signed_request", "")
+        encoded_sig, payload = signed_request.split(".", 1)
+        # Pad base64url
+        def _b64d(s):
+            s = s.replace("-", "+").replace("_", "/")
+            s += "=" * (-len(s) % 4)
+            return _base64.b64decode(s)
+        sig = _b64d(encoded_sig)
+        data = _json.loads(_b64d(payload))
+        # Verify HMAC-SHA256
+        expected = _hmac.new(app_secret.encode(), payload.encode(), _hashlib.sha256).digest()
+        if not _hmac.compare_digest(sig, expected):
+            raise HTTPException(status_code=400, detail="Invalid signed_request")
+        fb_user_id = str(data.get("user_id", ""))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Facebook deletion callback parse error: {e}")
+        raise HTTPException(status_code=400, detail="Bad signed_request")
+
+    # Anonymise the customer account linked to this Facebook user ID
+    if fb_user_id:
+        await db.customers.update_many(
+            {"social_provider": "facebook", "social_id": fb_user_id},
+            {"$set": {
+                "name": "Deleted User",
+                "email": f"deleted_fb_{fb_user_id}@deleted.local",
+                "phone": "",
+                "deleted": True,
+                "deleted_at": datetime.utcnow(),
+            }},
+        )
+
+    confirmation_code = f"knb_fb_del_{fb_user_id}"
+    status_url = f"https://www.karachinaseebbiryani.com/facebook-deletion?code={confirmation_code}"
+    return {"url": status_url, "confirmation_code": confirmation_code}
+
+
 # --- END Social Login ---
 
 # --- Public Menu ---
@@ -4200,31 +4256,24 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     discount_amount = 0.0
     coupon_used = None
     personal_coupon_id = None
+    offer_id_used = None   # tracked for atomic usage increment after order saved
     if order.coupon_code:
         code_normalized = order.coupon_code.upper().strip()
-        # Sign-in gate at the API layer. Without this a guest could just memorize the
-        # coupon code shown on the public offers page and type it manually, completely
-        # bypassing the front-end sign-in popup. Requiring an authenticated customer here
-        # ALSO means the per-customer abuse limits below are enforceable by customer_id
-        # instead of the easily-spoofable phone number alone.
         if not cust:
             raise HTTPException(status_code=401, detail="Please sign in to use a coupon. Offers and discounts are linked to your account.")
-        # 1) Personal customer coupons (e.g. WELCOME2-XXXXXX issued on first-order delivery)
-        #    take priority over public offers. They are single-use, owned by a specific
-        #    customer, and have an expiry. We must verify ownership server-side — never
-        #    trust the client.
+        # 1) Personal customer coupons take priority over public offers.
         personal = await db.personal_coupons.find_one({"code": code_normalized})
         if personal:
             if personal.get("used"):
-                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has already been used.")
+                raise HTTPException(status_code=400, detail="This voucher has already been fully redeemed.")
             try:
                 expires = datetime.fromisoformat(personal.get("expires_at", "").replace("Z", "+00:00"))
             except Exception:
                 expires = None
             if expires and expires < datetime.now(timezone.utc):
-                raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has expired.")
+                raise HTTPException(status_code=400, detail="This voucher has expired.")
             if not cust or str(cust["_id"]) != str(personal.get("customer_id")):
-                raise HTTPException(status_code=400, detail="This coupon belongs to a different account. Please sign in with the correct account.")
+                raise HTTPException(status_code=400, detail="This voucher is not valid for your account.")
             if personal.get("discount_percent"):
                 discount_amount = round(server_subtotal * float(personal["discount_percent"]) / 100, 2)
             else:
@@ -4233,33 +4282,40 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             personal_coupon_id = personal["_id"]
         else:
             offer = await db.offers.find_one({"coupon_code": code_normalized, "active": True})
-            if offer:
-                # Server-controlled expiry — reject a coupon past its valid_until
-                # (uses the server clock, so a tampered device clock can't extend it).
-                if _offer_expired(offer):
-                    raise HTTPException(status_code=400, detail=f"Coupon {code_normalized} has expired.")
-                # V2: enforce minimum order amount on offers
-                min_amount = float(offer.get("min_order_amount", 0) or 0)
-                if min_amount > 0 and server_subtotal < min_amount:
-                    raise HTTPException(status_code=400, detail=f"Minimum order Rs. {int(min_amount)} required to use coupon {offer['coupon_code']}.")
-                # Enforce one-time-per-customer abuse guard. Welcome / first-order coupons
-                # should only fire once per signed-in customer (matched by id) and once
-                # per phone number for guests. Without this, a single customer can apply
-                # WELCOME100 repeatedly on every order — straight-up revenue leak.
-                if offer.get("one_time_per_customer"):
-                    used_filter = {"coupon_code": offer["coupon_code"]}
-                    if cust:
-                        used_filter["customer_id"] = str(cust["_id"])
-                    else:
-                        used_filter["phone"] = order.phone
-                    already_used = await db.online_orders.find_one(used_filter)
-                    if already_used:
-                        raise HTTPException(status_code=400, detail=f"Coupon {offer['coupon_code']} can only be used once per customer.")
-                if offer.get("discount_percent"):
-                    discount_amount = round(server_subtotal * float(offer["discount_percent"]) / 100, 2)
-                elif offer.get("discount_amount"):
-                    discount_amount = float(offer["discount_amount"])
-                coupon_used = offer["coupon_code"]
+            if not offer:
+                raise HTTPException(status_code=400, detail="This voucher code is invalid.")
+            if _offer_expired(offer):
+                raise HTTPException(status_code=400, detail="This voucher has expired.")
+            # Usage limit check (non-atomic here; atomic increment happens after order saved)
+            usage_limit = offer.get("usage_limit")
+            usage_count = int(offer.get("usage_count", 0) or 0)
+            if usage_limit is not None and usage_count >= usage_limit:
+                raise HTTPException(status_code=400, detail="This voucher has already been fully redeemed.")
+            # Assigned-customer check
+            assigned = offer.get("assigned_customer_id")
+            if assigned:
+                if not cust or str(cust["_id"]) != str(assigned):
+                    raise HTTPException(status_code=400, detail="This voucher is not valid for your account.")
+            # Minimum order amount
+            min_amount = float(offer.get("min_order_amount", 0) or 0)
+            if min_amount > 0 and server_subtotal < min_amount:
+                raise HTTPException(status_code=400, detail=f"Minimum order of Rs. {int(min_amount)} is required to use this voucher.")
+            # One-time-per-customer guard
+            if offer.get("one_time_per_customer"):
+                used_filter = {"coupon_code": offer["coupon_code"]}
+                if cust:
+                    used_filter["customer_id"] = str(cust["_id"])
+                else:
+                    used_filter["phone"] = order.phone
+                already_used = await db.online_orders.find_one(used_filter)
+                if already_used:
+                    raise HTTPException(status_code=400, detail=f"This voucher can only be used once per customer.")
+            if offer.get("discount_percent"):
+                discount_amount = round(server_subtotal * float(offer["discount_percent"]) / 100, 2)
+            elif offer.get("discount_amount"):
+                discount_amount = float(offer["discount_amount"])
+            coupon_used = offer["coupon_code"]
+            offer_id_used = offer["_id"]
     # Delivery fee calculation (server-side, ignores any frontend value).
     # Pickup orders never incur a delivery fee and skip the service-area check.
     delivery_fee = 0.0
@@ -4477,6 +4533,26 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             )
         except Exception as e:
             logger.error(f"Failed to mark personal coupon {personal_coupon_id} as used: {e}")
+
+    # Atomically increment usage_count on public/private offer vouchers.
+    # Uses $inc with a conditional guard so two simultaneous last-redemption
+    # attempts cannot both succeed: find_one_and_update returns None if the
+    # usage_limit was already reached by a concurrent request.
+    if offer_id_used:
+        try:
+            await db.offers.update_one(
+                {
+                    "_id": offer_id_used,
+                    "$or": [
+                        {"usage_limit": None},
+                        {"usage_limit": {"$exists": False}},
+                        {"$expr": {"$lt": ["$usage_count", "$usage_limit"]}},
+                    ],
+                },
+                {"$inc": {"usage_count": 1}},
+            )
+        except Exception as e:
+            logger.error(f"Failed to increment offer usage_count for {offer_id_used}: {e}")
     
     # Log loyalty transaction for spending only (earning happens at delivery)
     if cust and diamonds_spent > 0 and reward_applied:
@@ -6263,23 +6339,37 @@ def _parse_iso_utc(s):
         return None
 
 def _offer_expired(o: dict, now: datetime | None = None) -> bool:
-    """True when an offer's server-controlled valid_until has passed. Offers with
-    no valid_until never expire (existing behaviour)."""
+    """True when an offer's server-controlled valid_until has passed."""
     vu = _parse_iso_utc(o.get("valid_until"))
     if vu is None:
         return False
     return (now or datetime.now(timezone.utc)) > vu
 
-@api_router.get("/offers")
-async def list_offers(active_only: bool = True):
-    q = {"active": True} if active_only else {}
-    offers = await db.offers.find(q).sort("created_at", -1).to_list(100)
-    now = datetime.now(timezone.utc)
-    # When active_only, hide offers whose server-side expiry has passed so the
-    # public UI never shows a coupon the checkout would reject.
-    if active_only:
-        offers = [o for o in offers if not _offer_expired(o, now)]
-    return [{
+def _offer_distribution(o: dict) -> list:
+    """Return the distribution list for an offer. Docs without the field default
+    to ["website","app"] so existing public offers stay visible (backward compat)."""
+    d = o.get("distribution")
+    if not d:
+        return ["website", "app"]
+    return d
+
+def _offer_serial(o: dict, now: datetime | None = None) -> dict:
+    """Serialise an offer doc for API responses (admin or public)."""
+    now = now or datetime.now(timezone.utc)
+    usage_limit = o.get("usage_limit")
+    usage_count = int(o.get("usage_count", 0) or 0)
+    remaining = (usage_limit - usage_count) if usage_limit is not None else None
+    expired = _offer_expired(o, now)
+    fully_redeemed = (usage_limit is not None and usage_count >= usage_limit)
+    if not o.get("active", True):
+        computed_status = "INACTIVE"
+    elif expired:
+        computed_status = "EXPIRED"
+    elif fully_redeemed:
+        computed_status = "FULLY_REDEEMED"
+    else:
+        computed_status = "ACTIVE"
+    return {
         "id": str(o["_id"]),
         "title": o["title"],
         "description": o.get("description", ""),
@@ -6292,31 +6382,81 @@ async def list_offers(active_only: bool = True):
         "one_time_per_customer": bool(o.get("one_time_per_customer", False)),
         "valid_until": o.get("valid_until"),
         "created_at": o.get("created_at", ""),
-        # Server clock so clients render countdowns immune to device-clock changes.
         "server_now": now.isoformat(),
-    } for o in offers]
+        # New fields
+        "distribution": _offer_distribution(o),
+        "usage_limit": usage_limit,
+        "usage_count": usage_count,
+        "remaining_uses": remaining,
+        "assigned_customer_id": o.get("assigned_customer_id"),
+        "share_token": o.get("share_token"),
+        "computed_status": computed_status,
+    }
+
+@api_router.get("/offers")
+async def list_offers(active_only: bool = True, for_platform: str = "website"):
+    """Public offer list.  for_platform = 'website' (default) or 'app'.
+    Voucher-code-only offers are NEVER returned here regardless of for_platform.
+    Docs without a distribution field default to ["website","app"] for backward
+    compatibility with offers created before this field was added."""
+    q = {"active": True} if active_only else {}
+    offers = await db.offers.find(q).sort("created_at", -1).to_list(100)
+    now = datetime.now(timezone.utc)
+    result = []
+    for o in offers:
+        dist = _offer_distribution(o)
+        # Never expose private/voucher-only offers in public lists
+        if "voucher_code_only" in dist and "website" not in dist and "app" not in dist:
+            continue
+        # Filter by requested platform
+        if for_platform == "app" and "app" not in dist:
+            continue
+        if for_platform == "website" and "website" not in dist:
+            continue
+        if active_only and _offer_expired(o, now):
+            continue
+        if active_only:
+            usage_limit = o.get("usage_limit")
+            usage_count = int(o.get("usage_count", 0) or 0)
+            if usage_limit is not None and usage_count >= usage_limit:
+                continue
+        result.append(_offer_serial(o, now))
+    return result
 
 @api_router.post("/offers")
 async def create_offer(offer: OfferCreate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+    # Validate coupon code uniqueness if one was supplied
+    code = (offer.coupon_code or "").upper().strip()
+    if code:
+        existing = await db.offers.find_one({"coupon_code": code})
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Coupon code {code} already exists.")
+    dist = offer.distribution if offer.distribution else ["website", "app"]
     doc = {
         "title": offer.title,
         "description": offer.description,
         "discount_percent": offer.discount_percent or 0,
         "discount_amount": offer.discount_amount or 0,
-        "coupon_code": (offer.coupon_code or "").upper().strip(),
+        "coupon_code": code,
         "image_url": offer.image_url or "",
         "active": offer.active,
         "min_order_amount": float(offer.min_order_amount or 0),
         "one_time_per_customer": bool(offer.one_time_per_customer),
         "valid_until": (_parse_iso_utc(offer.valid_until).isoformat()
                         if _parse_iso_utc(offer.valid_until) else None),
+        "distribution": dist,
+        "usage_limit": offer.usage_limit,
+        "usage_count": 0,
+        "assigned_customer_id": offer.assigned_customer_id or None,
+        "share_token": secrets.token_urlsafe(16),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.offers.insert_one(doc)
-    return {"id": str(result.inserted_id), **{k: v for k, v in doc.items() if k != "_id"}}
+    doc["_id"] = result.inserted_id
+    return _offer_serial(doc)
 
 @api_router.put("/offers/{offer_id}")
 async def update_offer(offer_id: str, offer: OfferUpdate, request: Request):
@@ -6325,13 +6465,25 @@ async def update_offer(offer_id: str, offer: OfferUpdate, request: Request):
         raise HTTPException(status_code=403, detail="Admin only")
     ud = {k: v for k, v in offer.model_dump().items() if v is not None}
     if "coupon_code" in ud:
-        ud["coupon_code"] = ud["coupon_code"].upper().strip()
+        new_code = ud["coupon_code"].upper().strip()
+        # Uniqueness check — allow keeping the same code on this offer
+        existing = await db.offers.find_one({"coupon_code": new_code, "_id": {"$ne": ObjectId(offer_id)}})
+        if existing:
+            raise HTTPException(status_code=400, detail=f"Coupon code {new_code} is already used by another offer.")
+        ud["coupon_code"] = new_code
     if "valid_until" in ud:
         parsed = _parse_iso_utc(ud["valid_until"])
         ud["valid_until"] = parsed.isoformat() if parsed else None
+    # Allow explicitly clearing assigned_customer_id and usage_limit
+    raw = offer.model_dump()
+    if raw.get("assigned_customer_id") is None and "assigned_customer_id" in raw:
+        ud["assigned_customer_id"] = None
+    if raw.get("usage_limit") is None and "usage_limit" in raw:
+        ud["usage_limit"] = None
     if ud:
         await db.offers.update_one({"_id": ObjectId(offer_id)}, {"$set": ud})
-    return {"message": "Updated"}
+    updated = await db.offers.find_one({"_id": ObjectId(offer_id)})
+    return _offer_serial(updated) if updated else {"message": "Updated"}
 
 @api_router.delete("/offers/{offer_id}")
 async def delete_offer(offer_id: str, request: Request):
@@ -6342,7 +6494,282 @@ async def delete_offer(offer_id: str, request: Request):
     return {"message": "Deleted"}
 
 
-# ===== FAQ ENDPOINTS =====
+# ----- Voucher share endpoints -----
+# /api/public/voucher/{share_token}  — JSON for the React VoucherPage
+# /api/v/{share_token}               — Full HTML page (OG meta + branded card)
+#                                       Vercel proxies /v/* here so WhatsApp/social
+#                                       crawlers get server-rendered OG tags.
+# /api/v/{share_token}/og-image.png  — Dynamically generated 1200×630 OG image
+
+@api_router.get("/public/voucher/{share_token}")
+async def get_voucher_by_token(share_token: str):
+    """JSON data for the React VoucherPage (/v/:token on the frontend).
+    Returns enough to render the page; never leaks assigned customer PII."""
+    offer = await db.offers.find_one({"share_token": share_token})
+    if not offer:
+        raise HTTPException(status_code=404, detail="Voucher not found.")
+    now = datetime.now(timezone.utc)
+    serial = _offer_serial(offer, now)
+    # Strip private fields before sending to anonymous visitors
+    return {
+        "id": serial["id"],
+        "title": serial["title"],
+        "description": serial["description"],
+        "discount_percent": serial["discount_percent"],
+        "discount_amount": serial["discount_amount"],
+        "coupon_code": serial["coupon_code"],
+        "min_order_amount": serial["min_order_amount"],
+        "valid_until": serial["valid_until"],
+        "usage_limit": serial["usage_limit"],
+        "remaining_uses": serial["remaining_uses"],
+        "computed_status": serial["computed_status"],
+        "share_token": share_token,
+        # Do NOT expose assigned_customer_id or customer name here
+    }
+
+
+def _voucher_og_image_bytes(title: str, discount_txt: str, code: str, valid_until: str | None) -> bytes:
+    """Generate a 1200×630 branded OG image for the voucher. Returns PNG bytes."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import io, textwrap
+        W, H = 1200, 630
+        GREEN   = (21, 94, 63)
+        YELLOW  = (254, 201, 2)
+        WHITE   = (255, 255, 255)
+        DARK    = (26, 29, 26)
+        FONT_B  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        FONT_R  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+        img = Image.new("RGB", (W, H), GREEN)
+        d = ImageDraw.Draw(img)
+
+        # Background diamond watermark
+        for i in range(0, W + 200, 120):
+            d.polygon([(i, H//2-40),(i+40,H//2),(i,H//2+40),(i-40,H//2)],
+                      fill=(25, 100, 68))
+
+        # White card
+        cx, cy, cw, ch = 100, 80, W - 200, H - 160
+        d.rounded_rectangle([cx, cy, cx+cw, cy+ch], radius=32, fill=WHITE)
+
+        # KNB brand bar (left strip)
+        d.rounded_rectangle([cx, cy, cx+12, cy+ch], radius=6, fill=YELLOW)
+
+        # "KARACHI NASEEB BIRYANI" header
+        f_brand = ImageFont.truetype(FONT_B, 28)
+        d.text((cx + 40, cy + 36), "KARACHI NASEEB BIRYANI", font=f_brand, fill=GREEN)
+
+        # 🎁 label
+        f_label = ImageFont.truetype(FONT_R, 22)
+        d.text((cx + 40, cy + 78), "SPECIAL VOUCHER", font=f_label, fill=(92, 95, 92))
+
+        # Discount amount — big
+        f_disc = ImageFont.truetype(FONT_B, 90)
+        disc_w = d.textlength(discount_txt, font=f_disc)
+        d.text((cx + cw/2 - disc_w/2, cy + 130), discount_txt, font=f_disc, fill=GREEN)
+
+        # Title (wrapped)
+        f_title = ImageFont.truetype(FONT_B, 34)
+        lines = textwrap.wrap(title, width=32)
+        ty = cy + 255
+        for line in lines[:2]:
+            lw = d.textlength(line, font=f_title)
+            d.text((cx + cw/2 - lw/2, ty), line, font=f_title, fill=DARK)
+            ty += 44
+
+        # Code pill
+        f_code = ImageFont.truetype(FONT_B, 42)
+        pill_w = d.textlength(code, font=f_code) + 60
+        pill_x = cx + cw/2 - pill_w/2
+        pill_y = ty + 14
+        d.rounded_rectangle([pill_x, pill_y, pill_x+pill_w, pill_y+62], radius=31, fill=YELLOW)
+        cw2 = d.textlength(code, font=f_code)
+        d.text((pill_x + (pill_w - cw2)/2, pill_y + 8), code, font=f_code, fill=DARK)
+
+        # Valid until
+        if valid_until:
+            try:
+                vu = _parse_iso_utc(valid_until)
+                vu_str = f"Valid until {vu.strftime('%d %b %Y')}" if vu else ""
+            except Exception:
+                vu_str = ""
+            if vu_str:
+                f_small = ImageFont.truetype(FONT_R, 22)
+                sw = d.textlength(vu_str, font=f_small)
+                d.text((cx + cw/2 - sw/2, pill_y + 78), vu_str, font=f_small, fill=(92, 95, 92))
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning(f"OG image generation failed: {e}")
+        return b""
+
+
+@api_router.get("/v/{share_token}/og-image.png", response_class=Response)
+async def voucher_og_image(share_token: str):
+    """Dynamically generated 1200×630 PNG for WhatsApp/social OG preview."""
+    offer = await db.offers.find_one({"share_token": share_token})
+    if not offer:
+        raise HTTPException(status_code=404, detail="Not found")
+    if offer.get("discount_amount"):
+        disc = f"Rs. {int(offer['discount_amount'])} OFF"
+    elif offer.get("discount_percent"):
+        disc = f"{int(offer['discount_percent'])}% OFF"
+    else:
+        disc = "Special Offer"
+    png = _voucher_og_image_bytes(
+        title=offer.get("title", "Special Voucher"),
+        discount_txt=disc,
+        code=offer.get("coupon_code", ""),
+        valid_until=offer.get("valid_until"),
+    )
+    if not png:
+        raise HTTPException(status_code=500, detail="Image generation failed")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@api_router.get("/v/{share_token}", response_class=Response)
+async def voucher_share_page(share_token: str, request: Request):
+    """Full server-rendered HTML voucher page. WhatsApp/social crawlers land here
+    and get proper OG meta tags. Real users get a branded mobile-friendly card with
+    a [Copy Code] button and a direct [Order Now] link."""
+    offer = await db.offers.find_one({"share_token": share_token})
+    base = _abs_origin(request)
+    site_url = os.environ.get("SITE_URL", "https://www.karachinaseebbiryani.com")
+
+    if not offer:
+        html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voucher Not Found — Karachi Naseeb Biryani</title></head>
+<body style="background:#155E3F;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;font-family:sans-serif">
+<div style="background:#fff;border-radius:20px;padding:40px;text-align:center;max-width:400px">
+<p style="font-size:48px">🤔</p>
+<h1 style="color:#1A1D1A">Voucher Not Found</h1>
+<p style="color:#5C5F5C">This voucher link is invalid or has been removed.</p>
+<a href="{site_url}" style="display:inline-block;margin-top:20px;background:#155E3F;color:#fff;padding:14px 28px;border-radius:30px;text-decoration:none;font-weight:bold">Order Online</a>
+</div></body></html>"""
+        return Response(content=html, media_type="text/html; charset=utf-8", status_code=404)
+
+    now = datetime.now(timezone.utc)
+    serial = _offer_serial(offer, now)
+    status = serial["computed_status"]
+    code = offer.get("coupon_code", "")
+    title = offer.get("title", "Special Voucher")
+    desc = offer.get("description", "")
+
+    if offer.get("discount_amount"):
+        disc_txt = f"Rs. {int(offer['discount_amount'])} OFF"
+    elif offer.get("discount_percent"):
+        disc_txt = f"{int(offer['discount_percent'])}% OFF"
+    else:
+        disc_txt = "Special Offer"
+
+    og_img_url = f"{base}/api/v/{share_token}/og-image.png"
+    og_title = f"Karachi Naseeb Biryani — {disc_txt}"
+    og_desc = f"Private voucher • Code: {code} • {desc}" if desc else f"Private voucher • Code: {code}"
+
+    valid_str = ""
+    if offer.get("valid_until"):
+        try:
+            vu = _parse_iso_utc(offer["valid_until"])
+            valid_str = vu.strftime("%d %b %Y") if vu else ""
+        except Exception:
+            pass
+
+    remaining = serial.get("remaining_uses")
+    min_amt = float(offer.get("min_order_amount", 0) or 0)
+
+    # Status banner content
+    if status == "FULLY_REDEEMED":
+        banner = '<div style="background:#C41E3A;color:#fff;padding:18px;border-radius:12px;text-align:center;font-weight:bold;font-size:18px">🚫 Voucher Fully Redeemed<br><span style="font-size:14px;font-weight:normal">This voucher is no longer available.</span></div>'
+        show_code = False
+    elif status == "EXPIRED":
+        banner = f'<div style="background:#C41E3A;color:#fff;padding:18px;border-radius:12px;text-align:center;font-weight:bold;font-size:18px">⌛ Voucher Expired<br><span style="font-size:14px;font-weight:normal">This voucher expired on {valid_str}.</span></div>'
+        show_code = False
+    elif status == "INACTIVE":
+        banner = '<div style="background:#888;color:#fff;padding:18px;border-radius:12px;text-align:center;font-weight:bold;font-size:18px">⛔ Voucher Unavailable<br><span style="font-size:14px;font-weight:normal">This voucher is currently inactive.</span></div>'
+        show_code = False
+    else:
+        banner = ""
+        show_code = True
+
+    code_section = ""
+    if show_code and code:
+        code_section = f"""
+<div style="text-align:center;margin:24px 0">
+  <p style="color:#5C5F5C;font-size:13px;margin:0 0 8px">VOUCHER CODE</p>
+  <div style="display:inline-flex;align-items:center;gap:10px;background:#F9F8F6;border:2px dashed #FEC902;border-radius:12px;padding:14px 24px">
+    <span id="code" style="font-size:28px;font-weight:900;letter-spacing:3px;color:#1A1D1A">{code}</span>
+    <button onclick="navigator.clipboard.writeText('{code}');this.textContent='✓ Copied!';setTimeout(()=>this.textContent='Copy',2000)"
+      style="background:#FEC902;border:none;border-radius:8px;padding:8px 16px;font-weight:bold;cursor:pointer;font-size:13px">Copy</button>
+  </div>
+  <p style="color:#5C5F5C;font-size:13px;margin-top:8px">Enter this code at checkout</p>
+</div>
+<div style="text-align:center;margin-top:8px">
+  <a href="{site_url}/menu" style="display:inline-block;background:#155E3F;color:#fff;padding:16px 40px;border-radius:30px;text-decoration:none;font-weight:bold;font-size:16px">🍽️ Order Now</a>
+</div>"""
+
+    details_rows = ""
+    if min_amt > 0:
+        details_rows += f'<tr><td style="color:#5C5F5C;padding:6px 0">Minimum Order</td><td style="font-weight:600;text-align:right">Rs. {int(min_amt)}</td></tr>'
+    if valid_str:
+        details_rows += f'<tr><td style="color:#5C5F5C;padding:6px 0">Valid Until</td><td style="font-weight:600;text-align:right">{valid_str}</td></tr>'
+    if remaining is not None:
+        details_rows += f'<tr><td style="color:#5C5F5C;padding:6px 0">Remaining Uses</td><td style="font-weight:600;text-align:right">{remaining}</td></tr>'
+    details = f'<table style="width:100%;border-collapse:collapse;margin-top:16px">{details_rows}</table>' if details_rows else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{og_title}</title>
+<meta name="description" content="{og_desc}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{site_url}/v/{share_token}">
+<meta property="og:title" content="{og_title}">
+<meta property="og:description" content="{og_desc}">
+<meta property="og:image" content="{og_img_url}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="Karachi Naseeb Biryani">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{og_title}">
+<meta name="twitter:description" content="{og_desc}">
+<meta name="twitter:image" content="{og_img_url}">
+<meta name="robots" content="noindex,nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+</head>
+<body style="margin:0;background:#155E3F;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+<div style="background:#fff;border-radius:24px;max-width:440px;width:100%;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+  <!-- Header -->
+  <div style="background:#155E3F;padding:24px;text-align:center">
+    <div style="width:52px;height:52px;background:#C41E3A;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#fff;margin-bottom:10px">K</div>
+    <p style="color:#FEC902;font-size:12px;font-weight:700;letter-spacing:2px;margin:0">KARACHI NASEEB BIRYANI</p>
+    <p style="color:#fff;opacity:.7;font-size:12px;margin:4px 0 0">🎁 Special Voucher</p>
+  </div>
+  <!-- Body -->
+  <div style="padding:28px 24px">
+    {banner}
+    <div style="text-align:center;margin-bottom:16px">
+      <div style="font-size:52px;font-weight:900;color:#155E3F;line-height:1">{disc_txt}</div>
+      <h1 style="font-size:18px;font-weight:700;color:#1A1D1A;margin:8px 0 4px">{title}</h1>
+      {'<p style="color:#5C5F5C;font-size:14px;margin:0">' + desc + '</p>' if desc else ''}
+    </div>
+    {code_section}
+    {details}
+  </div>
+  <div style="padding:16px 24px;background:#F9F8F6;text-align:center;border-top:1px solid #E5E2DC">
+    <p style="margin:0;color:#5C5F5C;font-size:12px">Karachi Naseeb Biryani & Murg Pulao · 68 Chatri Chowk, D Block, Lahore</p>
+  </div>
+</div>
+</body>
+</html>"""
+    return Response(content=html, media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "public, max-age=60"})
 # Public list (only enabled) drives the /faq page and the FAQ JSON-LD schema.
 # Admin endpoints (full CRUD + reorder) live behind get_current_user role=admin.
 

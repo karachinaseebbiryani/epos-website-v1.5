@@ -3,6 +3,8 @@
     { "source": "/sitemap.xml", "destination": "https://knb-backend.fly.dev/api/sitemap.xml" },
     { "source": "/robots.txt", "destination": "https://knb-backend.fly.dev/api/robots.txt" },
     { "source": "/llms.txt", "destination": "https://knb-backend.fly.dev/api/llms.txt" },
+    { "source": "/v/:share_token/og-image.png", "destination": "https://knb-backend.fly.dev/api/v/:share_token/og-image.png" },
+    { "source": "/v/:share_token", "destination": "https://knb-backend.fly.dev/api/v/:share_token" },
     { "source": "/((?!static/).*)", "destination": "/index.html" }
   ]
 }

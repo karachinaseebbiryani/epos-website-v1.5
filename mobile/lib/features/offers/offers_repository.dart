@@ -11,8 +11,13 @@ class OffersRepository {
   final ApiClient _api;
 
   Future<List<Offer>> fetchOffers() async {
-    final res =
-        await _api.dio.get('/offers', options: Options(extra: {'silent': true}));
+    // for_platform=app ensures only app-distributed offers are returned.
+    // Voucher-code-only and website-only offers are filtered server-side.
+    final res = await _api.dio.get(
+      '/offers',
+      queryParameters: {'for_platform': 'app'},
+      options: Options(extra: {'silent': true}),
+    );
     throwIfError(res);
     final list = res.data as List? ?? [];
     return list

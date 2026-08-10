@@ -17,6 +17,7 @@ import CheckoutPage from "./pages/CheckoutPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import OffersPage from "./pages/OffersPage";
+import VoucherPage from "./pages/VoucherPage";
 import EventsPage from "./pages/EventsPage";
 import ProfilePage from "./pages/ProfilePage";
 import OrdersPage from "./pages/OrdersPage";
@@ -111,6 +112,7 @@ function App() {
                   <Route path="/login" element={<LoginPage />} />
                   <Route path="/register" element={<RegisterPage />} />
                   <Route path="/offers" element={<OffersPage />} />
+                  <Route path="/v/:shareToken" element={<VoucherPage />} />
                   <Route path="/events" element={<EventsPage />} />
                   <Route path="/faq" element={<FAQPage />} />
                   <Route path="/about" element={<AboutPage />} />
