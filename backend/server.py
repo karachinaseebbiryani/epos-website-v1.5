@@ -3722,11 +3722,17 @@ async def customer_google_login(req: GoogleLoginRequest, response: Response):
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
     if not google_client_id:
         raise HTTPException(status_code=503, detail="Google login is not configured")
-    try:
-        # Verify the token signature, expiry, audience.
-        info = g_id_token.verify_oauth2_token(req.credential, g_requests.Request(), google_client_id)
-    except Exception as e:
-        logger.warning(f"Google token verification failed: {e}")
+    # Support multiple client IDs (comma-separated) — e.g. web + Android OAuth clients
+    client_ids = [c.strip() for c in google_client_id.split(",") if c.strip()]
+    info = None
+    for cid in client_ids:
+        try:
+            info = g_id_token.verify_oauth2_token(req.credential, g_requests.Request(), cid)
+            break
+        except Exception:
+            continue
+    if info is None:
+        logger.warning("Google token verification failed for all configured client IDs")
         raise HTTPException(status_code=401, detail="Invalid Google login")
     email = info.get("email")
     if not email or not info.get("email_verified", True):
