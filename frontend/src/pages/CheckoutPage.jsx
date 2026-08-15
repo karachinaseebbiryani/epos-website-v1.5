@@ -213,7 +213,7 @@ export default function CheckoutPage() {
         );
     }
 
-    const applyCoupon = async () => {
+   const applyCoupon = async () => {
         const code = form.coupon_code.trim().toUpperCase();
         if (!code) return;
         // Stacking guard applies to both personal and public coupons against Diamond discount rewards.
@@ -249,26 +249,33 @@ export default function CheckoutPage() {
                 } catch { /* fall through to public offers */ }
             }
 
-            const { data } = await api.get("/offers");
-            const found = data.find((o) => (o.coupon_code || "").toUpperCase() === code && o.active);
-            if (!found) { setCoupon(null); toast.error("Invalid coupon code"); return; }
-            // V2: enforce minimum order on offers
-            const minAmount = Number(found.min_order_amount || 0);
-            if (minAmount > 0 && subtotal < minAmount) {
+            // 2) Public offers AND private voucher codes. The /offers/lookup
+            //    endpoint resolves BOTH publicly-listed offers and private
+            //    'voucher_code_only' codes (which never appear in GET /offers),
+            //    and runs the same server-side validation as order-place time.
+            try {
+                const { data: found } = await api.get("/offers/lookup", { params: { code } });
+                // V2: enforce minimum order on offers
+                const minAmount = Number(found.min_order_amount || 0);
+                if (minAmount > 0 && subtotal < minAmount) {
+                    setCoupon(null);
+                    toast.error(`Spend at least Rs. ${minAmount.toFixed(0)} to use ${found.coupon_code}. Add Rs. ${(minAmount - subtotal).toFixed(0)} more.`);
+                    return;
+                }
+                let discount = 0;
+                if (found.discount_percent) discount = (subtotal * found.discount_percent) / 100;
+                else if (found.discount_amount) discount = found.discount_amount;
+                setCoupon({ ...found, discount: Math.min(discount, subtotal) });
+                toast.success(`Coupon applied: ${found.title}`);
+            } catch (err) {
                 setCoupon(null);
-                toast.error(`Spend at least Rs. ${minAmount.toFixed(0)} to use ${found.coupon_code}. Add Rs. ${(minAmount - subtotal).toFixed(0)} more.`);
-                return;
+                const msg = err?.response?.data?.detail || "Invalid coupon code";
+                toast.error(msg);
             }
-            let discount = 0;
-            if (found.discount_percent) discount = (subtotal * found.discount_percent) / 100;
-            else if (found.discount_amount) discount = found.discount_amount;
-            setCoupon({ ...found, discount: Math.min(discount, subtotal) });
-            toast.success(`Coupon applied: ${found.title}`);
         } catch (e) {
             toast.error("Failed to validate coupon");
         }
     };
-
     const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
     // Preview the Diamond reward's effect on the total BEFORE placing the order, so the
     // customer doesn't have to take it on faith. Free-item rewards already render their

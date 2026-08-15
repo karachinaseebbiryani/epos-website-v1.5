@@ -66,7 +66,10 @@ export default function AdminOffers() {
     const [customerResults, setCustomerResults] = useState([]);
 
     const load = useCallback(async () => {
-        const { data } = await api.get("/offers", { params: { active_only: false } });
+        // Admin list — includes private 'voucher_code_only' vouchers that the
+        // public /offers endpoint hides. Without this, private vouchers vanish
+        // from this page (no card, no share button) right after creation.
+        const { data } = await api.get("/admin/offers", { params: { active_only: false } });
         setOffers(data);
     }, []);
     useEffect(() => { load(); }, [load]);

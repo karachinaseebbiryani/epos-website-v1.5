@@ -6400,36 +6400,44 @@ def _offer_serial(o: dict, now: datetime | None = None) -> dict:
     }
 
 @api_router.get("/offers")
-async def list_offers(active_only: bool = True, for_platform: str = "website"):
-    """Public offer list.  for_platform = 'website' (default) or 'app'.
-    Voucher-code-only offers are NEVER returned here regardless of for_platform.
-    Docs without a distribution field default to ["website","app"] for backward
-    compatibility with offers created before this field was added."""
+@api_router.get("/admin/offers")
+async def admin_list_offers(request: Request, active_only: bool = False):
+    """Admin offer list — returns ALL offers, INCLUDING private
+    'voucher_code_only' vouchers that GET /offers intentionally hides from the
+    public. Admin-only. This is what the admin Offers page must call so private
+    vouchers stay visible (and shareable) after they are created."""
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
     q = {"active": True} if active_only else {}
-    offers = await db.offers.find(q).sort("created_at", -1).to_list(100)
+    offers = await db.offers.find(q).sort("created_at", -1).to_list(200)
     now = datetime.now(timezone.utc)
-    result = []
-    for o in offers:
-        dist = _offer_distribution(o)
-        # Never expose private/voucher-only offers in public lists
-        if "voucher_code_only" in dist and "website" not in dist and "app" not in dist:
-            continue
-        # Filter by requested platform
-        if for_platform == "app" and "app" not in dist:
-            continue
-        if for_platform == "website" and "website" not in dist:
-            continue
-        if active_only and _offer_expired(o, now):
-            continue
-        if active_only:
-            usage_limit = o.get("usage_limit")
-            usage_count = int(o.get("usage_count", 0) or 0)
-            if usage_limit is not None and usage_count >= usage_limit:
-                continue
-        result.append(_offer_serial(o, now))
-    return result
+    return [_offer_serial(o, now) for o in offers]
 
-@api_router.post("/offers")
+@api_router.get("/offers/lookup")
+async def lookup_offer(code: str, request: Request):
+    """Resolve a single offer by its coupon/voucher code for checkout validation.
+    Unlike GET /offers (the public list), this DOES return private
+    'voucher_code_only' offers, so a customer handed a private code can apply it."""
+    code_normalized = (code or "").upper().strip()
+    if not code_normalized:
+        raise HTTPException(status_code=400, detail="Please enter a coupon code.")
+    offer = await db.offers.find_one({"coupon_code": code_normalized, "active": True})
+    if not offer:
+        raise HTTPException(status_code=404, detail="This voucher code is invalid.")
+    now = datetime.now(timezone.utc)
+    if _offer_expired(offer, now):
+        raise HTTPException(status_code=400, detail="This voucher has expired.")
+    usage_limit = offer.get("usage_limit")
+    usage_count = int(offer.get("usage_count", 0) or 0)
+    if usage_limit is not None and usage_count >= usage_limit:
+        raise HTTPException(status_code=400, detail="This voucher has already been fully redeemed.")
+    assigned = offer.get("assigned_customer_id")
+    if assigned:
+        cust = await get_optional_customer(request)
+        if not cust or str(cust["_id"]) != str(assigned):
+            raise HTTPException(status_code=400, detail="This voucher is not valid for your account.")
+    return _offer_serial(offer, now)@api_router.post("/offers")
 async def create_offer(offer: OfferCreate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin":
@@ -7401,6 +7409,23 @@ async def seed_online_data():
         },
         {"$set": {"one_time_per_customer": True}},
     )
+    # Backfill: correct the restaurant location ONLY when it still holds the old
+    # wrong default (31.4520, 74.2680) — ~14 km west of the real location.
+    try:
+        _loc = await db.online_settings.find_one({"key": "online"}, {"restaurant_lat": 1, "restaurant_lng": 1})
+        if _loc:
+            _lat = _loc.get("restaurant_lat")
+            _lng = _loc.get("restaurant_lng")
+            if (_lat is not None and _lng is not None
+                    and abs(float(_lat) - 31.4520) < 1e-6
+                    and abs(float(_lng) - 74.2680) < 1e-6):
+                await db.online_settings.update_one(
+                    {"key": "online"},
+                    {"$set": {"restaurant_lat": 31.4761875, "restaurant_lng": 74.4163125}},
+                )
+                logger.info("Backfilled restaurant location from old default to real coords")
+    except Exception as e:
+        logger.warning(f"Restaurant location backfill skipped: {e}")
     # Indexes
     try:
         await db.customers.create_index("email", unique=True)
@@ -7441,8 +7466,8 @@ from emergentintegrations.payments.stripe.checkout import (
 )
 
 DEFAULT_ONLINE_SETTINGS = {
-    "restaurant_lat": 31.4520,
-    "restaurant_lng": 74.2680,
+    "restaurant_lat": 31.4761875,
+    "restaurant_lng": 74.4163125,
     "delivery_free_radius_km": 2.0,
     "delivery_base_fee": 100.0,
     "delivery_per_km_fee": 15.0,
