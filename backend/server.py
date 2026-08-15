@@ -4513,6 +4513,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "wallet_applied": wallet_applied,  # store credit used on this order
         "printed": False,
         "track_token": track_token,
+        "rider_token": secrets.token_urlsafe(16),
         "created_at": now.isoformat(),
         "date": now.strftime("%Y-%m-%d"),
     }

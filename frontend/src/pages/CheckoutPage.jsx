@@ -329,6 +329,10 @@ export default function CheckoutPage() {
         if (phoneDigits.length < 11) {
             toast.error("Phone number must contain at least 11 digits"); return;
         }
+        if (!coords) {
+            toast.error("Please press \"Use My Location\" (or drop a pin on the map) to set your delivery location before placing your order.");
+            return;
+        }
         if (coords && !delivery.in_range) {
             toast.error("Your location is outside our delivery area."); return;
         }

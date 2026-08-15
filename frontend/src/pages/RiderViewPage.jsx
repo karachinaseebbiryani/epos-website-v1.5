@@ -74,8 +74,8 @@ export default function RiderViewPage() {
     }
 
     const receipt = (order.id || "").slice(-6).toUpperCase();
-    const lat = order.customer_lat;
-    const lng = order.customer_lng;
+    const lat = order.customer_lat ?? order.delivery_lat;
+    const lng = order.customer_lng ?? order.delivery_lng;
     const hasGps = lat !== undefined && lat !== null && lng !== undefined && lng !== null;
     const mapsHref = hasGps ? `https://www.google.com/maps?q=${lat},${lng}` : null;
     const dirsHref = hasGps ? `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}` : null;
