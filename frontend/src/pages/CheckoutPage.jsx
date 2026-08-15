@@ -9,7 +9,7 @@ import { Phone, MapPin, User, MessageSquare, Tag, Banknote, ArrowLeft, CreditCar
 import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
 import ClosedBanner from "../components/ClosedBanner";
 import useBusinessHours from "../hooks/useBusinessHours";
-
+    import LocationPicker from "../components/LocationPicker";
 const PAYMENT_LABELS = {
     cod: { label: "Cash on Delivery", icon: Banknote, desc: "Pay when your order arrives" },
     pay_at_restaurant: { label: "Pay at Restaurant", icon: Store, desc: "Pay in person if picking up" },
@@ -67,6 +67,11 @@ export default function CheckoutPage() {
     const [coords, setCoords] = useState(null);
     const [delivery, setDelivery] = useState({ distance_km: null, fee: 0, in_range: true, free_delivery: false });
     const [locating, setLocating] = useState(false);
+    // Map pin picker: lets the customer confirm/fine-tune their EXACT drop point
+    // so the distance + delivery fee are correct. `gpsAccuracy` (metres) lets us
+    // warn when the device only returned a coarse (network/IP) fix.
+    const [showMap, setShowMap] = useState(false);
+    const [gpsAccuracy, setGpsAccuracy] = useState(null);
     // V2: track the customer's selected Diamond reward so we can show it as a chip and let
     // them remove it. The actual Diamond debit happens server-side when the order is placed.
     const [reward, setReward] = useState(() => {
@@ -173,7 +178,10 @@ export default function CheckoutPage() {
         navigator.geolocation.getCurrentPosition(
             async (pos) => {
                 const c = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                const accuracy = pos.coords.accuracy; // metres
                 setCoords(c);
+                setGpsAccuracy(accuracy);
+                setShowMap(true); // reveal the pin so they can confirm the exact spot
                 try {
                     const { data } = await api.post("/delivery/quote", { ...c, subtotal });
                     setDelivery(data);
@@ -184,14 +192,20 @@ export default function CheckoutPage() {
                     } else {
                         toast.success(`Delivery fee: Rs. ${data.fee} (${data.distance_km}km)`);
                     }
+                    // A coarse fix (network/IP based) can be off by kilometres and
+                    // inflate the fee — nudge them to drag the pin to their door.
+                    if (accuracy && accuracy > 200) {
+                        toast("Location looks approximate — drag the pin to your exact spot for the correct fee.", { icon: "📍" });
+                    }
                 } catch (err) { toast.error("Could not calculate delivery"); }
                 setLocating(false);
             },
             (err) => {
                 setLocating(false);
-                toast.error("Location permission denied. Please enable or enter manually below.");
+                setShowMap(true); // let them place the pin manually instead
+                toast.error("Location permission denied. Drop a pin on the map or enter it below.");
             },
-            { enableHighAccuracy: true, timeout: 15000 }
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
         );
     };
 
@@ -485,10 +499,35 @@ export default function CheckoutPage() {
                                         {delivery.in_range ? (
                                             delivery.free_delivery ? <span className="text-green-700 font-bold">FREE delivery</span> : <span className="font-bold">Delivery: Rs. {delivery.fee}</span>
                                         ) : <span className="text-red-600 font-bold">OUTSIDE service area ({delivery.max_radius_km}km max)</span>}
+                                        {gpsAccuracy && gpsAccuracy > 200 && (
+                                            <span className="block text-amber-600 mt-0.5">Approximate location (±{Math.round(gpsAccuracy)}m) — drag the pin below for an exact fee.</span>
+                                        )}
                                     </div>
                                 )}
+
+                                {/* Map pin picker — customers confirm / fine-tune the exact
+                                    delivery point. Dragging the pin re-quotes the fee. */}
+                                {showMap && (
+                                    <div className="mt-3" data-testid="location-picker-wrap">
+                                        <p className="text-xs text-neutral-500 mb-1.5">Drag the pin to your exact location (or tap the map).</p>
+                                        <LocationPicker
+                                            lat={coords?.lat}
+                                            lng={coords?.lng}
+                                            onChange={(la, ln) => setManualCoords(la, ln)}
+                                            height={220}
+                                        />
+                                    </div>
+                                )}
+
+                                {!showMap && (
+                                    <button type="button" onClick={() => setShowMap(true)} data-testid="pin-on-map-button"
+                                        className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-brand-red hover:underline">
+                                        <MapPin className="w-3.5 h-3.5" /> Set location on map
+                                    </button>
+                                )}
+
                                 {!coords && (
-                                    <details className="text-xs text-neutral-500">
+                                    <details className="text-xs text-neutral-500 mt-2">
                                         <summary className="cursor-pointer hover:text-brand-red">Enter coordinates manually</summary>
                                         <div className="grid grid-cols-2 gap-2 mt-2">
                                             <input type="number" step="0.0001" placeholder="Latitude" data-testid="manual-lat"
