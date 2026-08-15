@@ -6439,7 +6439,9 @@ async def lookup_offer(code: str, request: Request):
         if not cust or str(cust["_id"]) != str(assigned):
             raise HTTPException(status_code=400, detail="This voucher is not valid for your account.")
     return _offer_serial(offer, now)
-        @api_router.post("/offers")
+
+
+@api_router.post("/offers")
 async def create_offer(offer: OfferCreate, request: Request):
     user = await get_current_user(request)
     if user.get("role") != "admin":
