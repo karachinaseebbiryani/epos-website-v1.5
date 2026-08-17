@@ -3719,7 +3719,10 @@ async def customer_google_login(req: GoogleLoginRequest, response: Response):
     except Exception as e:
         logger.error(f"Google auth libs missing: {e}")
         raise HTTPException(status_code=500, detail="Google login is not available right now")
-    google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    google_client_id = ",".join(filter(None, [
+        os.environ.get("GOOGLE_CLIENT_ID"),          # website (untouched)
+        os.environ.get("GOOGLE_CLIENT_ID_MOBILE"),   # mobile app
+    ]))
     if not google_client_id:
         raise HTTPException(status_code=503, detail="Google login is not configured")
     # Support multiple client IDs (comma-separated) — e.g. web + Android OAuth clients
