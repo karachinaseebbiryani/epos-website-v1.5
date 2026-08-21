@@ -75,8 +75,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       if (!ok && mounted) {
         _showMsg(ref.read(authControllerProvider).error ?? 'Google sign-in failed');
       }
-    } catch (_) {
-      _showMsg('Google sign-in failed.');
+    } catch (e) {
+      _showMsg('Google sign-in failed: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
