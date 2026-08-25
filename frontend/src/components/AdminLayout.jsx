@@ -49,7 +49,7 @@ const ONLINE_NAV = [
 
 export default function AdminLayout() {
   const navigate = useNavigate();
-  const { user } = useStaffAuth();
+  const { user, logout: logoutStaff } = useStaffAuth();
   const [adminTokenOk, setAdminTokenOk] = useState(false);
 
   // FoodPanda partner dashboard. Only account 1 can open from inside the POS:
@@ -82,7 +82,8 @@ export default function AdminLayout() {
     setAdminTokenOk(true);
   }, [navigate]);
 
-  const logout = () => {
+  const logout = async () => {
+    await logoutStaff();
     localStorage.removeItem("knb_admin_token");
     localStorage.removeItem("staff_auth_token");
     navigate("/admin/sign-in");

@@ -14,11 +14,11 @@
       },
       "oauth_client": [
         {
-          "client_id": "557642081718-8527od94qasaq2r8go4ebe0131nig2bi.apps.googleusercontent.com",
+          "client_id": "557642081718-p376qnkv2u7bhi1blvsnj66s6s6tuc4c.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.karachinaseeb.knb_customer",
-            "certificate_hash": "c632bf35dc5123fac6e168efe2c4949ab6f21dc2"
+            "certificate_hash": "b8c4432639f5d8959654e33da8b571237234deaa"
           }
         },
         {

@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 from bson import ObjectId
+from bson.errors import InvalidId
 import smtplib, ssl, asyncio
 from email.message import EmailMessage
 import httpx
@@ -344,7 +345,7 @@ def create_access_token(uid, email, role):
     return jwt.encode({"sub": uid, "email": email, "role": role, "exp": datetime.now(timezone.utc) + timedelta(hours=8), "type": "access", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 def create_refresh_token(uid):
-    return jwt.encode({"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return jwt.encode({"sub": uid, "type": "refresh"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 async def get_current_user(request: Request):
     token = request.cookies.get("access_token")
@@ -355,9 +356,6 @@ async def get_current_user(request: Request):
     try:
         payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access": raise HTTPException(status_code=401, detail="Invalid token")
-        # Force re-login on backend restart: any token issued by a previous instance is invalid
-        if payload.get("iid") != INSTANCE_ID:
-            raise HTTPException(status_code=401, detail="Session expired — please log in again")
         user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
         if not user: raise HTTPException(status_code=401, detail="User not found")
         user["_id"] = str(user["_id"])
@@ -724,7 +722,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
     at = create_access_token(uid, email, user.get("role", "cashier"))
     rt = create_refresh_token(uid)
     response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
-    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=315360000, path="/")
     perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": uid, "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms, "token": at}
 
@@ -741,7 +739,7 @@ async def register(req: RegisterRequest, response: Response):
     at = create_access_token(uid, email, req.role)
     rt = create_refresh_token(uid)
     response.set_cookie(key="access_token", value=at, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
-    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=604800, path="/")
+    response.set_cookie(key="refresh_token", value=rt, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=315360000, path="/")
     return {"id": uid, "email": email, "name": req.name, "role": req.role, "permissions": perms, "token": at}
 
 @api_router.get("/auth/me")
@@ -749,6 +747,28 @@ async def get_me(request: Request):
     user = await get_current_user(request)
     perms = user.get("permissions", ADMIN_PERMISSIONS if user.get("role") == "admin" else ["pos"])
     return {"id": user["_id"], "email": user["email"], "name": user.get("name", ""), "role": user.get("role", "cashier"), "permissions": perms}
+
+@api_router.post("/auth/refresh")
+async def refresh_staff_session(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Refresh session not found")
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        uid = str(user["_id"])
+        access_token = create_access_token(uid, user["email"], user.get("role", "cashier"))
+        response.set_cookie(key="access_token", value=access_token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=28800, path="/")
+        response.set_cookie(key="refresh_token", value=token, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE, max_age=315360000, path="/")
+        return {"token": access_token}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh session expired")
+    except (jwt.InvalidTokenError, InvalidId):
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 @api_router.post("/auth/logout")
 async def logout(response: Response):

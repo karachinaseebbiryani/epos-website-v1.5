@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import api, { formatApiError, API } from "../../lib/api";
 import {
-    Printer, RefreshCw, Image as ImageIcon, BellRing, BellOff, CheckCircle2,
+    Printer, RefreshCw, Image as ImageIcon, BellRing, BellOff, CheckCircle2, CircleAlert,
     XCircle, Pencil, Plus, Minus, Trash2, PhoneCall, Volume2, VolumeX, Clock, Truck,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,12 +34,15 @@ export default function AdminOrders() {
     const [busyId, setBusyId] = useState(null);
     const [muted, setMuted] = useState(false);
     const [audioBlocked, setAudioBlocked] = useState(false);
+    const [pollCountdown, setPollCountdown] = useState(POLL_MS / 1000);
+    const [pollStatus, setPollStatus] = useState("healthy");
     const prefs = useAlertPrefs();
 
     const audioRef = useRef(null);
     const lastPendingIdRef = useRef(null);
     const pendingCountRef = useRef(0);
     const tickCountRef = useRef(0);
+    const pollingRef = useRef(false);
     const [printSettings, setPrintSettings] = useState({});
     const [receiptOpen, setReceiptOpen] = useState(false);
 
@@ -78,6 +81,8 @@ export default function AdminOrders() {
     // status changes made on another device without thrashing the UI every tick.
     useEffect(() => {
         const tick = async () => {
+            if (pollingRef.current) return;
+            pollingRef.current = true;
             try {
                 const { data } = await api.get("/online-orders/pending-count");
                 const count = data.pending_count || 0;
@@ -87,9 +92,22 @@ export default function AdminOrders() {
                 if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
                 if (newOrderArrived || tickCountRef.current === 0) load();
                 manageAlertSound(count);
-            } catch (e) { /* silent — keep polling */ }
+                setPollStatus("healthy");
+            } catch (e) {
+                setPollStatus("error");
+            } finally {
+                pollingRef.current = false;
+            }
         };
-        const t = setInterval(tick, POLL_MS);
+        const t = setInterval(() => {
+            setPollCountdown((seconds) => {
+                if (seconds <= 1) {
+                    void tick();
+                    return POLL_MS / 1000;
+                }
+                return seconds - 1;
+            });
+        }, 1000);
         return () => clearInterval(t);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [muted]);
@@ -255,6 +273,14 @@ export default function AdminOrders() {
                     <p className="text-neutral-500 mt-1">Manage incoming customer orders · auto-refreshes every {POLL_MS / 1000}s</p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <div
+                        data-testid="orders-poll-indicator"
+                        title={pollStatus === "error" ? "Order refresh failed" : "Order refresh is active"}
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-xs font-bold ${pollStatus === "error" ? "bg-red-100 text-red-700" : "bg-emerald-50 text-emerald-700"}`}
+                    >
+                        {pollStatus === "error" ? <CircleAlert className="w-4 h-4" /> : <RefreshCw className="w-4 h-4 animate-spin" />}
+                        <span>{pollStatus === "error" ? "Refresh error" : `Next refresh in ${pollCountdown}`}</span>
+                    </div>
                     {pendingTotal > 0 && !muted && (
                         <span data-testid="ringing-indicator" className="inline-flex items-center gap-2 bg-brand-red text-white rounded-full px-3 py-2 text-xs font-semibold animate-pulse">
                             <BellRing className="w-4 h-4" /> {pendingTotal} new order{pendingTotal > 1 ? "s" : ""} — awaiting action

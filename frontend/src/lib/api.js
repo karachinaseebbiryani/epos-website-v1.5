@@ -1,4 +1,5 @@
 import axios from "axios";
+import { refreshStaffToken } from "../contexts/StaffAuthContext";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
@@ -20,6 +21,7 @@ const api = axios.create({ baseURL: API });
 api.interceptors.request.use((config) => {
     const token = localStorage.getItem("knb_token");
     const adminToken = localStorage.getItem("knb_admin_token");
+    const staffToken = localStorage.getItem("staff_auth_token");
     const method = (config.method || "get").toLowerCase();
     // POST /online-orders is the customer-facing "place my order" call. It must ALWAYS go
     // out with the customer token (never the admin token) so the backend can link the order
@@ -41,6 +43,8 @@ api.interceptors.request.use((config) => {
     );
     if (isAdminCall && adminToken) {
         config.headers.Authorization = `Bearer ${adminToken}`;
+    } else if (isAdminCall && staffToken) {
+        config.headers.Authorization = `Bearer ${staffToken}`;
     } else if (token) {
         config.headers.Authorization = `Bearer ${token}`;
     } else if (adminToken) {
@@ -66,6 +70,27 @@ api.interceptors.response.use((res) => {
         }
     } catch (e) { /* never fail a real response because of cache plumbing */ }
     return res;
+}, async (error) => {
+    const config = error.config || {};
+    const staffToken = localStorage.getItem("staff_auth_token");
+    const adminToken = localStorage.getItem("knb_admin_token");
+    const authorization = config.headers?.Authorization;
+    const isStaffRequest = authorization === `Bearer ${staffToken}` || authorization === `Bearer ${adminToken}`;
+    if (error.response?.status !== 401 || config._staffRetried || !isStaffRequest) {
+        return Promise.reject(error);
+    }
+    config._staffRetried = true;
+    try {
+        const token = await refreshStaffToken();
+        config.headers = config.headers || {};
+        config.headers.Authorization = `Bearer ${token}`;
+        return api(config);
+    } catch (refreshError) {
+        localStorage.removeItem("staff_auth_token");
+        localStorage.removeItem("knb_admin_token");
+        window.location.href = "/admin/sign-in";
+        return Promise.reject(refreshError);
+    }
 });
 
 export function formatApiError(detail) {

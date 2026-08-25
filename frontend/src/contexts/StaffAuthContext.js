@@ -15,6 +15,20 @@ const STORAGE_KEY = "staff_auth_token";
 // (the customer AuthContext + lib/api.js use their own headers).
 export const staffAxios = axios.create({ baseURL: API, withCredentials: true });
 
+let refreshPromise = null;
+
+export async function refreshStaffToken() {
+  if (!refreshPromise) {
+    refreshPromise = staffAxios.post("/auth/refresh", {}).then(({ data }) => {
+      if (data.token) localStorage.setItem(STORAGE_KEY, data.token);
+      return data.token;
+    }).finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
 staffAxios.interceptors.request.use((config) => {
   const token = localStorage.getItem(STORAGE_KEY);
   if (token) config.headers.Authorization = `Bearer ${token}`;
@@ -23,12 +37,23 @@ staffAxios.interceptors.request.use((config) => {
 
 staffAxios.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401 && !error.config?.url?.includes("/auth/")) {
+  async (error) => {
+    const config = error.config || {};
+    const isAuthEndpoint = ["/auth/login", "/auth/register", "/auth/refresh", "/auth/logout"].some((path) => config.url?.includes(path));
+    if (error.response?.status !== 401 || config._staffRetried || isAuthEndpoint) {
+      return Promise.reject(error);
+    }
+    config._staffRetried = true;
+    try {
+      const token = await refreshStaffToken();
+      config.headers = config.headers || {};
+      config.headers.Authorization = `Bearer ${token}`;
+      return staffAxios(config);
+    } catch (refreshError) {
       localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/admin/sign-in";
+      return Promise.reject(refreshError);
     }
-    return Promise.reject(error);
   }
 );
 
