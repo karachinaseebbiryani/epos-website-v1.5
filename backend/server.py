@@ -6425,11 +6425,22 @@ def _offer_serial(o: dict, now: datetime | None = None) -> dict:
 
 @api_router.get("/offers")
 @api_router.get("/admin/offers")
-async def admin_list_offers(request: Request, active_only: bool = False):
+async def admin_list_offers(request: Request, active_only: bool = False,
+                            for_platform: Optional[str] = None):
     """Admin offer list — returns ALL offers, INCLUDING private
     'voucher_code_only' vouchers that GET /offers intentionally hides from the
-    public. Admin-only. This is what the admin Offers page must call so private
-    vouchers stay visible (and shareable) after they are created."""
+    public. The mobile app uses for_platform=app for the public customer list."""
+    if for_platform == "app":
+        offers = await db.offers.find({"active": True}).sort("created_at", -1).to_list(200)
+        now = datetime.now(timezone.utc)
+        return [
+            _offer_serial(o, now)
+            for o in offers
+            if "app" in _offer_distribution(o)
+            and "voucher_code_only" not in _offer_distribution(o)
+            and not o.get("assigned_customer_id")
+            and not _offer_expired(o, now)
+        ]
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
