@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 import 'dart:async';
 
@@ -262,6 +263,11 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     await _repo.logout();
+    try {
+      await GoogleSignIn().signOut();
+    } catch (_) {
+      // App logout must still complete if Google is unavailable.
+    }
     state = const AuthState(status: AuthStatus.unauthenticated);
   }
 
