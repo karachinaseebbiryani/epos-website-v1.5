@@ -122,6 +122,19 @@ export default function ContactPage() {
                         </div>
                     </div>
 
+                    <div className="bg-white border border-neutral-200 rounded-2xl overflow-hidden">
+                        <iframe
+                            src="https://www.google.com/maps/embed/v1/place?key=AIzaSyD55uTcF0f508i3m9SRfPHO_rTwNn7nFf0&q=31.4520,74.2680&zoom=15"
+                            width="100%"
+                            height="280"
+                            style={{ border: 0 }}
+                            allowFullScreen=""
+                            loading="lazy"
+                            referrerPolicy="no-referrer-when-downgrade"
+                            title="Restaurant location map"
+                        />
+                    </div>
+
                     <div className="bg-white border border-neutral-200 rounded-2xl p-5">
                         <div className="flex items-start gap-3">
                             <div className="w-11 h-11 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"><Clock className="w-5 h-5" /></div>

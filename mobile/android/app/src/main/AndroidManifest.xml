@@ -38,6 +38,11 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Google Maps API key -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyD55uTcF0f508i3m9SRfPHO_rTwNn7nFf0"/>
+
         <!-- FCM: route notifications WITHOUT an explicit channel_id to our
              high-importance channel (created in MainActivity) instead of the
              SDK's default-importance fallback — keeps heads-up + lock-screen
