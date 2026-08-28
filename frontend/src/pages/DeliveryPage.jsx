@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import api from "../lib/api";
 import { useSeo } from "../lib/seo";
 import { MapPin, Clock, Truck, Phone, ArrowRight } from "lucide-react";
+import DeliveryZoneMap from "../components/DeliveryZoneMap";
 
 /**
  * Public /delivery page. Lists the admin-managed delivery areas (GET
@@ -22,12 +23,21 @@ export default function DeliveryPage() {
     });
 
     const [areas, setAreas] = useState([]);
+    const [businessHours, setBusinessHours] = useState(null);
 
     useEffect(() => {
         let cancelled = false;
         api.get("/delivery-areas")
             .then(({ data }) => { if (!cancelled) setAreas(Array.isArray(data) ? data : []); })
             .catch(() => { if (!cancelled) setAreas([]); });
+        return () => { cancelled = true; };
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        api.get("/public/business-hours")
+            .then(({ data }) => { if (!cancelled) setBusinessHours(data); })
+            .catch(() => { if (!cancelled) setBusinessHours(null); });
         return () => { cancelled = true; };
     }, []);
 
@@ -74,7 +84,7 @@ export default function DeliveryPage() {
                 </div>
                 <div className="bg-white border border-neutral-200 rounded-2xl p-5 text-center">
                     <MapPin className="w-6 h-6 mx-auto mb-2 text-brand-red" />
-                    <div className="font-display font-bold text-brand-ink">Within ~7 km</div>
+                    <div className="font-display font-bold text-brand-ink">Within {businessHours?.delivery_max_radius_km || 15} km</div>
                     <div className="text-sm text-neutral-500">of Chatri Chowk, Lahore</div>
                 </div>
                 <div className="bg-white border border-neutral-200 rounded-2xl p-5 text-center">
@@ -83,6 +93,18 @@ export default function DeliveryPage() {
                     <div className="text-sm text-neutral-500">Cash on Delivery available</div>
                 </div>
             </div>
+
+            {/* Delivery Zone Map */}
+            <section className="mb-12">
+                <h2 className="font-display font-bold text-2xl text-brand-ink mb-5">Our delivery zone</h2>
+                <div className="bg-white border border-neutral-200 rounded-2xl p-4 md:p-6">
+                    <DeliveryZoneMap height="450px" />
+                    <p className="text-sm text-neutral-500 mt-4 text-center">
+                        The red circle shows our {businessHours?.delivery_max_radius_km || 15}km delivery zone from our kitchen at Chatri Chowk.
+                        We deliver hot, fresh food within this area.
+                    </p>
+                </div>
+            </section>
 
             {/* Areas we deliver to */}
             <section className="mb-12">
