@@ -167,7 +167,6 @@ export default function ProfilePage() {
                     <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-auto" />
                 </Link>
             </div>
-            </Link>
 
             {/* Wallet — store credit from refunds. Shown only when non-zero so the
                 profile stays clean for the majority who have none. Spending it at
