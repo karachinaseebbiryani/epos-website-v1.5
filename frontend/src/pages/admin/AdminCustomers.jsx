@@ -9,6 +9,9 @@ export default function AdminCustomers() {
     const [customers, setCustomers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState("");
+    const [filterVerified, setFilterVerified] = useState("all"); // all, verified, unverified
+    const [filterWallet, setFilterWallet] = useState("all"); // all, with_balance, zero
+    const [sortBy, setSortBy] = useState("recent"); // recent, name, orders, wallet
     const [creditModal, setCreditModal] = useState(null);
     const [historyModal, setHistoryModal] = useState(null);
     const [transactions, setTransactions] = useState([]);
@@ -76,11 +79,37 @@ export default function AdminCustomers() {
         }
     };
 
-    const filteredCustomers = customers.filter((c) =>
-        c.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        c.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        c.phone?.includes(searchTerm)
-    );
+    const filteredCustomers = customers
+        .filter((c) => {
+            // Search filter
+            const matchesSearch = c.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.phone?.includes(searchTerm);
+            if (!matchesSearch) return false;
+
+            // Verification filter
+            if (filterVerified === "verified" && !c.email_verified) return false;
+            if (filterVerified === "unverified" && c.email_verified) return false;
+
+            // Wallet filter
+            if (filterWallet === "with_balance" && (c.wallet_balance || 0) <= 0) return false;
+            if (filterWallet === "zero" && (c.wallet_balance || 0) > 0) return false;
+
+            return true;
+        })
+        .sort((a, b) => {
+            switch (sortBy) {
+                case "name":
+                    return (a.name || "").localeCompare(b.name || "");
+                case "orders":
+                    return (b.order_count || 0) - (a.order_count || 0);
+                case "wallet":
+                    return (b.wallet_balance || 0) - (a.wallet_balance || 0);
+                case "recent":
+                default:
+                    return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+            }
+        });
 
     if (loading) {
         return <div className="p-8 text-center text-neutral-500">Loading customers...</div>;
@@ -103,6 +132,53 @@ export default function AdminCustomers() {
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-full pl-12 pr-4 py-3 border border-neutral-300 rounded-xl focus:ring-2 focus:ring-brand-red focus:border-transparent"
                 />
+            </div>
+
+            {/* Filters */}
+            <div className="mb-6 flex flex-wrap gap-4 items-center">
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-semibold text-neutral-700">Status:</label>
+                    <select
+                        value={filterVerified}
+                        onChange={(e) => setFilterVerified(e.target.value)}
+                        className="px-3 py-1.5 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                    >
+                        <option value="all">All</option>
+                        <option value="verified">Verified</option>
+                        <option value="unverified">Unverified</option>
+                    </select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-semibold text-neutral-700">Wallet:</label>
+                    <select
+                        value={filterWallet}
+                        onChange={(e) => setFilterWallet(e.target.value)}
+                        className="px-3 py-1.5 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                    >
+                        <option value="all">All</option>
+                        <option value="with_balance">With Balance</option>
+                        <option value="zero">Zero Balance</option>
+                    </select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                    <label className="text-sm font-semibold text-neutral-700">Sort by:</label>
+                    <select
+                        value={sortBy}
+                        onChange={(e) => setSortBy(e.target.value)}
+                        className="px-3 py-1.5 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                    >
+                        <option value="recent">Most Recent</option>
+                        <option value="name">Name (A-Z)</option>
+                        <option value="orders">Most Orders</option>
+                        <option value="wallet">Highest Wallet Balance</option>
+                    </select>
+                </div>
+
+                <div className="ml-auto text-sm text-neutral-600">
+                    Showing {filteredCustomers.length} of {customers.length} customers
+                </div>
             </div>
 
             {/* Customers Table */}

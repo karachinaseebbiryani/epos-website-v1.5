@@ -30,6 +30,9 @@ export default function AdminOrders() {
     const customerFilter = searchParams.get('customer'); // Get customer ID from URL
     const [orders, setOrders] = useState([]);
     const [filter, setFilter] = useState("all");
+    const [searchTerm, setSearchTerm] = useState("");
+    const [paymentFilter, setPaymentFilter] = useState("all"); // all, cod, safepay, easypaisa, jazzcash, bank
+    const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all, delivery, pickup
     const [loading, setLoading] = useState(true);
     const [printOrder, setPrintOrder] = useState(null);
     const [rejectFor, setRejectFor] = useState(null);
@@ -67,17 +70,38 @@ export default function AdminOrders() {
     const load = useCallback(async () => {
         try {
             const { data } = await api.get("/online-orders", { params: { status: filter } });
-            // Filter by customer if customerFilter is present
-            const filteredData = customerFilter
+            // Apply filters
+            let filteredData = customerFilter
                 ? data.filter(order => order.customer_id === customerFilter)
                 : data;
+
+            // Search filter
+            if (searchTerm) {
+                filteredData = filteredData.filter(order =>
+                    order.receipt_no?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                    order.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                    order.phone?.includes(searchTerm) ||
+                    order.address?.toLowerCase().includes(searchTerm.toLowerCase())
+                );
+            }
+
+            // Payment method filter
+            if (paymentFilter !== "all") {
+                filteredData = filteredData.filter(order => order.payment_method === paymentFilter);
+            }
+
+            // Order type filter
+            if (orderTypeFilter !== "all") {
+                filteredData = filteredData.filter(order => order.order_type === orderTypeFilter);
+            }
+
             setOrders(filteredData);
         } catch (err) {
             toast.error("Failed to load orders");
         } finally {
             setLoading(false);
         }
-    }, [filter, customerFilter]);
+    }, [filter, customerFilter, searchTerm, paymentFilter, orderTypeFilter]);
 
     useEffect(() => { setLoading(true); load(); }, [load]);
 
@@ -320,6 +344,54 @@ export default function AdminOrders() {
                         {s.replace(/_/g, " ")}
                     </button>
                 ))}
+            </div>
+
+            {/* Additional Filters */}
+            <div className="mb-5 bg-white border border-neutral-200 rounded-xl p-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* Search */}
+                    <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">Search</label>
+                        <input
+                            type="text"
+                            placeholder="Order #, name, phone, address..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                        />
+                    </div>
+
+                    {/* Payment Method */}
+                    <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">Payment Method</label>
+                        <select
+                            value={paymentFilter}
+                            onChange={(e) => setPaymentFilter(e.target.value)}
+                            className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                        >
+                            <option value="all">All Methods</option>
+                            <option value="cod">Cash on Delivery</option>
+                            <option value="safepay">Card (SafePay)</option>
+                            <option value="easypaisa">Easypaisa</option>
+                            <option value="jazzcash">JazzCash</option>
+                            <option value="bank">Bank Transfer</option>
+                        </select>
+                    </div>
+
+                    {/* Order Type */}
+                    <div>
+                        <label className="block text-xs font-semibold text-neutral-700 mb-1">Order Type</label>
+                        <select
+                            value={orderTypeFilter}
+                            onChange={(e) => setOrderTypeFilter(e.target.value)}
+                            className="w-full px-3 py-2 border border-neutral-300 rounded-lg text-sm focus:ring-2 focus:ring-brand-red focus:border-transparent"
+                        >
+                            <option value="all">All Types</option>
+                            <option value="delivery">Delivery</option>
+                            <option value="pickup">Pickup</option>
+                        </select>
+                    </div>
+                </div>
             </div>
 
             {loading && orders.length === 0 ? (
