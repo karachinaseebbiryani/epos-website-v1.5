@@ -5320,6 +5320,8 @@ class RefundActionIn(BaseModel):
     #   gateway = sent from the SafePay dashboard (default, works for guests)
     #   wallet  = store credit into the customer's account wallet (signed-in only)
     method: Optional[str] = "gateway"
+    # Optional custom refund amount for partial refunds. If not provided, defaults to full order total.
+    amount: Optional[float] = None
 
 class RefundMessageIn(BaseModel):
     text: Optional[str] = ""
@@ -5496,9 +5498,23 @@ async def admin_refund_action(order_id: str, body: RefundActionIn, request: Requ
                "approved": {"refunded", "rejected"}}
     if action not in allowed.get(cur, set()):
         raise HTTPException(status_code=400, detail=f"Cannot move a '{cur}' request to '{action}'.")
+
+    # Partial refund support: admin can specify custom amount when approving/refunding
+    order_total = float(o.get("total_price", 0))
+    if body.amount is not None:
+        refund_amount = float(body.amount)
+        if refund_amount <= 0:
+            raise HTTPException(status_code=400, detail="Refund amount must be greater than 0.")
+        if refund_amount > order_total:
+            raise HTTPException(status_code=400, detail=f"Refund amount (Rs. {refund_amount}) cannot exceed order total (Rs. {order_total}).")
+    else:
+        # Default to full refund if no amount specified
+        refund_amount = order_total
+
     now = datetime.now(timezone.utc).isoformat()
     rr.update({
         "status": action,
+        "amount": refund_amount,  # Update amount (supports partial refunds)
         "admin_note": (body.note or "").strip()[:500],
         "acted_by": user.get("name", "") or user.get("email", ""),
         "updated_at": now,
@@ -5514,14 +5530,15 @@ async def admin_refund_action(order_id: str, body: RefundActionIn, request: Requ
             cid = o.get("customer_id")
             if not cid:
                 raise HTTPException(status_code=400, detail="Guest order — wallet refunds need a customer account. Refund via SafePay instead.")
-            amount = float(rr.get("amount") or 0)
+            amount = refund_amount
             res = await db.customers.update_one(
                 {"_id": ObjectId(str(cid))}, {"$inc": {"wallet_balance": amount}})
             if not res.matched_count:
                 raise HTTPException(status_code=400, detail="Customer account no longer exists — refund via SafePay instead.")
             await db.wallet_transactions.insert_one({
                 "customer_id": str(cid), "type": "refund_credit", "amount": amount,
-                "order_id": str(o["_id"]), "note": f"Refund for order #{str(o['_id'])[-6:].upper()}",
+                "order_id": str(o["_id"]),
+                "note": f"{'Partial ' if amount < order_total else ''}Refund for order #{str(o['_id'])[-6:].upper()} (Rs. {amount:g})",
                 "created_by": user.get("name", "") or user.get("email", ""),
                 "created_at": now,
             })

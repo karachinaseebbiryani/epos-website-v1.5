@@ -39,7 +39,7 @@ export default function AdminRefunds() {
 
     useEffect(() => { load(filter); const t = setInterval(() => load(filter), 15000); return () => clearInterval(t); }, [filter]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const act = async (orderId, action, method = "gateway") => {
+    const act = async (orderId, action, method = "gateway", amount = null) => {
         let note = "";
         if (action === "rejected") {
             note = window.prompt("Reason for declining (sent to the customer):") || "";
@@ -51,7 +51,11 @@ export default function AdminRefunds() {
             !window.confirm("Credit the amount to the customer's WALLET as store credit? They can spend it on future orders.")) return;
         setBusyId(orderId);
         try {
-            await api.post(`/admin/online-orders/${orderId}/refund-action`, { action, note, method });
+            const payload = { action, note, method };
+            if (amount !== null && amount > 0) {
+                payload.amount = amount;
+            }
+            await api.post(`/admin/online-orders/${orderId}/refund-action`, payload);
             toast.success("Done — customer notified");
             load();
         } catch (err) {
@@ -108,6 +112,8 @@ function RefundCard({ r, busy, onAct, onReload }) {
     const [sending, setSending] = useState(false);
     const fileRef = useRef(null);
     const [attach, setAttach] = useState(null); // data URL
+    const [refundAmount, setRefundAmount] = useState(rr.amount || r.total_price || 0);
+    const orderTotal = r.total_price || 0;
 
     const pickImage = (e) => {
         const f = e.target.files?.[0];
@@ -214,27 +220,49 @@ function RefundCard({ r, busy, onAct, onReload }) {
 
             {/* Actions */}
             {(rr.status === "requested" || rr.status === "approved") && (
-                <div className="mt-4 pt-3 border-t border-neutral-100 flex flex-wrap gap-2">
-                    {rr.status === "requested" && (
-                        <>
-                            <button disabled={busy} onClick={() => onAct(r.order_id, "approved")}
-                                className="bg-emerald-600 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50">Approve</button>
-                            <button disabled={busy} onClick={() => onAct(r.order_id, "rejected")}
-                                className="bg-red-600 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50">Decline</button>
-                        </>
-                    )}
-                    <button disabled={busy} onClick={() => onAct(r.order_id, "refunded", "gateway")}
-                        className="bg-green-700 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50"
-                        title="After sending the money from the SafePay dashboard">
-                        Mark Refunded (SafePay)
-                    </button>
-                    {!r.is_guest && (
-                        <button disabled={busy} onClick={() => onAct(r.order_id, "refunded", "wallet")}
-                            className="bg-brand-ink text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50"
-                            title="Credit the amount as store credit to the customer's account wallet">
-                            Refund to Wallet
+                <div className="mt-4 pt-3 border-t border-neutral-100">
+                    <div className="mb-3">
+                        <label className="block text-xs font-bold text-neutral-600 mb-1">
+                            Refund Amount (Rs.)
+                            {refundAmount < orderTotal && <span className="ml-1 text-brand-red">· Partial refund</span>}
+                        </label>
+                        <input
+                            type="number"
+                            value={refundAmount}
+                            onChange={(e) => setRefundAmount(Math.max(0, Math.min(orderTotal, parseFloat(e.target.value) || 0)))}
+                            min="0"
+                            max={orderTotal}
+                            step="1"
+                            className="w-full max-w-xs border border-neutral-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-brand-red"
+                            placeholder="Enter amount"
+                        />
+                        <p className="text-xs text-neutral-500 mt-1">
+                            Order total: Rs. {orderTotal.toFixed(0)} ·
+                            {refundAmount === orderTotal ? " Full refund" : ` Refunding ${((refundAmount / orderTotal) * 100).toFixed(0)}%`}
+                        </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        {rr.status === "requested" && (
+                            <>
+                                <button disabled={busy} onClick={() => onAct(r.order_id, "approved", "gateway", refundAmount)}
+                                    className="bg-emerald-600 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50">Approve</button>
+                                <button disabled={busy} onClick={() => onAct(r.order_id, "rejected")}
+                                    className="bg-red-600 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50">Decline</button>
+                            </>
+                        )}
+                        <button disabled={busy || refundAmount <= 0} onClick={() => onAct(r.order_id, "refunded", "gateway", refundAmount)}
+                            className="bg-green-700 text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50"
+                            title="After sending the money from the SafePay dashboard">
+                            Mark Refunded (SafePay)
                         </button>
-                    )}
+                        {!r.is_guest && (
+                            <button disabled={busy || refundAmount <= 0} onClick={() => onAct(r.order_id, "refunded", "wallet", refundAmount)}
+                                className="bg-brand-ink text-white rounded-full px-4 py-2 text-xs font-bold disabled:opacity-50"
+                                title="Credit the amount as store credit to the customer's account wallet">
+                                Refund to Wallet
+                            </button>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

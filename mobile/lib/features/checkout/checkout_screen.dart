@@ -217,7 +217,6 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
         ? (walletBalance > totalBeforeWallet ? totalBeforeWallet : walletBalance)
         : 0.0;
     final total = totalBeforeWallet - walletCreditApplied;
-    final customer = ref.watch(authControllerProvider).customer;
     final needsVerify = customer != null && !customer.emailVerified;
     return Scaffold(
       appBar: AppBar(
