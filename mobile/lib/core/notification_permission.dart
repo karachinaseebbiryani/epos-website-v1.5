@@ -7,7 +7,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// - If denied, shows dialog to open system settings
 /// - Tracks if permission has been requested before to avoid annoying users
 class NotificationPermissionHandler {
-  static const _permissionAskedKey = 'notification_permission_asked';
+  // Changed key to v2 so existing users get prompted again
+  static const _permissionAskedKey = 'notification_permission_asked_v2';
 
   /// Request notification permission on first app launch.
   /// Returns true if permission was granted, false otherwise.

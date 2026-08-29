@@ -135,19 +135,38 @@ export default function ProfilePage() {
             <EnableNotificationsCard />
             <IosEnableNotificationsCard />
 
-            {/* Diamond balance — visible immediately on profile so the customer always knows where
-                they stand. Auto-refreshes when an order is marked Delivered (see effect above). */}
-            <Link
-                to="/rewards"
-                data-testid="profile-diamond-balance"
-                className="inline-flex items-center gap-3 mb-8 px-5 py-4 bg-gradient-to-br from-brand-yellow to-amber-300 rounded-2xl hover:shadow-lg transition-shadow"
-            >
-                <Diamond className="w-8 h-8 text-brand-ink" fill="currentColor" />
-                <div>
-                    <p className="text-[10px] uppercase tracking-[0.18em] font-bold text-brand-ink/70">Diamond Balance</p>
-                    <p className="font-display font-black text-2xl text-brand-ink leading-tight">{diamondBalance} <span className="text-sm font-bold">Diamonds</span></p>
-                </div>
-                <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-2" />
+            {/* Wallet Balance & Diamond Balance — visible immediately on profile */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                {/* Wallet Balance (Store Credit from Refunds) */}
+                {user.wallet_balance > 0 && (
+                    <div
+                        data-testid="profile-wallet-balance"
+                        className="flex items-center gap-3 px-5 py-4 bg-gradient-to-br from-green-400 to-emerald-500 rounded-2xl shadow-md"
+                    >
+                        <RotateCcw className="w-8 h-8 text-white" />
+                        <div>
+                            <p className="text-[10px] uppercase tracking-[0.18em] font-bold text-white/80">Store Credit</p>
+                            <p className="font-display font-black text-2xl text-white leading-tight">Rs. {user.wallet_balance?.toFixed(0)}</p>
+                            <p className="text-xs text-white/80">Use at checkout</p>
+                        </div>
+                    </div>
+                )}
+
+                {/* Diamond Balance — visible immediately on profile so the customer always knows where
+                    they stand. Auto-refreshes when an order is marked Delivered (see effect above). */}
+                <Link
+                    to="/rewards"
+                    data-testid="profile-diamond-balance"
+                    className="flex items-center gap-3 px-5 py-4 bg-gradient-to-br from-brand-yellow to-amber-300 rounded-2xl hover:shadow-lg transition-shadow"
+                >
+                    <Diamond className="w-8 h-8 text-brand-ink" fill="currentColor" />
+                    <div>
+                        <p className="text-[10px] uppercase tracking-[0.18em] font-bold text-brand-ink/70">Diamond Balance</p>
+                        <p className="font-display font-black text-2xl text-brand-ink leading-tight">{diamondBalance} <span className="text-sm font-bold">Diamonds</span></p>
+                    </div>
+                    <ChevronRight className="w-5 h-5 text-brand-ink/60 ml-auto" />
+                </Link>
+            </div>
             </Link>
 
             {/* Wallet — store credit from refunds. Shown only when non-zero so the

@@ -5665,6 +5665,134 @@ async def admin_refund_message(order_id: str, body: RefundMessageIn, request: Re
             pass
     return {"ok": True, "message": msg, "refund_request": o["refund_request"]}
 
+# --- Customer Management (Admin) ---
+
+@api_router.get("/admin/customers")
+async def admin_list_customers(request: Request):
+    """List all customers for admin customer management page."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view customers.")
+
+    # Get all customers with their order counts
+    customers = await db.customers.find({}).sort("created_at", -1).to_list(1000)
+
+    # Get order counts for each customer
+    order_counts = {}
+    try:
+        async for grp in db.online_orders.aggregate([
+            {"$match": {"customer_id": {"$exists": True}}},
+            {"$group": {"_id": "$customer_id", "count": {"$sum": 1}}},
+        ]):
+            order_counts[str(grp["_id"])] = grp["count"]
+    except Exception:
+        pass
+
+    result = []
+    for c in customers:
+        cid = str(c["_id"])
+        result.append({
+            "id": cid,
+            "name": c.get("name", ""),
+            "email": c.get("email", ""),
+            "phone": c.get("phone", ""),
+            "email_verified": c.get("email_verified", False),
+            "wallet_balance": float(c.get("wallet_balance", 0) or 0),
+            "diamond_balance": int(c.get("diamond_balance", 0) or 0),
+            "order_count": order_counts.get(cid, 0),
+            "created_at": c.get("created_at", ""),
+        })
+
+    return result
+
+class WalletAdjustmentIn(BaseModel):
+    amount: float  # positive = add, negative = deduct
+    note: str
+
+@api_router.post("/admin/customers/{customer_id}/adjust-wallet")
+async def admin_adjust_customer_wallet(customer_id: str, body: WalletAdjustmentIn, request: Request):
+    """Manually adjust a customer's wallet balance (for compensation, promotions, etc.)"""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to manage customers.")
+
+    if body.amount == 0:
+        raise HTTPException(status_code=400, detail="Amount cannot be zero.")
+
+    if not body.note or not body.note.strip():
+        raise HTTPException(status_code=400, detail="Note/reason is required.")
+
+    try:
+        cust = await db.customers.find_one({"_id": ObjectId(customer_id)})
+        if not cust:
+            raise HTTPException(status_code=404, detail="Customer not found.")
+
+        current_balance = float(cust.get("wallet_balance", 0) or 0)
+        new_balance = current_balance + body.amount
+
+        # Prevent negative balance
+        if new_balance < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot deduct Rs. {abs(body.amount)}. Customer only has Rs. {current_balance} in wallet."
+            )
+
+        # Update wallet balance
+        await db.customers.update_one(
+            {"_id": ObjectId(customer_id)},
+            {"$inc": {"wallet_balance": body.amount}}
+        )
+
+        # Log transaction
+        await db.wallet_transactions.insert_one({
+            "customer_id": customer_id,
+            "type": "manual_adjustment",
+            "amount": body.amount,
+            "note": body.note.strip(),
+            "adjusted_by": user.get("email", "admin"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+        return {
+            "ok": True,
+            "previous_balance": current_balance,
+            "adjustment": body.amount,
+            "new_balance": new_balance,
+        }
+
+    except InvalidId:
+        raise HTTPException(status_code=404, detail="Invalid customer ID.")
+
+@api_router.get("/admin/customers/{customer_id}/wallet-history")
+async def admin_get_customer_wallet_history(customer_id: str, request: Request):
+    """Get wallet transaction history for a specific customer."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to view customer history.")
+
+    try:
+        # Verify customer exists
+        cust = await db.customers.find_one({"_id": ObjectId(customer_id)})
+        if not cust:
+            raise HTTPException(status_code=404, detail="Customer not found.")
+
+        # Get all wallet transactions for this customer, newest first
+        transactions = await db.wallet_transactions.find(
+            {"customer_id": customer_id}
+        ).sort("created_at", -1).limit(100).to_list(100)
+
+        return [{
+            "type": t.get("type", ""),
+            "amount": float(t.get("amount", 0)),
+            "note": t.get("note", ""),
+            "order_id": t.get("order_id", ""),
+            "adjusted_by": t.get("adjusted_by", ""),
+            "created_at": t.get("created_at", ""),
+        } for t in transactions]
+
+    except InvalidId:
+        raise HTTPException(status_code=404, detail="Invalid customer ID.")
+
 @api_router.post("/push/subscribe")
 async def push_subscribe(body: PushSubscriptionIn, request: Request):
     """Register the caller's browser push subscription. Signed-in customers get
@@ -6436,25 +6564,79 @@ async def admin_list_offers(request: Request, active_only: bool = False,
     if for_platform == "app":
         offers = await db.offers.find({"active": True}).sort("created_at", -1).to_list(200)
         now = datetime.now(timezone.utc)
-        return [
-            _offer_serial(o, now)
-            for o in offers
-            if "app" in _offer_distribution(o)
-            and "voucher_code_only" not in _offer_distribution(o)
-            and not o.get("assigned_customer_id")
-            and not _offer_expired(o, now)
-        ]
+
+        # Get customer ID to filter out already-used one-time offers
+        customer_id = None
+        try:
+            cust = await get_optional_customer(request)
+            if cust:
+                customer_id = str(cust["_id"])
+        except Exception:
+            pass
+
+        # Get list of offer codes the customer has already used
+        used_codes = set()
+        if customer_id:
+            used_orders = await db.online_orders.find(
+                {"customer_id": customer_id, "coupon_code": {"$exists": True, "$ne": None}}
+            ).to_list(1000)
+            used_codes = {o.get("coupon_code") for o in used_orders if o.get("coupon_code")}
+
+        result = []
+        for o in offers:
+            if "app" not in _offer_distribution(o):
+                continue
+            if "voucher_code_only" in _offer_distribution(o):
+                continue
+            if o.get("assigned_customer_id"):
+                continue
+            if _offer_expired(o, now):
+                continue
+            # Hide offers that are one-time-per-customer and customer has already used them
+            if o.get("one_time_per_customer") and o.get("coupon_code") in used_codes:
+                continue
+            result.append(_offer_serial(o, now))
+
+        return result
+
     if for_platform == "website":
         offers = await db.offers.find({"active": True}).sort("created_at", -1).to_list(200)
         now = datetime.now(timezone.utc)
-        return [
-            _offer_serial(o, now)
-            for o in offers
-            if "website" in _offer_distribution(o)
-            and "voucher_code_only" not in _offer_distribution(o)
-            and not o.get("assigned_customer_id")
-            and not _offer_expired(o, now)
-        ]
+
+        # Get customer ID to filter out already-used one-time offers
+        customer_id = None
+        try:
+            cust = await get_optional_customer(request)
+            if cust:
+                customer_id = str(cust["_id"])
+        except Exception:
+            pass
+
+        # Get list of offer codes the customer has already used
+        used_codes = set()
+        if customer_id:
+            used_orders = await db.online_orders.find(
+                {"customer_id": customer_id, "coupon_code": {"$exists": True, "$ne": None}}
+            ).to_list(1000)
+            used_codes = {o.get("coupon_code") for o in used_orders if o.get("coupon_code")}
+
+        result = []
+        for o in offers:
+            if "website" not in _offer_distribution(o):
+                continue
+            if "voucher_code_only" in _offer_distribution(o):
+                continue
+            if o.get("assigned_customer_id"):
+                continue
+            if _offer_expired(o, now):
+                continue
+            # Hide offers that are one-time-per-customer and customer has already used them
+            if o.get("one_time_per_customer") and o.get("coupon_code") in used_codes:
+                continue
+            result.append(_offer_serial(o, now))
+
+        return result
+
     user = await get_current_user(request)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")

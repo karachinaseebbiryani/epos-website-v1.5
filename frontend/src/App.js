@@ -45,6 +45,7 @@ import LoyaltySettings from "./pages/admin/LoyaltySettings";
 import RewardsManagement from "./pages/admin/RewardsManagement";
 import AdminNotifications from "./pages/admin/AdminNotifications";
 import AdminRefunds from "./pages/admin/AdminRefunds";
+import AdminCustomers from "./pages/admin/AdminCustomers";
 import ReviewManagement from "./pages/admin/ReviewManagement";
 import AdminFAQs from "./pages/admin/AdminFAQs";
 import AdminDeliveryAreas from "./pages/admin/AdminDeliveryAreas";
@@ -168,6 +169,7 @@ function App() {
                   <Route path="/admin/rewards" element={<RewardsManagement />} />
                   <Route path="/admin/notifications" element={<AdminNotifications />} />
                   <Route path="/admin/refund-requests" element={<AdminRefunds />} />
+                  <Route path="/admin/customers" element={<AdminCustomers />} />
                   <Route path="/admin/settings" element={<AdminSettings />} />
                   <Route path="/admin/payment-gateways" element={<PaymentGateways />} />
 

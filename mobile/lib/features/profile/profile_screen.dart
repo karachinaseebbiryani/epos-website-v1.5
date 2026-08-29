@@ -7,11 +7,18 @@ import '../auth/auth_controller.dart';
 import 'policy_webview.dart';
 import 'profile_repository.dart';
 
-class ProfileScreen extends ConsumerWidget {
+class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends ConsumerState<ProfileScreen> {
+  bool _showDeleteAccount = false;
+
+  @override
+  Widget build(BuildContext context) {
     final customer = ref.watch(authControllerProvider).customer;
     final mode = ref.watch(themeModeControllerProvider);
     final scheme = Theme.of(context).colorScheme;
@@ -92,13 +99,13 @@ class ProfileScreen extends ConsumerWidget {
           Text('More', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 4),
           _NavTile(
-              icon: Icons.receipt_long,
-              label: 'My Orders',
-              onTap: () => context.push('/orders')),
-          _NavTile(
               icon: Icons.diamond_outlined,
               label: 'My Diamonds',
               onTap: () => context.push('/diamonds')),
+          _NavTile(
+              icon: Icons.receipt_long,
+              label: 'My Orders',
+              onTap: () => context.push('/orders')),
           _NavTile(
               icon: Icons.local_offer_outlined,
               label: 'Offers & Coupons',
@@ -140,12 +147,57 @@ class ProfileScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 8),
           // Permanent deletion — App Store & Play Store policy requirement.
-          TextButton.icon(
-            onPressed: () => _confirmDeleteAccount(context, ref),
-            icon: Icon(Icons.delete_forever, color: scheme.error, size: 20),
-            label: Text('Delete my account',
-                style: TextStyle(color: scheme.error)),
+          InkWell(
+            onTap: () => setState(() => _showDeleteAccount = !_showDeleteAccount),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.delete_forever, color: scheme.error, size: 20),
+                  const SizedBox(width: 8),
+                  Text('Delete my account',
+                      style: TextStyle(color: scheme.error)),
+                  const SizedBox(width: 4),
+                  Icon(
+                    _showDeleteAccount ? Icons.expand_less : Icons.expand_more,
+                    color: scheme.error,
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
           ),
+          if (_showDeleteAccount) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer.withOpacity(0.3),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: scheme.error.withOpacity(0.3)),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    'This permanently deletes your account, saved allergies, coupons and diamond balance. This cannot be undone.',
+                    style: TextStyle(color: scheme.onSurface, fontSize: 13),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: () => _confirmDeleteAccount(context, ref),
+                    icon: const Icon(Icons.delete_forever),
+                    label: const Text('Delete forever'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: scheme.error,
+                      foregroundColor: scheme.onError,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -228,6 +280,7 @@ class _AllergensSectionState extends ConsumerState<_AllergensSection> {
   final _customCtrl = TextEditingController();
   bool _loaded = false;
   bool _saving = false;
+  bool _expanded = false;
 
   @override
   void dispose() {
@@ -292,70 +345,90 @@ class _AllergensSectionState extends ConsumerState<_AllergensSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Allergies & dietary',
-            style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 4),
-        Text('We add these to your order note so the kitchen is aware.',
-            style: Theme.of(context).textTheme.bodySmall),
-        const SizedBox(height: 8),
-        if (async.isLoading && !_loaded)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: LinearProgressIndicator(),
-          ),
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          children: [
-            for (final a in commonAllergens)
-              FilterChip(
-                label: Text(a),
-                selected: _selected.contains(a),
-                onSelected: (_) => _toggle(a),
-              ),
-            for (final a in custom)
-              InputChip(
-                label: Text(a),
-                onDeleted: () => _toggle(a),
-              ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _customCtrl,
-                maxLength: 30,
-                decoration: const InputDecoration(
-                  labelText: 'Add another allergy',
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                  counterText: '',
+        InkWell(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Allergies & dietary',
+                          style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: 4),
+                      Text('We add these to your order note so the kitchen is aware.',
+                          style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                  ),
                 ),
-                onSubmitted: (_) => _addCustom(),
-              ),
+                Icon(_expanded ? Icons.expand_less : Icons.expand_more),
+              ],
             ),
-            const SizedBox(width: 8),
-            IconButton.filledTonal(
-              onPressed: _addCustom,
-              icon: const Icon(Icons.add),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerRight,
-          child: FilledButton(
-            onPressed: _saving ? null : _save,
-            child: _saving
-                ? const SizedBox(
-                    height: 18,
-                    width: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('Save allergies'),
           ),
         ),
+        if (_expanded) ...[
+          const SizedBox(height: 8),
+          if (async.isLoading && !_loaded)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: LinearProgressIndicator(),
+            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final a in commonAllergens)
+                FilterChip(
+                  label: Text(a),
+                  selected: _selected.contains(a),
+                  onSelected: (_) => _toggle(a),
+                ),
+              for (final a in custom)
+                InputChip(
+                  label: Text(a),
+                  onDeleted: () => _toggle(a),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _customCtrl,
+                  maxLength: 30,
+                  decoration: const InputDecoration(
+                    labelText: 'Add another allergy',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    counterText: '',
+                  ),
+                  onSubmitted: (_) => _addCustom(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                onPressed: _addCustom,
+                icon: const Icon(Icons.add),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? const SizedBox(
+                      height: 18,
+                      width: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Save allergies'),
+            ),
+          ),
+        ],
       ],
     );
   }

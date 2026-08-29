@@ -61,6 +61,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final gsi = GoogleSignIn(
           serverClientId: AppConfig.googleServerClientId,
           scopes: const ['email']);
+
+      // Sign out first to force account picker to show
+      await gsi.signOut();
+
       final acct = await gsi.signIn();
       if (acct == null) return; // user cancelled
       final tokenAuth = await acct.authentication;

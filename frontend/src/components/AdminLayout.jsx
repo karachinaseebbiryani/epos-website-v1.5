@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ShoppingBag, ChefHat, Tag, CalendarDays, LogOut,
   Settings, FolderTree, ShoppingCart, Package, Receipt, Truck, RotateCcw,
   History, FileBarChart, SlidersHorizontal, Diamond, Gift, MessageSquare, Bell,
-  HelpCircle, CreditCard, LayoutGrid, Bike,
+  HelpCircle, CreditCard, LayoutGrid, Bike, Users,
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import PosInstall from "./PosInstall";
@@ -33,6 +33,7 @@ const ONLINE_NAV = [
   { to: "/admin",            label: "Dashboard",     icon: LayoutDashboard, end: true, perm: "online_dashboard" },
   { to: "/admin/orders",     label: "Online Orders", icon: ShoppingBag, perm: "online_orders" },
   { to: "/admin/refund-requests", label: "Refund Requests", icon: RotateCcw, perm: "online_orders" },
+  { to: "/admin/customers",  label: "Customers",     icon: Users, perm: "online_orders" },
   { to: "/admin/menu",       label: "Menu",          icon: ChefHat, perm: "online_menu" },
   { to: "/admin/categories", label: "Categories",    icon: FolderTree, perm: "online_menu" },
   { to: "/admin/offers",     label: "Offers",        icon: Tag, perm: "online_offers" },
