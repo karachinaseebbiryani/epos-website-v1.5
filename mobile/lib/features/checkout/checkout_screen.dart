@@ -36,6 +36,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   String _paymentMethod = 'cod';
   String _orderType = 'delivery'; // 'delivery' | 'pickup'
   bool _busy = false;
+  bool _useWalletCredit = false;
 
   bool get _isPickup => _orderType == 'pickup';
 
@@ -138,6 +139,13 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     if (!_formKey.currentState!.validate()) return;
     final lines = ref.read(cartProvider);
     if (lines.isEmpty) return;
+    final customer = ref.read(authControllerProvider).customer;
+    final walletBalance = customer?.walletBalance ?? 0.0;
+    final subtotal = ref.read(cartSubtotalProvider);
+    final totalBeforeWallet = subtotal + _deliveryFee;
+    final walletCreditApplied = _useWalletCredit
+        ? (walletBalance > totalBeforeWallet ? totalBeforeWallet : walletBalance)
+        : 0.0;
     setState(() => _busy = true);
     try {
       final order = await ref.read(orderRepositoryProvider).placeOrder(
@@ -153,6 +161,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             deliveryLat: _isPickup ? null : _lat,
             deliveryLng: _isPickup ? null : _lng,
             rewardId: ref.read(selectedRewardProvider)?.id,
+            useWalletCredit: _useWalletCredit,
+            walletCreditAmount: _useWalletCredit ? walletCreditApplied : 0.0,
           );
       ref.read(cartProvider.notifier).clear();
       // Reward is consumed by this order (server deducted the diamonds).
@@ -160,6 +170,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       // Diamonds are awarded server-side on delivery; refresh the cached balance
       // so the pill reflects any coupon/loyalty change on next view.
       ref.invalidate(loyaltyBalanceProvider);
+      // Wallet balance may have been deducted — refresh customer data.
+      if (_useWalletCredit && walletCreditApplied > 0) {
+        ref.invalidate(authControllerProvider);
+      }
       if (!mounted) return;
       final tok = order.trackToken ?? '';
       // Route by payment method. Wallets (Easypaisa/JazzCash) go through the
@@ -196,7 +210,13 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   @override
   Widget build(BuildContext context) {
     final subtotal = ref.watch(cartSubtotalProvider);
-    final total = subtotal + _deliveryFee;
+    final customer = ref.watch(authControllerProvider).customer;
+    final walletBalance = customer?.walletBalance ?? 0.0;
+    final totalBeforeWallet = subtotal + _deliveryFee;
+    final walletCreditApplied = _useWalletCredit
+        ? (walletBalance > totalBeforeWallet ? totalBeforeWallet : walletBalance)
+        : 0.0;
+    final total = totalBeforeWallet - walletCreditApplied;
     final customer = ref.watch(authControllerProvider).customer;
     final needsVerify = customer != null && !customer.emailVerified;
     return Scaffold(
@@ -338,6 +358,21 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               selected: _paymentMethod,
               onChanged: (v) => setState(() => _paymentMethod = v),
             ),
+            // Wallet credit toggle — only shown when customer has balance
+            if (walletBalance > 0) ...[
+              const SizedBox(height: 12),
+              CheckboxListTile(
+                value: _useWalletCredit,
+                onChanged: (val) => setState(() => _useWalletCredit = val ?? false),
+                title: Text(
+                  'Use wallet credit (Rs. ${walletBalance.toStringAsFixed(0)} available)',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+              ),
+            ],
             const SizedBox(height: 8),
             // "People also buy" — same recommendations the website shows at
             // checkout. Its own internal padding handles horizontal insets.
@@ -351,6 +386,14 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                 value: _quote == null
                     ? '-'
                     : (_quote!.freeDelivery ? 'FREE' : money(_deliveryFee)),
+              ),
+            ],
+            if (walletCreditApplied > 0) ...[
+              const SizedBox(height: 4),
+              _SummaryRow(
+                label: 'Wallet credit',
+                value: '- ${money(walletCreditApplied)}',
+                color: Colors.green,
               ),
             ],
             const SizedBox(height: 6),
@@ -720,10 +763,11 @@ class _CouponSuggestion extends ConsumerWidget {
 
 class _SummaryRow extends StatelessWidget {
   const _SummaryRow(
-      {required this.label, required this.value, this.bold = false});
+      {required this.label, required this.value, this.bold = false, this.color});
   final String label;
   final String value;
   final bool bold;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -731,8 +775,8 @@ class _SummaryRow extends StatelessWidget {
         ? Theme.of(context)
             .textTheme
             .titleMedium
-            ?.copyWith(fontWeight: FontWeight.w700)
-        : Theme.of(context).textTheme.bodyMedium;
+            ?.copyWith(fontWeight: FontWeight.w700, color: color)
+        : Theme.of(context).textTheme.bodyMedium?.copyWith(color: color);
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [Text(label, style: style), Text(value, style: style)],

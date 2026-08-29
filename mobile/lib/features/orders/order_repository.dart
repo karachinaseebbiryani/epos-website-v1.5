@@ -25,6 +25,8 @@ class OrderRepository {
     double? deliveryLat,
     double? deliveryLng,
     String? rewardId,
+    bool useWalletCredit = false,
+    double walletCreditAmount = 0.0,
   }) async {
     final pickup = orderType == 'pickup';
     final res = await _api.dio.post(
@@ -44,6 +46,7 @@ class OrderRepository {
         if (!pickup && deliveryLat != null) 'delivery_lat': deliveryLat,
         if (!pickup && deliveryLng != null) 'delivery_lng': deliveryLng,
         if (rewardId != null) 'reward_id': rewardId,
+        if (useWalletCredit) 'use_wallet': true,
       },
       options: Options(extra: {'showLoading': true}),
     );

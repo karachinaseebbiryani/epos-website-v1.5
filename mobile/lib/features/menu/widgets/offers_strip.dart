@@ -13,48 +13,67 @@ import '../../offers/widgets/offer_countdown.dart';
 /// are discoverable without digging into Profile (mirrors the website's home
 /// "Exclusive Offers" row). Tapping a card copies the coupon code and routes to
 /// the full Offers screen. Renders nothing when there are no offers.
-class OffersStrip extends ConsumerWidget {
+class OffersStrip extends ConsumerStatefulWidget {
   const OffersStrip({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<OffersStrip> createState() => _OffersStripState();
+}
+
+class _OffersStripState extends ConsumerState<OffersStrip> {
+  bool _isExpanded = true;
+
+  @override
+  Widget build(BuildContext context) {
     final all = ref.watch(offersProvider).asData?.value ?? const <Offer>[];
     // Drop any offer that expired while the screen was open (server already
     // filters expired ones out on fetch).
     final offers = all.where((o) => !o.isExpired).toList();
+
+    // Always show the header if there are offers, even when collapsed
     if (offers.isEmpty) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-          child: Row(
-            children: [
-              const Icon(Icons.local_offer, size: 16, color: BrandColors.red),
-              const SizedBox(width: 6),
-              const Text('Offers for you',
-                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
-              const Spacer(),
-              TextButton(
-                onPressed: () => context.push('/offers'),
-                style: TextButton.styleFrom(
-                    padding: EdgeInsets.zero, minimumSize: const Size(0, 0)),
-                child: const Text('See all'),
-              ),
-            ],
+        InkWell(
+          onTap: () => setState(() => _isExpanded = !_isExpanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+            child: Row(
+              children: [
+                const Icon(Icons.local_offer, size: 16, color: BrandColors.red),
+                const SizedBox(width: 6),
+                const Text('Offers for you',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                const SizedBox(width: 8),
+                Icon(
+                  _isExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                  size: 20,
+                  color: BrandColors.red,
+                ),
+                const Spacer(),
+                TextButton(
+                  onPressed: () => context.push('/offers'),
+                  style: TextButton.styleFrom(
+                      padding: EdgeInsets.zero, minimumSize: const Size(0, 0)),
+                  child: const Text('See all'),
+                ),
+              ],
+            ),
           ),
         ),
-        SizedBox(
-          height: 110,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: offers.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (_, i) => _OfferCard(offer: offers[i]),
+        if (_isExpanded)
+          SizedBox(
+            height: 110,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: offers.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (_, i) => _OfferCard(offer: offers[i]),
+            ),
           ),
-        ),
       ],
     );
   }
