@@ -433,6 +433,8 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                         #{o.receipt_no}
                         {isPending && <span className="text-[10px] uppercase font-bold bg-brand-red text-white px-2 py-0.5 rounded-full animate-pulse">NEW</span>}
                         {o.modified && <span className="text-[10px] uppercase font-bold bg-amber-500 text-white px-2 py-0.5 rounded-full">Modified</span>}
+                        {o.platform === "app" && <span className="text-[10px] uppercase font-bold bg-blue-500 text-white px-2 py-0.5 rounded-full">📱 APP</span>}
+                        {o.platform === "web" && <span className="text-[10px] uppercase font-bold bg-green-500 text-white px-2 py-0.5 rounded-full">🌐 WEB</span>}
                     </div>
                     <div className="text-xs text-neutral-500 mt-1">{new Date(o.created_at).toLocaleString()}</div>
                 </div>
