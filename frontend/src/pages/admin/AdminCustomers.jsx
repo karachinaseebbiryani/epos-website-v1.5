@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import api, { formatApiError } from "../../lib/api";
 import { toast } from "sonner";
-import { Search, Wallet, Plus, Minus, X, Mail, Phone, Calendar, Package, Diamond, History } from "lucide-react";
+import { Search, Wallet, Plus, Minus, X, Mail, Phone, Calendar, Package, Diamond, History, ExternalLink } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 export default function AdminCustomers() {
+    const navigate = useNavigate();
     const [customers, setCustomers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState("");
@@ -137,11 +139,16 @@ export default function AdminCustomers() {
                                             )}
                                         </td>
                                         <td className="px-6 py-4">
-                                            <div className="text-sm text-neutral-600">{customer.email}</div>
-                                            <div className="text-sm text-neutral-500 flex items-center gap-1 mt-1">
-                                                <Phone className="w-3 h-3" />
-                                                {customer.phone || "—"}
+                                            <div className="text-sm text-neutral-600 flex items-center gap-1">
+                                                <Mail className="w-3 h-3" />
+                                                {customer.email}
                                             </div>
+                                            {customer.phone && (
+                                                <div className="text-sm text-neutral-600 flex items-center gap-1 mt-1">
+                                                    <Phone className="w-3 h-3" />
+                                                    {customer.phone}
+                                                </div>
+                                            )}
                                         </td>
                                         <td className="px-6 py-4 text-sm text-neutral-600">
                                             <div className="flex items-center gap-1">
@@ -150,10 +157,21 @@ export default function AdminCustomers() {
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">
-                                            <div className="flex items-center gap-1 text-sm font-semibold text-neutral-700">
-                                                <Package className="w-4 h-4" />
-                                                {customer.order_count || 0}
-                                            </div>
+                                            {customer.order_count > 0 ? (
+                                                <button
+                                                    onClick={() => navigate(`/admin/orders?customer=${customer.id}`)}
+                                                    className="flex items-center gap-1 text-sm font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+                                                >
+                                                    <Package className="w-4 h-4" />
+                                                    {customer.order_count}
+                                                    <ExternalLink className="w-3 h-3" />
+                                                </button>
+                                            ) : (
+                                                <div className="flex items-center gap-1 text-sm text-neutral-400">
+                                                    <Package className="w-4 h-4" />
+                                                    0
+                                                </div>
+                                            )}
                                         </td>
                                         <td className="px-6 py-4">
                                             <div className="flex items-center gap-1 text-sm font-bold text-green-600">

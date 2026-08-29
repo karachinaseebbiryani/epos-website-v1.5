@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import api, { formatApiError, API } from "../../lib/api";
 import {
     Printer, RefreshCw, Image as ImageIcon, BellRing, BellOff, CheckCircle2, CircleAlert,
@@ -25,6 +26,8 @@ const POLL_MS = 4000; // 4-second polling per requirement (3-5s)
 const LIST_REFRESH_EVERY = 5;
 
 export default function AdminOrders() {
+    const [searchParams] = useSearchParams();
+    const customerFilter = searchParams.get('customer'); // Get customer ID from URL
     const [orders, setOrders] = useState([]);
     const [filter, setFilter] = useState("all");
     const [loading, setLoading] = useState(true);
@@ -64,13 +67,17 @@ export default function AdminOrders() {
     const load = useCallback(async () => {
         try {
             const { data } = await api.get("/online-orders", { params: { status: filter } });
-            setOrders(data);
+            // Filter by customer if customerFilter is present
+            const filteredData = customerFilter
+                ? data.filter(order => order.customer_id === customerFilter)
+                : data;
+            setOrders(filteredData);
         } catch (err) {
             toast.error("Failed to load orders");
         } finally {
             setLoading(false);
         }
-    }, [filter]);
+    }, [filter, customerFilter]);
 
     useEffect(() => { setLoading(true); load(); }, [load]);
 

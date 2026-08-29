@@ -6,6 +6,8 @@ class Customer {
     required this.name,
     required this.phone,
     this.emailVerified = true,
+    this.walletBalance = 0.0,
+    this.diamondBalance = 0,
   });
 
   final String id;
@@ -17,12 +19,20 @@ class Customer {
   /// social accounts (backend omits or sets the flag) are never wrongly blocked.
   final bool emailVerified;
 
-  Customer copyWith({bool? emailVerified}) => Customer(
+  /// Wallet balance (store credit from refunds)
+  final double walletBalance;
+
+  /// Diamond balance (loyalty points)
+  final int diamondBalance;
+
+  Customer copyWith({bool? emailVerified, double? walletBalance, int? diamondBalance}) => Customer(
         id: id,
         email: email,
         name: name,
         phone: phone,
         emailVerified: emailVerified ?? this.emailVerified,
+        walletBalance: walletBalance ?? this.walletBalance,
+        diamondBalance: diamondBalance ?? this.diamondBalance,
       );
 
   factory Customer.fromJson(Map<String, dynamic> json) => Customer(
@@ -32,6 +42,12 @@ class Customer {
         phone: (json['phone'] ?? '').toString(),
         // Absent → true (grandfathered). Only an explicit false blocks.
         emailVerified: json['email_verified'] != false,
+        walletBalance: (json['wallet_balance'] ?? 0.0) is num
+            ? (json['wallet_balance'] ?? 0.0).toDouble()
+            : double.tryParse(json['wallet_balance'].toString()) ?? 0.0,
+        diamondBalance: (json['diamond_balance'] ?? 0) is num
+            ? (json['diamond_balance'] ?? 0).toInt()
+            : int.tryParse(json['diamond_balance'].toString()) ?? 0,
       );
 }
 
