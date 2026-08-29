@@ -7,17 +7,39 @@ import 'app/theme_controller.dart';
 import 'core/app_messenger.dart';
 import 'core/loading_overlay.dart';
 import 'core/offline_banner.dart';
+import 'core/notification_permission.dart';
 import 'features/auth/auth_controller.dart';
 
 void main() {
   runApp(const ProviderScope(child: KnbApp()));
 }
 
-class KnbApp extends ConsumerWidget {
+class KnbApp extends ConsumerStatefulWidget {
   const KnbApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<KnbApp> createState() => _KnbAppState();
+}
+
+class _KnbAppState extends ConsumerState<KnbApp> {
+  bool _permissionChecked = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Request notification permission after the first frame is rendered
+    if (!_permissionChecked) {
+      _permissionChecked = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          NotificationPermissionHandler.requestPermissionOnFirstLaunch(context);
+        }
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final status = ref.watch(authControllerProvider).status;
     final themeMode = ref.watch(themeModeControllerProvider);
 

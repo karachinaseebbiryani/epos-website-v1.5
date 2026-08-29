@@ -46,7 +46,8 @@ class _OfferCountdownState extends State<OfferCountdown> {
     final m = d.inMinutes % 60;
     final s = d.inSeconds % 60;
     if (days > 0) return '${days}d ${h}h left';
-    if (h > 0) return '${h}h ${m}m left';
+    // Show seconds for anything under 24 hours
+    if (h > 0) return '${h}h ${m}m ${s}s left';
     return '${m}m ${s}s left';
   }
 

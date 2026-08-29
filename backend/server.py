@@ -3195,6 +3195,7 @@ class OnlineOrderCreate(BaseModel):
     delivery_lng: Optional[float] = None
     reward_id: Optional[str] = None  # NEW: Loyalty reward redemption
     use_wallet: Optional[bool] = False  # apply store-credit wallet (signed-in only)
+    platform: Optional[str] = "web"  # "web" | "app" - tracks order source
 
     @field_validator("phone")
     @classmethod
@@ -4534,6 +4535,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
         "diamonds_earned": diamonds_earned,  # NEW: Diamonds earned from this order
         "status": initial_status,
         "wallet_applied": wallet_applied,  # store credit used on this order
+        "platform": order.platform or "web",  # NEW: Track order source (web/app)
         "printed": False,
         "track_token": track_token,
         "rider_token": secrets.token_urlsafe(16),
@@ -6429,7 +6431,8 @@ async def admin_list_offers(request: Request, active_only: bool = False,
                             for_platform: Optional[str] = None):
     """Admin offer list — returns ALL offers, INCLUDING private
     'voucher_code_only' vouchers that GET /offers intentionally hides from the
-    public. The mobile app uses for_platform=app for the public customer list."""
+    public. The mobile app uses for_platform=app and website uses for_platform=website
+    for the public customer list."""
     if for_platform == "app":
         offers = await db.offers.find({"active": True}).sort("created_at", -1).to_list(200)
         now = datetime.now(timezone.utc)
@@ -6437,6 +6440,17 @@ async def admin_list_offers(request: Request, active_only: bool = False,
             _offer_serial(o, now)
             for o in offers
             if "app" in _offer_distribution(o)
+            and "voucher_code_only" not in _offer_distribution(o)
+            and not o.get("assigned_customer_id")
+            and not _offer_expired(o, now)
+        ]
+    if for_platform == "website":
+        offers = await db.offers.find({"active": True}).sort("created_at", -1).to_list(200)
+        now = datetime.now(timezone.utc)
+        return [
+            _offer_serial(o, now)
+            for o in offers
+            if "website" in _offer_distribution(o)
             and "voucher_code_only" not in _offer_distribution(o)
             and not o.get("assigned_customer_id")
             and not _offer_expired(o, now)

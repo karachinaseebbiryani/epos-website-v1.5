@@ -250,6 +250,14 @@ class AuthController extends StateNotifier<AuthState> {
     state = state.copyWith(error: null);
     try {
       await _repo.deleteAccount();
+      // Clear Google Sign-In cache so the account picker shows on next sign-in
+      try {
+        final googleSignIn = GoogleSignIn();
+        await googleSignIn.disconnect();
+        await googleSignIn.signOut();
+      } catch (_) {
+        // Account deletion must still complete if Google is unavailable.
+      }
       state = const AuthState(status: AuthStatus.unauthenticated);
       return true;
     } on ApiException catch (e) {
@@ -263,8 +271,11 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     await _repo.logout();
+    // Clear Google Sign-In cache completely to force account picker on next sign-in
     try {
-      await GoogleSignIn().signOut();
+      final googleSignIn = GoogleSignIn();
+      await googleSignIn.disconnect();
+      await googleSignIn.signOut();
     } catch (_) {
       // App logout must still complete if Google is unavailable.
     }

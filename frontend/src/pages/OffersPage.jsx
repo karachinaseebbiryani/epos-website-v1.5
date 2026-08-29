@@ -10,6 +10,7 @@ import { useSeo } from "../lib/seo";
  * Live countdown for a limited-time offer. Ticks off the SERVER clock
  * (valid_until + server_now from GET /offers), so changing the device clock
  * can't extend a deal. Renders nothing for offers without an expiry.
+ * Always shows seconds when time remaining is less than 24 hours.
  */
 export function OfferCountdown({ validUntil, serverNow, className = "" }) {
     // Offset between server time and this device, captured once per mount.
@@ -36,7 +37,13 @@ export function OfferCountdown({ validUntil, serverNow, className = "" }) {
     }
     const s = Math.floor(leftMs / 1000);
     const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-    const label = d > 0 ? `${d}d ${h}h left` : h > 0 ? `${h}h ${m}m left` : `${m}m ${sec}s left`;
+    // Show seconds for anything under 24 hours
+    const isUnder24h = d === 0;
+    const label = d > 0
+        ? `${d}d ${h}h left`
+        : h > 0
+            ? `${h}h ${m}m ${sec}s left`
+            : `${m}m ${sec}s left`;
     return (
         <span className={`inline-flex items-center gap-1 text-[11px] font-bold ${className}`} data-testid="offer-countdown">
             <Timer className="w-3 h-3" /> {label}
@@ -58,7 +65,10 @@ export default function OffersPage() {
     const { user } = useAuth();
 
     useEffect(() => {
-        api.get("/offers").then((r) => setOffers(r.data)).catch(() => { });
+        // Use for_platform=website to filter out voucher_code_only offers (same logic as mobile app)
+        api.get("/offers", { params: { for_platform: "website" } })
+            .then((r) => setOffers(r.data))
+            .catch(() => { });
     }, []);
 
     // Pull this customer's personal one-time codes (e.g. WELCOME2-XXXXXX) so we can

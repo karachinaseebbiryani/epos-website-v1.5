@@ -38,6 +38,7 @@ class OrderRepository {
         'order_type': orderType,
         'notes': notes,
         'payment_method': paymentMethod,
+        'platform': 'app',  // Identify orders from mobile app
         if (couponCode != null && couponCode.isNotEmpty) 'coupon_code': couponCode,
         // Delivery coordinates are meaningless for pickup — never send them.
         if (!pickup && deliveryLat != null) 'delivery_lat': deliveryLat,
