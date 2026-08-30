@@ -100,8 +100,12 @@ export default function AdminOrdersLive() {
                 tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
                 const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
                 if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
-                if (newOrderArrived || tickCountRef.current === 0) loadRef.current();
-                manageAlertSoundRef.current(count);
+                if ((newOrderArrived || tickCountRef.current === 0) && loadRef.current) {
+                    loadRef.current();
+                }
+                if (manageAlertSoundRef.current) {
+                    manageAlertSoundRef.current(count);
+                }
                 setPollStatus("healthy");
             } catch (e) {
                 // If auth fails (401/403), the axios interceptor will try to refresh the token.

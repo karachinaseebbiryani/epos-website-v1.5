@@ -134,54 +134,6 @@ export default function AdminOrders() {
 
     useEffect(() => { setLoading(true); load(); }, [load]);
 
-    // Store latest manageAlertSound in a ref so polling can always call the current version
-    const manageAlertSoundRef = useRef(manageAlertSound);
-    useEffect(() => { manageAlertSoundRef.current = manageAlertSound; }, [manageAlertSound]);
-
-    // Continuous polling (every 4s) for the pending-count alert. The pending-count call is
-    // tiny (~165 B); the full order list is not. Re-fetching + re-rendering the whole list
-    // every 4s was the cause of the sluggishness, so we only reload the list when a new order
-    // actually arrives (latest_id changes) or on a periodic safety refresh — this still catches
-    // status changes made on another device without thrashing the UI every tick.
-    useEffect(() => {
-        const tick = async () => {
-            if (pollingRef.current) return;
-            pollingRef.current = true;
-            try {
-                const { data } = await api.get("/online-orders/pending-count");
-                const count = data.pending_count || 0;
-                pendingCountRef.current = count;
-                tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
-                const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
-                if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
-                if (newOrderArrived || tickCountRef.current === 0) loadRef.current();
-                manageAlertSoundRef.current(count);
-                setPollStatus("healthy");
-            } catch (e) {
-                // If auth fails (401/403), the axios interceptor will try to refresh the token.
-                // If that also fails, user gets redirected to sign-in. But if we're already on
-                // the page after a fresh sign-in, the polling should just retry on next tick.
-                console.error("Polling error:", e.response?.status, e.message);
-                setPollStatus("error");
-                // Auto-retry: on auth errors after sign-in, next poll will likely succeed
-                // once the new token is properly set. For network errors, same logic applies.
-            } finally {
-                pollingRef.current = false;
-            }
-        };
-        const t = setInterval(() => {
-            setPollCountdown((seconds) => {
-                if (seconds <= 1) {
-                    void tick();
-                    return POLL_MS / 1000;
-                }
-                return seconds - 1;
-            });
-        }, 1000);
-        return () => clearInterval(t);
-        // Only restart polling when component mounts/unmounts, not on every render
-    }, []);
-
     // Honour the admin's chosen alert volume (set in Full Settings).
     useEffect(() => {
         const el = audioRef.current;
@@ -216,6 +168,58 @@ export default function AdminOrders() {
             }
         }
     }, [muted]);
+
+    // Store latest manageAlertSound in a ref so polling can always call the current version
+    const manageAlertSoundRef = useRef(manageAlertSound);
+    useEffect(() => { manageAlertSoundRef.current = manageAlertSound; }, [manageAlertSound]);
+
+    // Continuous polling (every 4s) for the pending-count alert. The pending-count call is
+    // tiny (~165 B); the full order list is not. Re-fetching + re-rendering the whole list
+    // every 4s was the cause of the sluggishness, so we only reload the list when a new order
+    // actually arrives (latest_id changes) or on a periodic safety refresh — this still catches
+    // status changes made on another device without thrashing the UI every tick.
+    useEffect(() => {
+        const tick = async () => {
+            if (pollingRef.current) return;
+            pollingRef.current = true;
+            try {
+                const { data } = await api.get("/online-orders/pending-count");
+                const count = data.pending_count || 0;
+                pendingCountRef.current = count;
+                tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
+                const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
+                if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
+                if ((newOrderArrived || tickCountRef.current === 0) && loadRef.current) {
+                    loadRef.current();
+                }
+                if (manageAlertSoundRef.current) {
+                    manageAlertSoundRef.current(count);
+                }
+                setPollStatus("healthy");
+            } catch (e) {
+                // If auth fails (401/403), the axios interceptor will try to refresh the token.
+                // If that also fails, user gets redirected to sign-in. But if we're already on
+                // the page after a fresh sign-in, the polling should just retry on next tick.
+                console.error("Polling error:", e.response?.status, e.message);
+                setPollStatus("error");
+                // Auto-retry: on auth errors after sign-in, next poll will likely succeed
+                // once the new token is properly set. For network errors, same logic applies.
+            } finally {
+                pollingRef.current = false;
+            }
+        };
+        const t = setInterval(() => {
+            setPollCountdown((seconds) => {
+                if (seconds <= 1) {
+                    void tick();
+                    return POLL_MS / 1000;
+                }
+                return seconds - 1;
+            });
+        }, 1000);
+        return () => clearInterval(t);
+        // Only restart polling when component mounts/unmounts, not on every render
+    }, []);
 
     // Re-check the pending count immediately after a staff action instead of
     // waiting up to POLL_MS for the next tick — otherwise the ring carries on
