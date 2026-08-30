@@ -518,6 +518,7 @@ export default function CheckoutPage() {
                             <Field icon={<User className="w-4 h-4" />} label="Full Name *" value={form.customer_name} onChange={(v) => setForm({ ...form, customer_name: v })} testid="checkout-name" />
                             <Field icon={<Phone className="w-4 h-4" />} label="Phone Number * (11+ digits)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v.replace(/\D/g, "") })} testid="checkout-phone" type="tel" />
                             {order_type === "delivery" && (
+                            <>
                             <div>
                                 <label className="block text-sm font-semibold text-brand-ink mb-2">Delivery Address *</label>
                                 <div className="relative">
@@ -529,7 +530,6 @@ export default function CheckoutPage() {
                             </div>
 
                             {/* Geolocation block — only for delivery */}
-                            {order_type === "delivery" && (
                             <div className="bg-neutral-50 rounded-xl p-4">
                                 <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
                                     <div>
