@@ -181,8 +181,10 @@ export default function AdminOrders() {
     useEffect(() => {
         let intervalId;
         let countdownId;
+        let isActive = true;
 
         const tick = async () => {
+            if (!isActive) return;
             if (pollingRef.current) return;
             pollingRef.current = true;
             try {
@@ -200,7 +202,16 @@ export default function AdminOrders() {
                 }
                 setPollStatus("healthy");
             } catch (e) {
-                console.error("Polling error:", e.response?.status, e.message);
+                console.error("Polling error:", e.response?.status, e.message, e);
+                // If we get 401, the user needs to sign in again - the axios interceptor
+                // will handle the redirect. Stop polling to avoid spamming failed requests.
+                if (e.response?.status === 401) {
+                    console.error("Authentication failed - stopping polling");
+                    clearInterval(intervalId);
+                    clearInterval(countdownId);
+                    setPollStatus("error");
+                    return;
+                }
                 setPollStatus("error");
             } finally {
                 pollingRef.current = false;
@@ -208,7 +219,9 @@ export default function AdminOrders() {
         };
 
         // Main polling interval - tick every POLL_MS
-        intervalId = setInterval(tick, POLL_MS);
+        intervalId = setInterval(() => {
+            tick();
+        }, POLL_MS);
 
         // Countdown display interval - updates every second
         let countdown = POLL_MS / 1000;
@@ -222,6 +235,7 @@ export default function AdminOrders() {
         tick();
 
         return () => {
+            isActive = false;
             clearInterval(intervalId);
             clearInterval(countdownId);
         };
