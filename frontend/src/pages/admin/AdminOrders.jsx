@@ -10,7 +10,7 @@ import ReceiptModal from "../../components/legacy/ReceiptModal";
 import { resolveAlertSrc, useAlertPrefs } from "../../lib/alertSound";
 
 // Statuses surfaced as filter chips. We keep all legacy statuses so existing POS flows still work.
-const STATUSES = ["pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "rejected", "cancelled"];
+const STATUSES = ["pending", "accepted", "ready", "out_for_delivery", "delivered", "rejected", "cancelled"];
 const ACCEPTED_OR_LATER = new Set(["accepted", "preparing", "ready", "out_for_delivery"]);
 const RESPONSE_WINDOW_SEC = 120; // V2 requirement: 2-minute response window
 
@@ -220,7 +220,9 @@ export default function AdminOrders() {
         setBusyId(id);
         try {
             await api.post(`/online-orders/${id}/accept`);
-            toast.success("Order accepted — customer notified");
+            // Automatically move to preparing after accepting
+            await api.put(`/online-orders/${id}/status`, { status: "preparing" });
+            toast.success("Order accepted and preparing — customer notified");
             load();
             refreshPending();
         } catch (err) {
