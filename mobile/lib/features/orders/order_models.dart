@@ -11,13 +11,17 @@ int _toInt(dynamic v) {
 }
 
 /// The canonical order status flow, in display order.
+/// For delivery: pending → accepted → preparing → ready → out_for_delivery → delivered
+/// For pickup: pending → accepted → preparing → ready_for_pickup → picked_up
 const List<String> orderStatusFlow = [
   'pending',
   'accepted',
   'preparing',
   'ready',
+  'ready_for_pickup',
   'out_for_delivery',
   'delivered',
+  'picked_up',
 ];
 
 /// Customer-facing status labels — kept in sync with the website tracker
@@ -27,15 +31,17 @@ String prettyStatus(String s) => switch (s) {
       'accepted' => 'Accepted',
       'preparing' => 'Preparing',
       'ready' => 'Ready',
+      'ready_for_pickup' => 'Ready for Pickup',
       'out_for_delivery' => 'On the way',
       'delivered' => 'Delivered',
+      'picked_up' => 'Picked Up',
       'rejected' => 'Rejected',
       'cancelled' => 'Cancelled',
       _ => s,
     };
 
 /// Terminal states never change again, so live polling can stop once reached.
-const Set<String> terminalStatuses = {'delivered', 'cancelled', 'rejected'};
+const Set<String> terminalStatuses = {'delivered', 'picked_up', 'cancelled', 'rejected'};
 
 bool isTerminalStatus(String s) => terminalStatuses.contains(s);
 

@@ -10,6 +10,25 @@ import '../auth/auth_controller.dart';
 import 'order_models.dart';
 import 'order_repository.dart';
 
+// Delivery order steps
+const List<String> stepsDelivery = [
+  'pending',
+  'accepted',
+  'preparing',
+  'ready',
+  'out_for_delivery',
+  'delivered',
+];
+
+// Pickup order steps — no delivery tracking
+const List<String> stepsPickup = [
+  'pending',
+  'accepted',
+  'preparing',
+  'ready_for_pickup',
+  'picked_up',
+];
+
 class OrderTrackingScreen extends ConsumerWidget {
   const OrderTrackingScreen({
     super.key,
@@ -82,11 +101,12 @@ class _TrackingBody extends StatelessWidget {
   Widget build(BuildContext context) {
     final terminalRejected =
         order.status == 'rejected' || order.status == 'cancelled';
-    final currentIndex = orderStatusFlow.indexOf(order.status);
+    // Select steps based on order type (delivery vs pickup)
+    final steps = order.isPickup ? stepsPickup : stepsDelivery;
+    final currentIndex = steps.indexOf(order.status);
 
-    // Once the order is delivered, politely offer the Play in-app review — once
-    // per order, after the flow completes (never during checkout). Self-gates.
-    if (order.status == 'delivered') {
+    // Once the order is delivered or picked up, offer the Play in-app review
+    if (order.status == 'delivered' || order.status == 'picked_up') {
       WidgetsBinding.instance.addPostFrameCallback(
           (_) => ReviewPrompt.maybeRequest(order.id));
     }
@@ -135,9 +155,10 @@ class _TrackingBody extends StatelessWidget {
             ),
           )
         else
-          _StatusTimeline(currentIndex: currentIndex),
+          _StatusTimeline(order: order, currentIndex: currentIndex),
         if (!terminalRejected &&
             order.status != 'delivered' &&
+            order.status != 'picked_up' &&
             !order.isPickup) ...[
           const SizedBox(height: 16),
           _ShareLocationButton(orderId: order.id),
@@ -522,15 +543,17 @@ class _ResponseWindow extends StatelessWidget {
 }
 
 class _StatusTimeline extends StatelessWidget {
-  const _StatusTimeline({required this.currentIndex});
+  const _StatusTimeline({required this.order, required this.currentIndex});
+  final Order order;
   final int currentIndex;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final steps = order.isPickup ? stepsPickup : stepsDelivery;
     return Column(
       children: [
-        for (var i = 0; i < orderStatusFlow.length; i++)
+        for (var i = 0; i < steps.length; i++)
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -543,7 +566,7 @@ class _StatusTimeline extends StatelessWidget {
                     color: i <= currentIndex ? scheme.primary : scheme.outline,
                     size: 22,
                   ),
-                  if (i < orderStatusFlow.length - 1)
+                  if (i < steps.length - 1)
                     Container(
                       width: 2,
                       height: 24,
@@ -555,7 +578,7 @@ class _StatusTimeline extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 1),
                 child: Text(
-                  prettyStatus(orderStatusFlow[i]),
+                  prettyStatus(steps[i]),
                   style: TextStyle(
                     fontWeight:
                         i == currentIndex ? FontWeight.w700 : FontWeight.w400,

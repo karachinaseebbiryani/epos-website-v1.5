@@ -65,12 +65,16 @@ class _OrdersScreenState extends ConsumerState<OrdersScreen>
           ),
           data: (orders) {
             // Filter orders by status
+            // LIVE = active workflow orders (pending through ready/ready_for_pickup/out_for_delivery)
+            // COMPLETED = delivered or picked_up (final successful states)
+            // CANCELLED = rejected or cancelled (final unsuccessful states)
             final liveOrders = orders.where((o) =>
                 o.status != 'delivered' &&
+                o.status != 'picked_up' &&
                 o.status != 'rejected' &&
                 o.status != 'cancelled').toList();
             final completedOrders =
-                orders.where((o) => o.status == 'delivered').toList();
+                orders.where((o) => o.status == 'delivered' || o.status == 'picked_up').toList();
             final cancelledOrders = orders
                 .where((o) =>
                     o.status == 'rejected' || o.status == 'cancelled')
