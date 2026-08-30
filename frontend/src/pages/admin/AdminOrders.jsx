@@ -127,6 +127,11 @@ export default function AdminOrders() {
         }
     }, [viewMode, customerFilter, searchTerm, paymentFilter, orderTypeFilter]);
 
+    // Store latest load function in a ref so polling can always call the current version
+    // without the polling interval needing to restart every time load changes.
+    const loadRef = useRef(load);
+    useEffect(() => { loadRef.current = load; }, [load]);
+
     useEffect(() => { setLoading(true); load(); }, [load]);
 
     // Continuous polling (every 4s) for the pending-count alert. The pending-count call is
@@ -145,7 +150,7 @@ export default function AdminOrders() {
                 tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
                 const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
                 if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
-                if (newOrderArrived || tickCountRef.current === 0) load();
+                if (newOrderArrived || tickCountRef.current === 0) loadRef.current();
                 manageAlertSound(count);
                 setPollStatus("healthy");
             } catch (e) {
@@ -171,7 +176,7 @@ export default function AdminOrders() {
         }, 1000);
         return () => clearInterval(t);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [muted, load]);
+    }, [muted]);
 
     // Honour the admin's chosen alert volume (set in Full Settings).
     useEffect(() => {
