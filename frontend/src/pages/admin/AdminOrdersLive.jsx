@@ -99,7 +99,13 @@ export default function AdminOrdersLive() {
                 manageAlertSound(count);
                 setPollStatus("healthy");
             } catch (e) {
+                // If auth fails (401/403), the axios interceptor will try to refresh the token.
+                // If that also fails, user gets redirected to sign-in. But if we're already on
+                // the page after a fresh sign-in, the polling should just retry on next tick.
+                console.error("Polling error:", e.response?.status, e.message);
                 setPollStatus("error");
+                // Auto-retry: on auth errors after sign-in, next poll will likely succeed
+                // once the new token is properly set. For network errors, same logic applies.
             } finally {
                 pollingRef.current = false;
             }
@@ -115,7 +121,7 @@ export default function AdminOrdersLive() {
         }, 1000);
         return () => clearInterval(t);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [muted]);
+    }, [muted, load]);
 
     useEffect(() => {
         const el = audioRef.current;

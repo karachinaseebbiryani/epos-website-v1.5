@@ -56,21 +56,24 @@ class MenuScreen extends ConsumerWidget {
         ],
       ),
       floatingActionButton: const _CartFab(),
-      body: Column(
-        children: [
-          const _ClosedBanner(),
-          const OffersStrip(),
-          Expanded(
-            child: menuAsync.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (e, _) => _MenuError(
-                message: '$e',
-                onRetry: () => ref.invalidate(menuProvider),
+      body: RefreshIndicator(
+        onRefresh: () async => ref.invalidate(menuProvider),
+        child: Column(
+          children: [
+            const _ClosedBanner(),
+            const OffersStrip(),
+            Expanded(
+              child: menuAsync.when(
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (e, _) => _MenuError(
+                  message: '$e',
+                  onRetry: () => ref.invalidate(menuProvider),
+                ),
+                data: (menu) => _MenuBody(menu: menu),
               ),
-              data: (menu) => _MenuBody(menu: menu),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
