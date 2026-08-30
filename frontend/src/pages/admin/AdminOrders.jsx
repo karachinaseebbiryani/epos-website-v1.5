@@ -165,7 +165,7 @@ export default function AdminOrders() {
         }, 1000);
         return () => clearInterval(t);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [muted]);
+    }, [muted, load]);
 
     // Honour the admin's chosen alert volume (set in Full Settings).
     useEffect(() => {
