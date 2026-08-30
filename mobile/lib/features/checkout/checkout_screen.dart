@@ -236,7 +236,15 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             ],
             _OrderTypeSelector(
               selected: _orderType,
-              onChanged: (v) => setState(() => _orderType = v),
+              onChanged: (v) {
+                setState(() {
+                  _orderType = v;
+                  // If switching to pickup and COD is selected, switch to first available payment method
+                  if (v == 'pickup' && _paymentMethod == 'cod') {
+                    _paymentMethod = 'pay_at_restaurant';
+                  }
+                });
+              },
             ),
             const SizedBox(height: 16),
             TextFormField(
@@ -356,6 +364,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
             _PaymentMethodPicker(
               selected: _paymentMethod,
               onChanged: (v) => setState(() => _paymentMethod = v),
+              isPickup: _isPickup,
             ),
             // Wallet credit toggle — only shown when customer has balance
             if (walletBalance > 0) ...[
@@ -527,15 +536,22 @@ class _PickupNotice extends StatelessWidget {
 /// Payment options driven by GET /public/settings. COD + pay-at-restaurant are
 /// always available; Easypaisa/JazzCash/bank appear when `bank_transfer` is on
 /// and the account is configured; SafePay (card) appears when `card` is on.
+/// IMPORTANT: COD is hidden for pickup orders.
 class _PaymentMethodPicker extends ConsumerWidget {
-  const _PaymentMethodPicker({required this.selected, required this.onChanged});
+  const _PaymentMethodPicker({
+    required this.selected,
+    required this.onChanged,
+    required this.isPickup,
+  });
 
   final String selected;
   final ValueChanged<String> onChanged;
+  final bool isPickup;
 
   List<PaymentOption> _options(PublicPaymentSettings? s) {
     return [
-      if (s == null || s.cod)
+      // COD only for delivery orders, NOT for pickup
+      if (!isPickup && (s == null || s.cod))
         const PaymentOption(method: 'cod', title: 'Cash on delivery'),
       if (s == null || s.payAtRestaurant)
         const PaymentOption(

@@ -9951,6 +9951,7 @@ async def public_track_order(order_id: str, request: Request, t: Optional[str] =
         "status": o.get("status", "pending"),
         "payment_status": o.get("payment_status", "pending"),
         "payment_method": o.get("payment_method", "cod"),
+        "order_type": o.get("order_type", "delivery"),  # NEW: needed for pickup vs delivery tracking
         "items": o.get("items", []),
         "subtotal": o.get("subtotal", 0),
         "total_price": o.get("total_price", 0),
