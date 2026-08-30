@@ -61,6 +61,7 @@ export default function CheckoutPage() {
         coupon_code: "",
         payment_method: "cod",
     });
+    const [order_type, setOrderType] = useState("delivery"); // NEW: delivery or pickup
     const [coupon, setCoupon] = useState(null);
     const [loading, setLoading] = useState(false);
     const [settings, setSettings] = useState(null);
@@ -108,10 +109,15 @@ export default function CheckoutPage() {
     }, [user]);
 
     // Re-quote delivery whenever subtotal changes (free-delivery threshold may flip)
+    // Only for delivery orders; reset fee for pickup
     useEffect(() => {
+        if (order_type === "pickup") {
+            setDelivery({ distance_km: null, fee: 0, in_range: true, free_delivery: false });
+            return;
+        }
         if (!coords) return;
         api.post("/delivery/quote", { ...coords, subtotal }).then(({ data }) => setDelivery(data)).catch(() => {});
-    }, [subtotal, coords]);
+    }, [subtotal, coords, order_type]);
 
     // Auto-apply the customer's most recent personal coupon when they reach checkout,
     // so they don't have to copy-paste their own one-time code. Only fires once and
@@ -290,7 +296,7 @@ export default function CheckoutPage() {
             toast.error("Failed to validate coupon");
         }
     };
-    const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (delivery.fee || 0);
+    const total = Math.max(0, subtotal - (coupon?.discount || 0)) + (order_type === "delivery" ? (delivery.fee || 0) : 0);
     // Preview the Diamond reward's effect on the total BEFORE placing the order, so the
     // customer doesn't have to take it on faith. Free-item rewards already render their
     // own line item (Rs. 0) elsewhere — this block handles the discount-type rewards.
@@ -316,25 +322,46 @@ export default function CheckoutPage() {
     // card option maps payment_methods.card → SafePay and is unaffected.
     if (enabledMethods.safepay) enabledMethods.card = false;
 
+    // NEW: Filter payment methods based on order type
+    // Pickup orders cannot use Cash on Delivery
+    const availableMethods = order_type === "pickup" ? { ...enabledMethods, cod: false } : enabledMethods;
+    
+    // If the selected method is no longer available, switch to the first available option
+    useEffect(() => {
+        if (!availableMethods[form.payment_method]) {
+            const firstAvailable = Object.entries(availableMethods).find(([_, enabled]) => enabled)?.[0];
+            if (firstAvailable) {
+                setForm((f) => ({ ...f, payment_method: firstAvailable }));
+            }
+        }
+    }, [order_type, availableMethods, form.payment_method]);
+
     const submitOrder = async (e) => {
         e.preventDefault();
         if (isClosed) {
             toast.error("Restaurant is currently closed. Please try again during business hours.");
             return;
         }
-        if (!form.customer_name.trim() || !form.phone.trim() || !form.address.trim()) {
-            toast.error("Please fill in name, phone and address"); return;
+        if (!form.customer_name.trim() || !form.phone.trim()) {
+            toast.error("Please fill in name and phone"); return;
+        }
+        // Address required only for delivery orders
+        if (order_type === "delivery" && !form.address.trim()) {
+            toast.error("Please fill in delivery address"); return;
         }
         const phoneDigits = (form.phone || "").replace(/\D/g, "");
         if (phoneDigits.length < 11) {
             toast.error("Phone number must contain at least 11 digits"); return;
         }
-        if (!coords) {
-            toast.error("Please press \"Use My Location\" (or drop a pin on the map) to set your delivery location before placing your order.");
-            return;
-        }
-        if (coords && !delivery.in_range) {
-            toast.error("Your location is outside our delivery area."); return;
+        // Location validation only for delivery orders
+        if (order_type === "delivery") {
+            if (!coords) {
+                toast.error("Please press \"Use My Location\" (or drop a pin on the map) to set your delivery location before placing your order.");
+                return;
+            }
+            if (coords && !delivery.in_range) {
+                toast.error("Your location is outside our delivery area."); return;
+            }
         }
         setLoading(true);
         try {
@@ -347,12 +374,13 @@ export default function CheckoutPage() {
                 total_price: subtotal,
                 customer_name: form.customer_name,
                 phone: form.phone,
-                address: form.address,
+                address: order_type === "delivery" ? form.address : "",  // Only send address for delivery
                 notes: form.notes,
                 payment_method: form.payment_method,
                 coupon_code: coupon?.coupon_code || null,
-                delivery_lat: coords?.lat || null,
-                delivery_lng: coords?.lng || null,
+                delivery_lat: order_type === "delivery" ? (coords?.lat || null) : null,  // Only send coords for delivery
+                delivery_lng: order_type === "delivery" ? (coords?.lng || null) : null,
+                order_type: order_type,  // NEW: Send order type
                 reward_id: rewardId, // NEW: Diamond reward redemption
                 use_wallet: !!(user && useWallet && Number(user.wallet_balance) > 0),
             });
@@ -468,12 +496,28 @@ export default function CheckoutPage() {
 
             <form onSubmit={submitOrder} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 space-y-5">
-                    {/* Delivery details */}
+                    {/* Order Type Selection */}
                     <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
-                        <h2 className="font-display font-bold text-lg mb-5">Delivery Details</h2>
+                        <h2 className="font-display font-bold text-lg mb-5">Order Type</h2>
+                        <div className="grid grid-cols-2 gap-3">
+                            <label className={`flex items-center justify-center gap-2 p-4 rounded-xl border-2 cursor-pointer transition-colors ${order_type === "delivery" ? "border-brand-red bg-brand-red/5" : "border-neutral-200 hover:border-neutral-300"}`}>
+                                <input type="radio" name="order_type" value="delivery" checked={order_type === "delivery"} onChange={() => setOrderType("delivery")} className="accent-brand-red" />
+                                <span className="font-semibold"><Truck className="w-4 h-4 inline mr-2" />Delivery</span>
+                            </label>
+                            <label className={`flex items-center justify-center gap-2 p-4 rounded-xl border-2 cursor-pointer transition-colors ${order_type === "pickup" ? "border-brand-red bg-brand-red/5" : "border-neutral-200 hover:border-neutral-300"}`}>
+                                <input type="radio" name="order_type" value="pickup" checked={order_type === "pickup"} onChange={() => setOrderType("pickup")} className="accent-brand-red" />
+                                <span className="font-semibold"><Store className="w-4 h-4 inline mr-2" />Pickup</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Delivery/Pickup details */}
+                    <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
+                        <h2 className="font-display font-bold text-lg mb-5">{order_type === "delivery" ? "Delivery" : "Pickup"} Details</h2>
                         <div className="space-y-4">
                             <Field icon={<User className="w-4 h-4" />} label="Full Name *" value={form.customer_name} onChange={(v) => setForm({ ...form, customer_name: v })} testid="checkout-name" />
                             <Field icon={<Phone className="w-4 h-4" />} label="Phone Number * (11+ digits)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v.replace(/\D/g, "") })} testid="checkout-phone" type="tel" />
+                            {order_type === "delivery" && (
                             <div>
                                 <label className="block text-sm font-semibold text-brand-ink mb-2">Delivery Address *</label>
                                 <div className="relative">
@@ -484,7 +528,8 @@ export default function CheckoutPage() {
                                 </div>
                             </div>
 
-                            {/* Geolocation block */}
+                            {/* Geolocation block — only for delivery */}
+                            {order_type === "delivery" && (
                             <div className="bg-neutral-50 rounded-xl p-4">
                                 <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
                                     <div>
@@ -544,6 +589,9 @@ export default function CheckoutPage() {
                                     </details>
                                 )}
                             </div>
+                            )}
+                            </div>
+                            )}
 
                             <div>
                                 <label className="block text-sm font-semibold text-brand-ink mb-2">Order Notes (optional)</label>
@@ -583,9 +631,14 @@ export default function CheckoutPage() {
                                 </span>
                             </label>
                         )}
+                        {order_type === "pickup" && (
+                            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                                <p className="text-xs text-amber-900 font-semibold">💡 Cash on Delivery is not available for pickup orders. Please choose another payment method.</p>
+                            </div>
+                        )}
                         <div className="space-y-2">
                             {Object.entries(PAYMENT_LABELS).map(([key, info]) => {
-                                if (!enabledMethods[key]) return null;
+                                if (!availableMethods[key]) return null;
                                 const Icon = info.icon;
                                 const selected = form.payment_method === key;
                                 return (
@@ -665,6 +718,13 @@ export default function CheckoutPage() {
                                     {delivery.fee === 0 ? (delivery.distance_km !== null ? "Free" : "—") : `Rs. ${delivery.fee}`}
                                 </span>
                             </div>
+                            )}
+                            {order_type === "pickup" && (
+                            <div className="flex justify-between text-green-600 font-semibold">
+                                <span>Pickup</span>
+                                <span>Free</span>
+                            </div>
+                            )}
                             {rewardDiscountPreview > 0 && (
                                 <div data-testid="checkout-reward-discount" className="flex justify-between text-amber-700 font-semibold">
                                     <span className="inline-flex items-center gap-1">
@@ -685,7 +745,9 @@ export default function CheckoutPage() {
                             className="w-full mt-6 bg-brand-red hover:bg-brand-red-dark disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-full px-8 py-3.5 font-bold transition-colors">
                             {isClosed ? "Closed — try again later" : (loading ? "Processing..." : `Place Order — Rs. ${total.toFixed(0)}`)}
                         </button>
-                        <p className="text-[11px] text-neutral-400 text-center mt-3">Estimated delivery 30–45 min</p>
+                        <p className="text-[11px] text-neutral-400 text-center mt-3">
+                            {order_type === "delivery" ? "Estimated delivery 30–45 min" : "Ready for pickup in 30–45 min"}
+                        </p>
                         <p className="text-[11px] text-neutral-400 text-center mt-1">
                             By placing an order you agree to our{" "}
                             <Link to="/terms" className="underline hover:text-brand-red">Terms</Link>,{" "}

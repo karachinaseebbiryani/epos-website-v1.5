@@ -29,7 +29,7 @@ export default function AdminOrders() {
     const [searchParams] = useSearchParams();
     const customerFilter = searchParams.get('customer'); // Get customer ID from URL
     const [orders, setOrders] = useState([]);
-    const [viewMode, setViewMode] = useState("live"); // live, completed, cancelled
+    const [viewMode, setViewMode] = useState("live"); // live, all, delivered, picked_up, rejected, cancelled
     const [searchTerm, setSearchTerm] = useState("");
     const [paymentFilter, setPaymentFilter] = useState("all"); // all, cod, safepay, easypaisa, jazzcash, bank
     const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all, delivery, pickup
@@ -69,11 +69,15 @@ export default function AdminOrders() {
 
     const load = useCallback(async () => {
         try {
-            // For live view, don't filter by status on backend - we need all live orders
+            const statusParam =
+                viewMode === "delivered" ? "delivered" :
+                viewMode === "picked_up" ? "picked_up" :
+                viewMode === "rejected" ? "rejected" :
+                viewMode === "cancelled" ? "cancelled" :
+                "all";
+
             const { data } = await api.get("/online-orders", {
-                params: viewMode === "live" ? {} : {
-                    status: viewMode === "completed" ? "delivered" : viewMode === "cancelled" ? "cancelled,rejected" : "all"
-                }
+                params: statusParam === "all" ? {} : { status: statusParam }
             });
             // Apply filters
             let filteredData = customerFilter
@@ -83,12 +87,16 @@ export default function AdminOrders() {
             // Filter by view mode
             if (viewMode === "live") {
                 filteredData = filteredData.filter(order =>
-                    !["delivered", "cancelled", "rejected"].includes(order.status)
+                    !["delivered", "picked_up", "cancelled", "rejected"].includes(order.status)
                 );
-            } else if (viewMode === "completed") {
+            } else if (viewMode === "delivered") {
                 filteredData = filteredData.filter(order => order.status === "delivered");
+            } else if (viewMode === "picked_up") {
+                filteredData = filteredData.filter(order => order.status === "picked_up");
+            } else if (viewMode === "rejected") {
+                filteredData = filteredData.filter(order => order.status === "rejected");
             } else if (viewMode === "cancelled") {
-                filteredData = filteredData.filter(order => ["cancelled", "rejected"].includes(order.status));
+                filteredData = filteredData.filter(order => order.status === "cancelled");
             }
 
             // Search filter
@@ -220,8 +228,6 @@ export default function AdminOrders() {
         setBusyId(id);
         try {
             await api.post(`/online-orders/${id}/accept`);
-            // Automatically move to preparing after accepting
-            await api.put(`/online-orders/${id}/status`, { status: "preparing" });
             toast.success("Order accepted and preparing — customer notified");
             load();
             refreshPending();
@@ -356,24 +362,42 @@ export default function AdminOrders() {
             )}
 
             {/* View Mode Tabs */}
-            <div className="flex gap-2 mb-6 border-b border-neutral-200">
+            <div className="flex gap-2 mb-6 border-b border-neutral-200 flex-wrap">
                 <button
                     onClick={() => setViewMode("live")}
                     className={`px-6 py-3 font-semibold transition-colors ${viewMode === "live" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
                 >
-                    Live Orders
+                    LIVE
                 </button>
                 <button
-                    onClick={() => setViewMode("completed")}
-                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "completed" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                    onClick={() => setViewMode("all")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "all" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
                 >
-                    Completed
+                    ALL
+                </button>
+                <button
+                    onClick={() => setViewMode("delivered")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "delivered" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    DELIVERED
+                </button>
+                <button
+                    onClick={() => setViewMode("picked_up")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "picked_up" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    PICKED UP
+                </button>
+                <button
+                    onClick={() => setViewMode("rejected")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "rejected" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    REJECTED
                 </button>
                 <button
                     onClick={() => setViewMode("cancelled")}
                     className={`px-6 py-3 font-semibold transition-colors ${viewMode === "cancelled" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
                 >
-                    Cancelled
+                    CANCELLED
                 </button>
             </div>
 
@@ -490,17 +514,17 @@ const STATUS_FLOW_DELIVERY = [
 ];
 
 const STATUS_FLOW_PICKUP = [
-    { key: "accepted",         label: "Accepted",         color: "bg-green-600 hover:bg-green-700",   ring: "ring-green-400" },
-    { key: "preparing",        label: "Preparing",        color: "bg-orange-500 hover:bg-orange-600", ring: "ring-orange-400" },
-    { key: "ready",            label: "Ready for Pickup", color: "bg-blue-600 hover:bg-blue-700",     ring: "ring-blue-400" },
-    { key: "delivered",        label: "Picked Up",        color: "bg-teal-600 hover:bg-teal-700",     ring: "ring-teal-400" },
+    { key: "accepted",         label: "Accepted",           color: "bg-green-600 hover:bg-green-700",   ring: "ring-green-400" },
+    { key: "preparing",        label: "Preparing",          color: "bg-orange-500 hover:bg-orange-600", ring: "ring-orange-400" },
+    { key: "ready_for_pickup", label: "Ready for Pickup",   color: "bg-blue-600 hover:bg-blue-700",     ring: "ring-blue-400" },
+    { key: "picked_up",        label: "Picked Up",          color: "bg-teal-600 hover:bg-teal-700",     ring: "ring-teal-400" },
 ];
 
 function StatusStepper({ order, onUpdateStatus, busy }) {
     const STATUS_FLOW = order.order_type === 'pickup' ? STATUS_FLOW_PICKUP : STATUS_FLOW_DELIVERY;
     const currentIndex = STATUS_FLOW.findIndex((s) => s.key === order.status);
-    // Off-flow / terminal (delivered, cancelled, unknown): nothing is pressable.
-    const terminal = currentIndex === -1 || order.status === "delivered";
+    // Off-flow / terminal (deliveries/pickups complete, cancelled, rejected, unknown): nothing is pressable.
+    const terminal = currentIndex === -1 || ["delivered", "picked_up", "cancelled", "rejected"].includes(order.status);
     return (
         <div className="flex flex-wrap items-center gap-2" data-testid={`order-status-stepper-${order.id}`}>
             {STATUS_FLOW.map((s, i) => {

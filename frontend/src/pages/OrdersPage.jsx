@@ -14,8 +14,10 @@ const STATUS_COLORS = {
     accepted: "bg-blue-50 text-blue-700 border-blue-200",
     preparing: "bg-blue-50 text-blue-700 border-blue-200",
     ready: "bg-purple-50 text-purple-700 border-purple-200",
+    ready_for_pickup: "bg-purple-50 text-purple-700 border-purple-200",
     out_for_delivery: "bg-indigo-50 text-indigo-700 border-indigo-200",
     delivered: "bg-green-50 text-green-700 border-green-200",
+    picked_up: "bg-green-50 text-green-700 border-green-200",
     cancelled: "bg-red-50 text-red-700 border-red-200",
     rejected: "bg-red-50 text-red-700 border-red-200",
 };
@@ -26,8 +28,10 @@ const STATUS_LABELS = {
     accepted: "Accepted",
     preparing: "Preparing",
     ready: "Ready",
+    ready_for_pickup: "Ready for Pickup",
     out_for_delivery: "On the way",
     delivered: "Delivered",
+    picked_up: "Picked Up",
     cancelled: "Cancelled",
     rejected: "Rejected",
 };
@@ -38,8 +42,10 @@ const STATUS_ICONS = {
     accepted: CheckCircle2,
     preparing: Package,
     ready: Package,
+    ready_for_pickup: Package,
     out_for_delivery: Truck,
     delivered: CheckCircle2,
+    picked_up: CheckCircle2,
     cancelled: XCircle,
     rejected: XCircle,
 };
@@ -110,7 +116,7 @@ export default function OrdersPage() {
 
     const filteredOrders = orders.filter((o) => {
         if (filter === "all") return true;
-        if (filter === "live") return ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status);
+        if (filter === "live") return !["delivered", "picked_up", "cancelled", "rejected"].includes(o.status);
         if (filter === "delivered") return o.status === "delivered";
         if (filter === "cancelled") return ["cancelled", "rejected"].includes(o.status);
         return true;
@@ -133,7 +139,7 @@ export default function OrdersPage() {
                 <div className="flex gap-1 overflow-x-auto scrollbar-hide pb-px">
                     {[
                         { key: "all", label: "All Orders", count: orders.length },
-                        { key: "live", label: "Live Orders", count: orders.filter((o) => ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status)).length },
+                        { key: "live", label: "Live Orders", count: orders.filter((o) => !["delivered", "picked_up", "cancelled", "rejected"].includes(o.status)).length },
                         { key: "delivered", label: "Completed", count: orders.filter((o) => o.status === "delivered").length },
                         { key: "cancelled", label: "Cancelled", count: orders.filter((o) => ["cancelled", "rejected"].includes(o.status)).length },
                     ].map((tab) => (

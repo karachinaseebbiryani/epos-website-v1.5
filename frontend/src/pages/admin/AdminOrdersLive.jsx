@@ -66,7 +66,7 @@ export default function AdminOrdersLive() {
 
             if (viewMode === "live") {
                 filteredData = filteredData.filter(order =>
-                    !["delivered", "cancelled", "rejected"].includes(order.status)
+                    !["delivered", "picked_up", "cancelled", "rejected"].includes(order.status)
                 );
             } else if (viewMode === "completed") {
                 filteredData = filteredData.filter(order => order.status === "delivered");

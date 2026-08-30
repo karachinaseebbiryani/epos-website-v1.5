@@ -3209,7 +3209,7 @@ class OnlineOrderCreate(BaseModel):
         return v if v in ("delivery", "pickup") else "delivery"
 
 class OnlineOrderStatusUpdate(BaseModel):
-    status: str  # pending, accepted, preparing, ready, out_for_delivery, delivered, cancelled, rejected
+    status: str  # pending, accepted, preparing, ready, ready_for_pickup, out_for_delivery, delivered, picked_up, cancelled, rejected
 
 class OrderRejectRequest(BaseModel):
     reason: str  # "out_of_stock" | "closed" | "other" | free text
@@ -4463,6 +4463,12 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     
     # Determine initial payment_status
     pmethod = (order.payment_method or "cod").lower()
+    
+    # NEW: Validate payment method against order type
+    # Pickup orders cannot use Cash on Delivery
+    if order_type == "pickup" and pmethod == "cod":
+        raise HTTPException(status_code=400, detail="Cash on Delivery is not available for pickup orders. Please choose another payment method.")
+    
     if pmethod in ("cod", "pay_at_restaurant"):
         payment_status = "pending"  # collected later
     else:
@@ -4686,7 +4692,7 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     user = await get_current_user(request)
     if not _has_perm(user, "online_orders"):
         raise HTTPException(status_code=403, detail="You don't have permission to update online orders.")
-    valid = {"pending", "accepted", "preparing", "ready", "out_for_delivery", "delivered", "cancelled", "rejected"}
+    valid = {"pending", "accepted", "preparing", "ready", "ready_for_pickup", "out_for_delivery", "delivered", "picked_up", "cancelled", "rejected"}
     if body.status not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid}")
     
@@ -4694,6 +4700,13 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     order = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    
+    # Validate status transitions based on order type
+    order_type = order.get("order_type", "delivery")
+    if order_type == "pickup" and body.status == "out_for_delivery":
+        raise HTTPException(status_code=400, detail="Pickup orders cannot have 'Out for Delivery' status. Valid statuses: pending, accepted, preparing, ready_for_pickup, picked_up, cancelled, rejected")
+    if order_type == "delivery" and body.status == "ready_for_pickup":
+        raise HTTPException(status_code=400, detail="Delivery orders cannot have 'Ready for Pickup' status. Valid statuses: pending, accepted, preparing, ready, out_for_delivery, delivered, cancelled, rejected")
     
     old_status = order.get("status")
     
@@ -4846,7 +4859,7 @@ def _origin_tracking_url(request: Request, order_id: str, track_token: Optional[
 
 @api_router.post("/online-orders/{order_id}/accept")
 async def accept_online_order(order_id: str, request: Request):
-    """Staff accepts a pending order. Stops ringing on the POS, notifies customer via WhatsApp."""
+    """Staff accepts a pending order. Auto-advances to preparing so the workflow is Pending -> Preparing without a second manual tap."""
     user = await get_current_user(request)
     if not _has_perm(user, "online_orders"):
         raise HTTPException(status_code=403, detail="You don't have permission to accept orders.")
@@ -4861,11 +4874,16 @@ async def accept_online_order(order_id: str, request: Request):
     now_iso = datetime.now(timezone.utc).isoformat()
     await db.online_orders.update_one(
         {"_id": ObjectId(order_id)},
-        {"$set": {"status": "accepted", "accepted_at": now_iso, "accepted_by": user.get("name", ""), "updated_at": now_iso}},
+        {"$set": {
+            "status": "preparing",
+            "accepted_at": now_iso,
+            "accepted_by": user.get("name", ""),
+            "updated_at": now_iso,
+        }},
     )
     refreshed = await db.online_orders.find_one({"_id": ObjectId(order_id)})
     try:
-        msg = _format_status_update(refreshed, "accepted", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
+        msg = _format_status_update(refreshed, "preparing", _origin_tracking_url(request, order_id, refreshed.get("track_token")))
         asyncio.create_task(send_whatsapp(refreshed.get("phone", ""), msg))
     except Exception as e:
         logger.warning(f"WhatsApp accept notify failed: {e}")
@@ -5206,8 +5224,10 @@ async def _notify_customer_order_status(order_doc: dict, new_status: str):
         "accepted": "Order accepted",
         "preparing": "Your order is being prepared",
         "ready": "Order ready for pickup / delivery",
+        "ready_for_pickup": "Order ready for pickup",
         "out_for_delivery": "Your order is on the way",
         "delivered": "Order delivered — enjoy!",
+        "picked_up": "Order picked up — enjoy!",
         "rejected": "Order rejected",
         "cancelled": "Order cancelled",
     }
@@ -9819,8 +9839,10 @@ def _format_status_update(order: dict, status: str, tracking_url: str) -> str:
         "accepted": "✅ Your order has been accepted and is being prepared!",
         "preparing": "👨‍🍳 We've started preparing your order!",
         "ready": "✅ Your order is ready!",
+        "ready_for_pickup": "✅ Your order is ready for pickup!",
         "out_for_delivery": "🛵 Your order is on the way!",
         "delivered": "🎉 Your order has been delivered. Enjoy!",
+        "picked_up": "🎉 Your order has been picked up. Enjoy!",
         "cancelled": "❌ Your order has been cancelled.",
         "rejected": f"❌ Your order was rejected: {reason_pretty}",
         "modified": "✏️ Your order has been updated and confirmed. It is now being prepared!",

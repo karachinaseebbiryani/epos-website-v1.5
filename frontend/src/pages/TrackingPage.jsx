@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API } from "../lib/api";
-import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation, RotateCcw } from "lucide-react";
+import { CheckCircle, Clock, Phone, MapPin, Package, ChefHat, Truck, Home, Loader2, Hourglass, Sparkles, Pencil, Navigation, RotateCcw, Store } from "lucide-react";
 import { toast } from "sonner";
 import EnableNotificationsCard from "../components/EnableNotificationsCard";
 import { IosEnableNotificationsCard } from "../components/IosInstallPrompt";
 
-const STEPS = [
+// Delivery order steps
+const STEPS_DELIVERY = [
     { key: "pending", label: "Order Placed", icon: Package },
     { key: "accepted", label: "Accepted", icon: CheckCircle },
     { key: "preparing", label: "Preparing", icon: ChefHat },
@@ -16,10 +17,19 @@ const STEPS = [
     { key: "delivered", label: "Delivered", icon: Home },
 ];
 
+// Pickup order steps — no delivery tracking
+const STEPS_PICKUP = [
+    { key: "pending", label: "Order Placed", icon: Package },
+    { key: "accepted", label: "Accepted", icon: CheckCircle },
+    { key: "preparing", label: "Preparing", icon: ChefHat },
+    { key: "ready_for_pickup", label: "Ready for Pickup", icon: Store },
+    { key: "picked_up", label: "Picked Up", icon: CheckCircle },
+];
+
 // For step progress, we treat "accepted" as the second step. "rejected" is a terminal sad state.
-function progressIndex(status) {
+function progressIndex(status, steps) {
     if (status === "rejected" || status === "cancelled") return -1;
-    const idx = STEPS.findIndex((s) => s.key === status);
+    const idx = steps.findIndex((s) => s.key === status);
     return idx === -1 ? 0 : idx;
 }
 
@@ -133,7 +143,9 @@ export default function TrackingPage() {
         </div>
     );
 
-    const currentIdx = progressIndex(order.status);
+    // Select steps based on order type
+    const STEPS = order.order_type === "pickup" ? STEPS_PICKUP : STEPS_DELIVERY;
+    const currentIdx = progressIndex(order.status, STEPS);
     const isCancelled = order.status === "cancelled";
     const isRejected = order.status === "rejected";
     const isPending = order.status === "pending";
@@ -153,7 +165,12 @@ export default function TrackingPage() {
             <EnableNotificationsCard />
             <IosEnableNotificationsCard />
             <div className="text-center mb-8">
-                <span className="inline-block text-brand-red text-xs uppercase tracking-[0.2em] font-bold mb-2">Live Tracking</span>
+                <div className="flex items-center justify-center gap-2 mb-2">
+                    <span className="inline-block text-brand-red text-xs uppercase tracking-[0.2em] font-bold">Live Tracking</span>
+                    <span className={`inline-flex items-center gap-1 text-xs uppercase tracking-wider font-bold px-2 py-1 rounded-full ${order.order_type === "pickup" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                        {order.order_type === "pickup" ? <><Store className="w-3 h-3" /> Pickup</> : <><Truck className="w-3 h-3" /> Delivery</>}
+                    </span>
+                </div>
                 <h1 className="font-display font-black text-3xl md:text-5xl text-brand-ink">Order #{order.receipt_no}</h1>
                 <p className="text-neutral-500 mt-2">{order.customer_name} · Placed {created.toLocaleString()}</p>
             </div>
@@ -189,6 +206,7 @@ export default function TrackingPage() {
                             <div className="font-display font-bold text-brand-ink" data-testid="track-prep-time">{prepMin} minutes</div>
                         </div>
                     </div>
+                    {order.order_type === "delivery" && (
                     <div className="flex items-center gap-3">
                         <Truck className="w-6 h-6 text-brand-red" />
                         <div>
@@ -200,6 +218,7 @@ export default function TrackingPage() {
                             </div>
                         </div>
                     </div>
+                    )}
                 </div>
             )}
 
@@ -284,38 +303,56 @@ export default function TrackingPage() {
                 </div>
 
                 <div className="bg-white border border-neutral-100 rounded-2xl p-6 shadow-sm">
-                    <h3 className="font-display font-bold text-base text-brand-ink mb-3">Delivery</h3>
-                    <div className="space-y-2 text-sm">
-                        <div className="flex items-start gap-2">
-                            <MapPin className="w-4 h-4 text-brand-red mt-0.5 flex-shrink-0" />
-                            <span className="text-neutral-600">{order.customer_address_updated || order.address}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <Phone className="w-4 h-4 text-brand-red" />
-                            <a href={`tel:${order.phone}`} className="text-neutral-600 hover:text-brand-red">{order.phone}</a>
-                        </div>
-                    </div>
+                    {order.order_type === "delivery" ? (
+                        <>
+                            <h3 className="font-display font-bold text-base text-brand-ink mb-3">Delivery</h3>
+                            <div className="space-y-2 text-sm">
+                                <div className="flex items-start gap-2">
+                                    <MapPin className="w-4 h-4 text-brand-red mt-0.5 flex-shrink-0" />
+                                    <span className="text-neutral-600">{order.customer_address_updated || order.address}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <Phone className="w-4 h-4 text-brand-red" />
+                                    <a href={`tel:${order.phone}`} className="text-neutral-600 hover:text-brand-red">{order.phone}</a>
+                                </div>
+                            </div>
 
-                    {/* Customer can re-share GPS at any time before delivery — useful when
-                        the original pin was off, the rider got lost, or the customer moved.
-                        The restaurant sees every update in their AdminOrders panel. */}
-                    {order.status !== "delivered" && order.status !== "cancelled" && order.status !== "rejected" && (
-                        <div className="mt-4 pt-4 border-t border-neutral-100">
-                            <button
-                                onClick={shareLocation}
-                                disabled={locSubmitting}
-                                data-testid="track-share-location"
-                                className="w-full inline-flex items-center justify-center gap-2 bg-brand-ink hover:bg-brand-red text-white rounded-full px-4 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors disabled:opacity-60"
-                            >
-                                {locSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
-                                {locSubmitting ? "Sharing..." : (order.customer_location_history && order.customer_location_history.length > 0 ? "Update my location again" : "Share my live location")}
-                            </button>
-                            {order.customer_location_history && order.customer_location_history.length > 0 && (
-                                <p className="text-[11px] text-neutral-500 mt-2 text-center">
-                                    ✓ Shared {order.customer_location_history.length} time{order.customer_location_history.length > 1 ? "s" : ""}. The restaurant has the latest.
-                                </p>
+                            {/* Customer can re-share GPS at any time before delivery — useful when
+                                the original pin was off, the rider got lost, or the customer moved.
+                                The restaurant sees every update in their AdminOrders panel. */}
+                            {order.status !== "delivered" && order.status !== "cancelled" && order.status !== "rejected" && (
+                                <div className="mt-4 pt-4 border-t border-neutral-100">
+                                    <button
+                                        onClick={shareLocation}
+                                        disabled={locSubmitting}
+                                        data-testid="track-share-location"
+                                        className="w-full inline-flex items-center justify-center gap-2 bg-brand-ink hover:bg-brand-red text-white rounded-full px-4 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors disabled:opacity-60"
+                                    >
+                                        {locSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
+                                        {locSubmitting ? "Sharing..." : (order.customer_location_history && order.customer_location_history.length > 0 ? "Update my location again" : "Share my live location")}
+                                    </button>
+                                    {order.customer_location_history && order.customer_location_history.length > 0 && (
+                                        <p className="text-[11px] text-neutral-500 mt-2 text-center">
+                                            ✓ Shared {order.customer_location_history.length} time{order.customer_location_history.length > 1 ? "s" : ""}. The restaurant has the latest.
+                                        </p>
+                                    )}
+                                </div>
                             )}
-                        </div>
+                        </>
+                    ) : (
+                        <>
+                            <h3 className="font-display font-bold text-base text-brand-ink mb-3">Pickup Details</h3>
+                            <div className="space-y-2 text-sm">
+                                <div className="flex items-center gap-2">
+                                    <Store className="w-4 h-4 text-brand-red" />
+                                    <span className="text-neutral-600">Pick up at the restaurant</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <Phone className="w-4 h-4 text-brand-red" />
+                                    <a href={`tel:${order.phone}`} className="text-neutral-600 hover:text-brand-red">{order.phone}</a>
+                                </div>
+                            </div>
+                        </>
                     )}
 
                     <div className="mt-4 pt-4 border-t border-neutral-100 text-xs text-neutral-500">
