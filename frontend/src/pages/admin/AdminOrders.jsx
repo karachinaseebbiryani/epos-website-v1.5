@@ -355,13 +355,26 @@ export default function AdminOrders() {
                 </button>
             )}
 
-            <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-3 mb-5 -mx-1 px-1">
-                {["all", ...STATUSES].map((s) => (
-                    <button key={s} onClick={() => setFilter(s)} data-testid={`orders-filter-${s}`}
-                        className={`whitespace-nowrap px-4 py-2 rounded-full text-xs font-semibold uppercase tracking-wider transition-colors ${filter === s ? "bg-brand-red text-white" : "bg-white border border-neutral-200 text-brand-ink hover:bg-neutral-100"}`}>
-                        {s.replace(/_/g, " ")}
-                    </button>
-                ))}
+            {/* View Mode Tabs */}
+            <div className="flex gap-2 mb-6 border-b border-neutral-200">
+                <button
+                    onClick={() => setViewMode("live")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "live" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    Live Orders
+                </button>
+                <button
+                    onClick={() => setViewMode("completed")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "completed" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    Completed
+                </button>
+                <button
+                    onClick={() => setViewMode("cancelled")}
+                    className={`px-6 py-3 font-semibold transition-colors ${viewMode === "cancelled" ? "text-brand-red border-b-2 border-brand-red" : "text-neutral-600 hover:text-brand-ink"}`}
+                >
+                    Cancelled
+                </button>
             </div>
 
             {/* Additional Filters */}
