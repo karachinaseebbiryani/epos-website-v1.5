@@ -119,6 +119,26 @@ export default function CheckoutPage() {
         api.post("/delivery/quote", { ...coords, subtotal }).then(({ data }) => setDelivery(data)).catch(() => {});
     }, [subtotal, coords, order_type]);
 
+    // Auto-switch payment method when order type changes (e.g., COD not available for pickup)
+    useEffect(() => {
+        if (!settings) return;
+        const enabledMethods = {
+            ...(settings?.payment_methods || { cod: true }),
+            easypaisa: !!settings?.easypaisa_gateway_enabled,
+            jazzcash: !!settings?.jazzcash_gateway_enabled,
+            safepay: !!settings?.safepay_gateway_enabled,
+        };
+        if (enabledMethods.safepay) enabledMethods.card = false;
+        const availableMethods = order_type === "pickup" ? { ...enabledMethods, cod: false } : enabledMethods;
+
+        if (!availableMethods[form.payment_method]) {
+            const firstAvailable = Object.entries(availableMethods).find(([_, enabled]) => enabled)?.[0];
+            if (firstAvailable) {
+                setForm((f) => ({ ...f, payment_method: firstAvailable }));
+            }
+        }
+    }, [order_type, settings, form.payment_method]);
+
     // Auto-apply the customer's most recent personal coupon when they reach checkout,
     // so they don't have to copy-paste their own one-time code. Only fires once and
     // only if the user hasn't already typed something in the coupon field.
@@ -325,16 +345,6 @@ export default function CheckoutPage() {
     // NEW: Filter payment methods based on order type
     // Pickup orders cannot use Cash on Delivery
     const availableMethods = order_type === "pickup" ? { ...enabledMethods, cod: false } : enabledMethods;
-    
-    // If the selected method is no longer available, switch to the first available option
-    useEffect(() => {
-        if (!availableMethods[form.payment_method]) {
-            const firstAvailable = Object.entries(availableMethods).find(([_, enabled]) => enabled)?.[0];
-            if (firstAvailable) {
-                setForm((f) => ({ ...f, payment_method: firstAvailable }));
-            }
-        }
-    }, [order_type, availableMethods, form.payment_method]);
 
     const submitOrder = async (e) => {
         e.preventDefault();
