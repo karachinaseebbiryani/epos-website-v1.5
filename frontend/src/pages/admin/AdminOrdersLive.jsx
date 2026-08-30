@@ -101,7 +101,7 @@ export default function AdminOrdersLive() {
                 const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
                 if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
                 if (newOrderArrived || tickCountRef.current === 0) loadRef.current();
-                manageAlertSound(count);
+                manageAlertSoundRef.current(count);
                 setPollStatus("healthy");
             } catch (e) {
                 // If auth fails (401/403), the axios interceptor will try to refresh the token.
@@ -125,15 +125,15 @@ export default function AdminOrdersLive() {
             });
         }, 1000);
         return () => clearInterval(t);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [muted]);
+        // Only restart polling when component mounts/unmounts, not on every render
+    }, []);
 
     useEffect(() => {
         const el = audioRef.current;
         if (el) el.volume = prefs.volume;
     }, [prefs.volume]);
 
-    const manageAlertSound = (cnt) => {
+    const manageAlertSound = useCallback((cnt) => {
         const el = audioRef.current;
         if (!el) return;
         if (muted || cnt === 0) {
@@ -144,7 +144,11 @@ export default function AdminOrdersLive() {
         el.play().catch((e) => {
             if (e.name === "NotAllowedError") setAudioBlocked(true);
         });
-    };
+    }, [muted]);
+
+    // Store latest manageAlertSound in a ref so polling can always call the current version
+    const manageAlertSoundRef = useRef(manageAlertSound);
+    useEffect(() => { manageAlertSoundRef.current = manageAlertSound; }, [manageAlertSound]);
 
     const enableAudio = () => {
         const el = audioRef.current;
@@ -240,7 +244,7 @@ export default function AdminOrdersLive() {
                     >
                         {muted ? <><VolumeX className="w-4 h-4" /> Unmute</> : <><Volume2 className="w-4 h-4" /> Mute</>}
                     </button>
-                    <button onClick={load} data-testid="orders-refresh" className="inline-flex items-center gap-2 bg-white border border-neutral-200 rounded-full px-4 py-2 text-sm font-semibold hover:bg-neutral-100">
+                    <button onClick={() => loadRef.current()} data-testid="orders-refresh" className="inline-flex items-center gap-2 bg-white border border-neutral-200 rounded-full px-4 py-2 text-sm font-semibold hover:bg-neutral-100">
                         <RefreshCw className="w-4 h-4" /> Refresh
                     </button>
                 </div>

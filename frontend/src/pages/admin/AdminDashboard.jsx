@@ -22,6 +22,12 @@ export default function AdminDashboard() {
             const today = new Date().toISOString().slice(0, 10);
             const todayOrders = orders.filter((o) => o.date === today);
             const todayRev = todayOrders.reduce((s, o) => s + (o.total_price || 0), 0);
+
+            // Filter to only show current/active orders (not delivered, picked_up, cancelled, rejected)
+            const activeOrders = orders.filter((o) =>
+                !["delivered", "picked_up", "cancelled", "rejected"].includes(o.status)
+            );
+
             setStats({
                 orders: orders.length,
                 pending: orders.filter((o) => o.status === "pending").length,
@@ -30,7 +36,7 @@ export default function AdminDashboard() {
                 offers: offersRes.data.length,
                 events: eventsRes.data.length,
             });
-            setRecentOrders(orders.slice(0, 5));
+            setRecentOrders(activeOrders.slice(0, 5));
         } catch (err) {
             // noop
         }
