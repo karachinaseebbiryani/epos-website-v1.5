@@ -34,7 +34,7 @@ import RiderViewPage from "./pages/RiderViewPage";
 import AdminLoginPage from "./pages/admin/AdminLoginPage";
 import UnifiedLoginPage from "./pages/UnifiedLoginPage";
 import AdminDashboard from "./pages/admin/AdminDashboard";
-import AdminOrders from "./pages/admin/AdminOrders";
+import AdminOrdersLive from "./pages/admin/AdminOrdersLive";
 import AdminMenu from "./pages/admin/AdminMenu";
 import AdminCategories from "./pages/admin/AdminCategories";
 import AdminOffers from "./pages/admin/AdminOffers";
@@ -157,7 +157,7 @@ function App() {
                   {/* Online store admin */}
                   <Route path="/admin" element={<AdminDashboard />} />
                   <Route path="/admin/dashboard" element={<AdminDashboard />} />
-                  <Route path="/admin/orders" element={<AdminOrders />} />
+                  <Route path="/admin/orders" element={<AdminOrdersLive />} />
                   <Route path="/admin/menu" element={<AdminMenu />} />
                   <Route path="/admin/categories" element={<AdminCategories />} />
                   <Route path="/admin/offers" element={<AdminOffers />} />

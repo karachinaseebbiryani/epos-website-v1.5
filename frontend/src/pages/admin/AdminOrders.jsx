@@ -29,7 +29,7 @@ export default function AdminOrders() {
     const [searchParams] = useSearchParams();
     const customerFilter = searchParams.get('customer'); // Get customer ID from URL
     const [orders, setOrders] = useState([]);
-    const [filter, setFilter] = useState("all");
+    const [viewMode, setViewMode] = useState("live"); // live, completed, cancelled
     const [searchTerm, setSearchTerm] = useState("");
     const [paymentFilter, setPaymentFilter] = useState("all"); // all, cod, safepay, easypaisa, jazzcash, bank
     const [orderTypeFilter, setOrderTypeFilter] = useState("all"); // all, delivery, pickup
@@ -69,11 +69,27 @@ export default function AdminOrders() {
 
     const load = useCallback(async () => {
         try {
-            const { data } = await api.get("/online-orders", { params: { status: filter } });
+            // For live view, don't filter by status on backend - we need all live orders
+            const { data } = await api.get("/online-orders", {
+                params: viewMode === "live" ? {} : {
+                    status: viewMode === "completed" ? "delivered" : viewMode === "cancelled" ? "cancelled,rejected" : "all"
+                }
+            });
             // Apply filters
             let filteredData = customerFilter
                 ? data.filter(order => order.customer_id === customerFilter)
                 : data;
+
+            // Filter by view mode
+            if (viewMode === "live") {
+                filteredData = filteredData.filter(order =>
+                    !["delivered", "cancelled", "rejected"].includes(order.status)
+                );
+            } else if (viewMode === "completed") {
+                filteredData = filteredData.filter(order => order.status === "delivered");
+            } else if (viewMode === "cancelled") {
+                filteredData = filteredData.filter(order => ["cancelled", "rejected"].includes(order.status));
+            }
 
             // Search filter
             if (searchTerm) {
@@ -101,7 +117,7 @@ export default function AdminOrders() {
         } finally {
             setLoading(false);
         }
-    }, [filter, customerFilter, searchTerm, paymentFilter, orderTypeFilter]);
+    }, [viewMode, customerFilter, searchTerm, paymentFilter, orderTypeFilter]);
 
     useEffect(() => { setLoading(true); load(); }, [load]);
 
