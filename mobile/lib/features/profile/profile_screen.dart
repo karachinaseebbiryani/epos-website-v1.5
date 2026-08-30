@@ -17,6 +17,10 @@ class ProfileScreen extends ConsumerStatefulWidget {
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   bool _showDeleteAccount = false;
 
+  Future<void> _refresh() async {
+    await ref.read(authControllerProvider.notifier).refreshCustomer();
+  }
+
   @override
   Widget build(BuildContext context) {
     final customer = ref.watch(authControllerProvider).customer;
@@ -25,9 +29,11 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Account')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
+      body: RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
           Card(
             color: scheme.surfaceContainerHighest,
             shape:
@@ -96,28 +102,28 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           const SizedBox(height: 20),
           const _AllergensSection(),
           const SizedBox(height: 20),
-          // Wallet balance — only show if non-zero
-          if (customer != null && customer.walletBalance > 0) ...[
+          // Wallet balance — always show for signed-in customers
+          if (customer != null) ...[
             Card(
               color: Colors.green.shade50,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
+                borderRadius: BorderRadius.circular(12),
                 side: BorderSide(color: Colors.green.shade200),
               ),
               child: Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(12),
                 child: Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
                         color: Colors.green.shade100,
-                        borderRadius: BorderRadius.circular(12),
+                        borderRadius: BorderRadius.circular(8),
                       ),
                       child: Icon(Icons.account_balance_wallet,
-                          color: Colors.green.shade700, size: 28),
+                          color: Colors.green.shade700, size: 20),
                     ),
-                    const SizedBox(width: 16),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -125,27 +131,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           Text(
                             'Wallet Credit',
                             style: TextStyle(
-                              fontSize: 12,
+                              fontSize: 11,
                               fontWeight: FontWeight.w600,
                               color: Colors.green.shade700,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Rs. ${customer.walletBalance.toStringAsFixed(0)}',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.w900,
-                              color: Colors.green.shade900,
                             ),
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'From refunds • Use at checkout',
+                            'Rs. ${customer.walletBalance.toStringAsFixed(0)}',
                             style: TextStyle(
-                              fontSize: 11,
-                              color: Colors.green.shade600,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.green.shade900,
                             ),
                           ),
                         ],

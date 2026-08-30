@@ -6,14 +6,44 @@ import '../../core/format.dart';
 import 'order_models.dart';
 import 'order_repository.dart';
 
-class OrdersScreen extends ConsumerWidget {
+class OrdersScreen extends ConsumerStatefulWidget {
   const OrdersScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<OrdersScreen> createState() => _OrdersScreenState();
+}
+
+class _OrdersScreenState extends ConsumerState<OrdersScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final async = ref.watch(myOrdersProvider);
     return Scaffold(
-      appBar: AppBar(title: const Text('My Orders')),
+      appBar: AppBar(
+        title: const Text('My Orders'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: 'Live Orders'),
+            Tab(text: 'Completed'),
+            Tab(text: 'Cancelled'),
+          ],
+        ),
+      ),
       body: RefreshIndicator(
         onRefresh: () async => ref.invalidate(myOrdersProvider),
         child: async.when(
@@ -34,23 +64,62 @@ class OrdersScreen extends ConsumerWidget {
             ],
           ),
           data: (orders) {
-            if (orders.isEmpty) {
-              return ListView(
-                children: const [
-                  SizedBox(height: 120),
-                  Center(child: Text('You have no orders yet')),
-                ],
-              );
-            }
-            return ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: orders.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
-              itemBuilder: (context, i) => _OrderTile(order: orders[i]),
+            // Filter orders by status
+            final liveOrders = orders.where((o) =>
+                o.status != 'delivered' &&
+                o.status != 'rejected' &&
+                o.status != 'cancelled').toList();
+            final completedOrders =
+                orders.where((o) => o.status == 'delivered').toList();
+            final cancelledOrders = orders
+                .where((o) =>
+                    o.status == 'rejected' || o.status == 'cancelled')
+                .toList();
+
+            return TabBarView(
+              controller: _tabController,
+              children: [
+                _OrderList(
+                    orders: liveOrders,
+                    emptyMessage: 'No active orders'),
+                _OrderList(
+                    orders: completedOrders,
+                    emptyMessage: 'No completed orders yet'),
+                _OrderList(
+                    orders: cancelledOrders,
+                    emptyMessage: 'No cancelled orders'),
+              ],
             );
           },
         ),
       ),
+    );
+  }
+}
+
+class _OrderList extends StatelessWidget {
+  const _OrderList({required this.orders, required this.emptyMessage});
+  final List<Order> orders;
+  final String emptyMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    if (orders.isEmpty) {
+      return ListView(
+        children: [
+          const SizedBox(height: 120),
+          Center(
+              child: Text(emptyMessage,
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant))),
+        ],
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.all(12),
+      itemCount: orders.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (context, i) => _OrderTile(order: orders[i]),
     );
   }
 }
@@ -62,6 +131,8 @@ class _OrderTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final isPickup = order.orderType == 'pickup';
+
     return Card(
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
@@ -73,8 +144,27 @@ class _OrderTile extends StatelessWidget {
           final tok = order.trackToken ?? '';
           context.push('/order/${order.id}?t=$tok');
         },
-        title: Text('Order #${order.receiptNo}',
-            style: const TextStyle(fontWeight: FontWeight.w600)),
+        title: Row(
+          children: [
+            Text('Order #${order.receiptNo}',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(width: 8),
+            Icon(
+              isPickup ? Icons.store : Icons.delivery_dining,
+              size: 18,
+              color: isPickup ? Colors.orange.shade700 : Colors.blue.shade700,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              isPickup ? 'Pickup' : 'Delivery',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isPickup ? Colors.orange.shade700 : Colors.blue.shade700,
+              ),
+            ),
+          ],
+        ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

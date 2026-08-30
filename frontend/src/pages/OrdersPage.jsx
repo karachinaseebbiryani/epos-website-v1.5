@@ -110,7 +110,7 @@ export default function OrdersPage() {
 
     const filteredOrders = orders.filter((o) => {
         if (filter === "all") return true;
-        if (filter === "active") return ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status);
+        if (filter === "live") return ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status);
         if (filter === "delivered") return o.status === "delivered";
         if (filter === "cancelled") return ["cancelled", "rejected"].includes(o.status);
         return true;
@@ -133,8 +133,8 @@ export default function OrdersPage() {
                 <div className="flex gap-1 overflow-x-auto scrollbar-hide pb-px">
                     {[
                         { key: "all", label: "All Orders", count: orders.length },
-                        { key: "active", label: "Active", count: orders.filter((o) => ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status)).length },
-                        { key: "delivered", label: "Delivered", count: orders.filter((o) => o.status === "delivered").length },
+                        { key: "live", label: "Live Orders", count: orders.filter((o) => ["pending", "accepted", "preparing", "ready", "out_for_delivery"].includes(o.status)).length },
+                        { key: "delivered", label: "Completed", count: orders.filter((o) => o.status === "delivered").length },
                         { key: "cancelled", label: "Cancelled", count: orders.filter((o) => ["cancelled", "rejected"].includes(o.status)).length },
                     ].map((tab) => (
                         <button
@@ -200,6 +200,18 @@ export default function OrdersPage() {
                                                 <StatusIcon className="w-3 h-3" />
                                                 {STATUS_LABELS[order.status] || order.status}
                                             </span>
+                                            {/* Order Type Badge */}
+                                            {order.order_type === 'pickup' ? (
+                                                <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider font-bold px-2.5 py-1 rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                                    <Package className="w-3 h-3" />
+                                                    Pickup
+                                                </span>
+                                            ) : (
+                                                <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider font-bold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                                    <Truck className="w-3 h-3" />
+                                                    Delivery
+                                                </span>
+                                            )}
                                         </div>
                                         <p className="text-xs text-neutral-500">
                                             {new Date(order.created_at).toLocaleDateString("en-US", {

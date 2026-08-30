@@ -450,7 +450,7 @@ export default function AdminOrders() {
 // dropdown. Each stage has a FIXED colour so floor staff can be taught the press-sequence
 // ("press the orange one, then the blue one…"). An order can only move to the NEXT stage —
 // past and current stages are locked, so it can never go backwards.
-const STATUS_FLOW = [
+const STATUS_FLOW_DELIVERY = [
     { key: "accepted",         label: "Accepted",         color: "bg-green-600 hover:bg-green-700",   ring: "ring-green-400" },
     { key: "preparing",        label: "Preparing",        color: "bg-orange-500 hover:bg-orange-600", ring: "ring-orange-400" },
     { key: "ready",            label: "Ready",            color: "bg-blue-600 hover:bg-blue-700",     ring: "ring-blue-400" },
@@ -458,7 +458,15 @@ const STATUS_FLOW = [
     { key: "delivered",        label: "Delivered",        color: "bg-teal-600 hover:bg-teal-700",     ring: "ring-teal-400" },
 ];
 
+const STATUS_FLOW_PICKUP = [
+    { key: "accepted",         label: "Accepted",         color: "bg-green-600 hover:bg-green-700",   ring: "ring-green-400" },
+    { key: "preparing",        label: "Preparing",        color: "bg-orange-500 hover:bg-orange-600", ring: "ring-orange-400" },
+    { key: "ready",            label: "Ready for Pickup", color: "bg-blue-600 hover:bg-blue-700",     ring: "ring-blue-400" },
+    { key: "delivered",        label: "Picked Up",        color: "bg-teal-600 hover:bg-teal-700",     ring: "ring-teal-400" },
+];
+
 function StatusStepper({ order, onUpdateStatus, busy }) {
+    const STATUS_FLOW = order.order_type === 'pickup' ? STATUS_FLOW_PICKUP : STATUS_FLOW_DELIVERY;
     const currentIndex = STATUS_FLOW.findIndex((s) => s.key === order.status);
     // Off-flow / terminal (delivered, cancelled, unknown): nothing is pressable.
     const terminal = currentIndex === -1 || order.status === "delivered";

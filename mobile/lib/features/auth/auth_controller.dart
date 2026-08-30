@@ -290,6 +290,19 @@ class AuthController extends StateNotifier<AuthState> {
       state = const AuthState(status: AuthStatus.unauthenticated);
     }
   }
+
+  /// Refresh customer data from the server (to get updated wallet balance, etc.)
+  Future<void> refreshCustomer() async {
+    if (state.status != AuthStatus.authenticated) return;
+    try {
+      final me = await _repo.me();
+      if (me != null) {
+        state = state.copyWith(customer: me);
+      }
+    } catch (_) {
+      // Silent fail - keep existing customer data if refresh fails
+    }
+  }
 }
 
 final authControllerProvider =
