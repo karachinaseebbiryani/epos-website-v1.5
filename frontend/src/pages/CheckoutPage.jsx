@@ -589,8 +589,7 @@ export default function CheckoutPage() {
                                     </details>
                                 )}
                             </div>
-                            )}
-                            </div>
+                            </>
                             )}
 
                             <div>
