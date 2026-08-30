@@ -90,6 +90,9 @@ export default function AdminOrdersLive() {
     useEffect(() => { setLoading(true); load(); }, [load]);
 
     useEffect(() => {
+        let intervalId;
+        let countdownId;
+
         const tick = async () => {
             if (pollingRef.current) return;
             pollingRef.current = true;
@@ -108,28 +111,31 @@ export default function AdminOrdersLive() {
                 }
                 setPollStatus("healthy");
             } catch (e) {
-                // If auth fails (401/403), the axios interceptor will try to refresh the token.
-                // If that also fails, user gets redirected to sign-in. But if we're already on
-                // the page after a fresh sign-in, the polling should just retry on next tick.
                 console.error("Polling error:", e.response?.status, e.message);
                 setPollStatus("error");
-                // Auto-retry: on auth errors after sign-in, next poll will likely succeed
-                // once the new token is properly set. For network errors, same logic applies.
             } finally {
                 pollingRef.current = false;
             }
         };
-        const t = setInterval(() => {
-            setPollCountdown((seconds) => {
-                if (seconds <= 1) {
-                    void tick();
-                    return POLL_MS / 1000;
-                }
-                return seconds - 1;
-            });
+
+        // Main polling interval - tick every POLL_MS
+        intervalId = setInterval(tick, POLL_MS);
+
+        // Countdown display interval - updates every second
+        let countdown = POLL_MS / 1000;
+        countdownId = setInterval(() => {
+            countdown--;
+            if (countdown <= 0) countdown = POLL_MS / 1000;
+            setPollCountdown(countdown);
         }, 1000);
-        return () => clearInterval(t);
-        // Only restart polling when component mounts/unmounts, not on every render
+
+        // Run first tick immediately
+        tick();
+
+        return () => {
+            clearInterval(intervalId);
+            clearInterval(countdownId);
+        };
     }, []);
 
     useEffect(() => {
