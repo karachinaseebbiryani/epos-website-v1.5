@@ -120,6 +120,11 @@ class _TrackingBody extends StatelessWidget {
             ],
           ],
         ),
+        // 2-minute response window for pending orders
+        if (order.status == 'pending') ...[
+          const SizedBox(height: 12),
+          _ResponseWindow(createdAt: order.createdAt),
+        ],
         const SizedBox(height: 20),
         if (terminalRejected)
           Card(
@@ -432,6 +437,85 @@ class _LiveDot extends StatelessWidget {
                   fontSize: 11,
                   fontWeight: FontWeight.w700)),
         ],
+      ),
+    );
+  }
+}
+
+/// 2-minute response window indicator for pending orders
+class _ResponseWindow extends StatelessWidget {
+  const _ResponseWindow({required this.createdAt});
+  final String createdAt;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final created = DateTime.tryParse(createdAt);
+    if (created == null) return const SizedBox.shrink();
+
+    final now = DateTime.now();
+    final elapsed = now.difference(created);
+    final remaining = const Duration(minutes: 2) - elapsed;
+
+    final isExpired = remaining.isNegative;
+    final minutes = remaining.inMinutes.abs();
+    final seconds = remaining.inSeconds.abs() % 60;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isExpired
+            ? scheme.errorContainer
+            : scheme.primaryContainer.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isExpired
+              ? scheme.error
+              : scheme.primary.withValues(alpha: 0.3),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isExpired ? Icons.warning_amber_rounded : Icons.access_time,
+            size: 20,
+            color: isExpired ? scheme.error : scheme.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isExpired
+                      ? 'Response window expired'
+                      : 'Awaiting restaurant response',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isExpired ? scheme.error : scheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  isExpired
+                      ? 'Should be accepted shortly'
+                      : 'Expected within ${minutes}m ${seconds}s',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isExpired
+                        ? scheme.onErrorContainer
+                        : scheme.onSurface.withValues(alpha: 0.7),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
       ),
     );
   }

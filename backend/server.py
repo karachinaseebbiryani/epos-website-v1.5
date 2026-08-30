@@ -4620,7 +4620,10 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
 @api_router.get("/online-orders/me")
 async def get_my_orders(request: Request):
     cust = await get_current_customer(request)
-    orders = await db.online_orders.find({"customer_id": cust["_id"]}).sort("created_at", -1).to_list(200)
+    # Query with both string and ObjectId versions to handle legacy data
+    orders = await db.online_orders.find({
+        "customer_id": {"$in": [str(cust["_id"]), cust["_id"]]}
+    }).sort("created_at", -1).to_list(200)
     return [_serialize_online_order(o) for o in orders]
 
 
