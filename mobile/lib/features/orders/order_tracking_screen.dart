@@ -537,10 +537,6 @@ class _ResponseWindow extends StatelessWidget {
     );
   }
 }
-      ),
-    );
-  }
-}
 
 class _StatusTimeline extends StatelessWidget {
   const _StatusTimeline({required this.order, required this.currentIndex});

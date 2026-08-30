@@ -5,7 +5,7 @@ import { useAuth } from "../contexts/AuthContext";
 import api, { formatApiError } from "../lib/api";
 import { submitGatewayForm } from "../lib/gatewayRedirect";
 import { toast } from "sonner";
-import { Phone, MapPin, User, MessageSquare, Tag, Banknote, ArrowLeft, CreditCard, Building2, Smartphone, Store, Navigation, Loader2, UserPlus, UserCheck, Diamond, X as XIcon } from "lucide-react";
+import { Phone, MapPin, User, MessageSquare, Tag, Banknote, ArrowLeft, CreditCard, Building2, Smartphone, Store, Navigation, Loader2, UserPlus, UserCheck, Diamond, X as XIcon, Truck } from "lucide-react";
 import PeopleAlsoBuy from "../components/PeopleAlsoBuy";
 import ClosedBanner from "../components/ClosedBanner";
 import useBusinessHours from "../hooks/useBusinessHours";
