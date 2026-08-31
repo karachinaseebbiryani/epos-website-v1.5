@@ -154,6 +154,7 @@ export default function TrackingPage() {
 
     const created = new Date(order.created_at);
     const prepMin = Number(order.prep_time_min || 30);
+    const walletApplied = Number(order.wallet_applied || 0);
     const baseEtaFromCreated = new Date(created.getTime() + (prepMin + 10) * 60000);
     const acceptedAtStr = order.accepted_at;
     const acceptedAt = acceptedAtStr ? new Date(acceptedAtStr) : null;
@@ -293,11 +294,12 @@ export default function TrackingPage() {
                         ))}
                     </ul>
                     <div className="mt-3 pt-3 border-t border-neutral-100 space-y-1 text-sm">
-                        {order.discount_amount > 0 && <div className="flex justify-between text-green-600 font-semibold"><span>Discount</span><span>− Rs. {order.discount_amount}</span></div>}
-                        {order.delivery_fee > 0 && <div className="flex justify-between"><span className="text-neutral-500">Delivery</span><span>Rs. {order.delivery_fee}</span></div>}
+                        {order.discount_amount > 0 && <div className="flex justify-between text-green-600 font-semibold"><span>Discount</span><span>− Rs. {Number(order.discount_amount || 0).toFixed(0)}</span></div>}
+                        {walletApplied > 0 && <div className="flex justify-between text-purple-600 font-semibold"><span>Wallet used</span><span>− Rs. {walletApplied.toFixed(0)}</span></div>}
+                        {order.delivery_fee > 0 && <div className="flex justify-between"><span className="text-neutral-500">Delivery</span><span>Rs. {Number(order.delivery_fee || 0).toFixed(0)}</span></div>}
                         <div className="flex justify-between pt-2 border-t border-neutral-100">
                             <span className="font-display font-bold text-brand-ink">Total</span>
-                            <span data-testid="track-total" className="font-display font-black text-xl text-brand-red">Rs. {order.total_price?.toFixed(0)}</span>
+                            <span data-testid="track-total" className="font-display font-black text-xl text-brand-red">Rs. {Number(order.total_price || 0).toFixed(0)}</span>
                         </div>
                     </div>
                 </div>

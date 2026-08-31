@@ -429,9 +429,14 @@ function OrderBoardCard({ order, status, onAccept, onReject, onUpdateStatus, onP
                 {order.phone && <div className="text-xs">{order.phone}</div>}
             </div>
 
-            <div className="text-xs font-bold text-brand-red mb-3">
-                Rs. {order.total_price?.toFixed(0)}
+            <div className="text-xs font-bold text-brand-red mb-2">
+                Rs. {Number(order.total_price || 0).toFixed(0)}
             </div>
+            {Number(order.wallet_applied || 0) > 0 && (
+                <div className="text-[10px] font-semibold text-purple-700 mb-3">
+                    Wallet used: −Rs. {Number(order.wallet_applied || 0).toFixed(0)}
+                </div>
+            )}
 
             {status === "pending" ? (
                 <div className="flex gap-2">
@@ -489,7 +494,12 @@ function CompletedOrderCard({ order, onPrint }) {
                     </div>
                 </div>
                 <div className="text-right">
-                    <div className="font-bold text-xl text-brand-red">Rs. {order.total_price?.toFixed(0)}</div>
+                    <div className="font-bold text-xl text-brand-red">Rs. {Number(order.total_price || 0).toFixed(0)}</div>
+                    {Number(order.wallet_applied || 0) > 0 && (
+                        <div className="text-[10px] font-semibold text-purple-700 mt-1">
+                            Wallet: −Rs. {Number(order.wallet_applied || 0).toFixed(0)}
+                        </div>
+                    )}
                     <button
                         onClick={onPrint}
                         className="mt-2 inline-flex items-center gap-1 text-xs text-brand-ink hover:text-brand-red"

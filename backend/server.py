@@ -4147,6 +4147,16 @@ def _serialize_online_order(o: dict) -> dict:
     o = dict(o)
     o["id"] = str(o.pop("_id"))
     o["receipt_no"] = o["id"][-6:].upper()
+    if "wallet_applied" in o:
+        try:
+            o["wallet_applied"] = round(float(o.get("wallet_applied") or 0), 2)
+        except Exception:
+            o["wallet_applied"] = 0.0
+    if "total_price" in o:
+        try:
+            o["total_price"] = round(float(o.get("total_price") or 0), 2)
+        except Exception:
+            o["total_price"] = 0.0
     return o
 
 def _discounted_price(base, d_type, d_val) -> float:
@@ -10008,10 +10018,12 @@ async def public_track_order(order_id: str, request: Request, t: Optional[str] =
         "order_type": o.get("order_type", "delivery"),  # NEW: needed for pickup vs delivery tracking
         "items": o.get("items", []),
         "subtotal": o.get("subtotal", 0),
-        "total_price": o.get("total_price", 0),
-        "delivery_fee": o.get("delivery_fee", 0),
+        "total_price": float(o.get("total_price", 0) or 0),
+        "delivery_fee": float(o.get("delivery_fee", 0) or 0),
         "delivery_fee_overridden": bool(o.get("delivery_fee_overridden", False)),
-        "discount_amount": o.get("discount_amount", 0),
+        "discount_amount": float(o.get("discount_amount", 0) or 0),
+        "wallet_applied": float(o.get("wallet_applied", 0) or 0),
+        "wallet_restored": bool(o.get("wallet_restored", False)),
         "customer_name": o.get("customer_name", "") if show_full else (str(o.get("customer_name", "") or "").split(" ")[0] or "Customer"),
         "phone": o.get("phone", "") if show_full else _mask_phone(o.get("phone", "")),
         "address": o.get("address", "") if show_full else _mask_address(o.get("address", "")),
