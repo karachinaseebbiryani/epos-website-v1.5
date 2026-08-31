@@ -180,10 +180,16 @@ class _TrackingBody extends StatelessWidget {
         _row('Subtotal', money(order.subtotal)),
         if (order.discountAmount > 0)
           _row('Discount', '- ${money(order.discountAmount)}'),
+        if (order.walletApplied > 0)
+          _row('Wallet credit', '- ${money(order.walletApplied)}'),
         _row('Delivery', money(order.deliveryFee)),
-        _row('Total', money(order.totalPrice), bold: true),
+        _row(order.walletApplied > 0 ? 'Amount paid/due' : 'Total',
+            money(order.totalPrice), bold: true),
         const SizedBox(height: 8),
-        _row('Payment', order.paymentMethod.toUpperCase()),
+        _row('Payment',
+            order.walletApplied > 0 && order.totalPrice == 0
+                ? 'WALLET/CREDIT'
+                : order.paymentMethod.toUpperCase()),
         if (order.paymentStatus.isNotEmpty)
           _row('Payment status', prettyPaymentStatus(order.paymentStatus)),
         if (order.diamondsEarned > 0)

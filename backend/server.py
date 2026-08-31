@@ -4555,22 +4555,35 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
     # order.total_price). Wallet money was already real revenue when the
     # original order was paid, so reduced totals keep reports conservative.
     wallet_applied = 0.0
-    if getattr(order, "use_wallet", False) and cust:
+    use_wallet_flag = getattr(order, "use_wallet", False)
+    logger.info(f"[WALLET DEBUG] use_wallet={use_wallet_flag}, cust={'present' if cust else 'None'}, final_total={final_total}")
+    if use_wallet_flag and cust:
         try:
             balance = float(cust.get("wallet_balance", 0) or 0)
             applied = round(min(balance, final_total), 2)
+            logger.info(f"[WALLET DEBUG] customer wallet_balance={balance}, will_apply={applied}")
             if applied > 0:
                 res = await db.customers.update_one(
                     {"_id": cust["_id"], "wallet_balance": {"$gte": applied}},
                     {"$inc": {"wallet_balance": -applied}})
+                logger.info(f"[WALLET DEBUG] MongoDB update result: matched={res.matched_count}, modified={res.modified_count}")
                 if res.modified_count:
                     wallet_applied = applied
                     final_total = round(final_total - applied, 2)
+                    logger.info(f"[WALLET DEBUG] SUCCESS: wallet_applied={wallet_applied}, new final_total={final_total}")
+                else:
+                    logger.warning(f"[WALLET DEBUG] MongoDB update matched={res.matched_count} but modified=0 (race condition or insufficient balance)")
         except Exception as e:
             logger.warning(f"wallet redemption failed (order proceeds without): {e}")
+    else:
+        if not use_wallet_flag:
+            logger.info(f"[WALLET DEBUG] use_wallet is False, skipping wallet logic")
+        if not cust:
+            logger.info(f"[WALLET DEBUG] cust is None, skipping wallet logic")
     if wallet_applied > 0 and final_total <= 0:
         payment_status = "paid"
         initial_status = "pending"  # fully covered — straight to the staff queue
+        logger.info(f"[WALLET DEBUG] Order fully paid via wallet, payment_status={payment_status}")
 
     now = datetime.now(timezone.utc)
     # Per-order unguessable share token. The /api/track endpoint requires this on
