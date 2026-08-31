@@ -4564,7 +4564,7 @@ async def create_online_order(order: OnlineOrderCreate, request: Request):
             logger.info(f"[WALLET DEBUG] customer wallet_balance={balance}, will_apply={applied}")
             if applied > 0:
                 res = await db.customers.update_one(
-                    {"_id": cust["_id"], "wallet_balance": {"$gte": applied}},
+                    {"_id": ObjectId(cust["_id"]), "wallet_balance": {"$gte": applied}},
                     {"$inc": {"wallet_balance": -applied}})
                 logger.info(f"[WALLET DEBUG] MongoDB update result: matched={res.matched_count}, modified={res.modified_count}")
                 if res.modified_count:

@@ -78,6 +78,7 @@ class Order {
     required this.items,
     this.orderType = 'delivery',
     this.trackToken,
+    this.walletApplied = 0.0,
     this.diamondsEarned = 0,
     this.customerName = '',
     this.phone = '',
@@ -98,6 +99,7 @@ class Order {
   final List<OrderItem> items;
   final String orderType; // 'delivery' | 'pickup'
   final String? trackToken;
+  final double walletApplied;
 
   bool get isPickup => orderType == 'pickup';
   final int diamondsEarned;
@@ -135,6 +137,7 @@ class Order {
       items: items,
       orderType: (j['order_type'] ?? 'delivery').toString(),
       trackToken: j['track_token']?.toString(),
+      walletApplied: _toDouble(j['wallet_applied']),
       diamondsEarned: _toInt(j['diamonds_earned']),
       customerName: (j['customer_name'] ?? '').toString(),
       phone: (j['phone'] ?? '').toString(),
