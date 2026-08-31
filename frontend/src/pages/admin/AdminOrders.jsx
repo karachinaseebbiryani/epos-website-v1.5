@@ -42,6 +42,7 @@ export default function AdminOrders() {
     const [audioBlocked, setAudioBlocked] = useState(false);
     const [pollCountdown, setPollCountdown] = useState(POLL_MS / 1000);
     const [pollStatus, setPollStatus] = useState("healthy");
+    const [audioUnlocked, setAudioUnlocked] = useState(false);
     const prefs = useAlertPrefs();
 
     const audioRef = useRef(null);
@@ -150,11 +151,29 @@ export default function AdminOrders() {
         return () => { if (el && !el.paused) { el.pause(); el.currentTime = 0; } };
     }, []);
 
+    const unlockAudio = useCallback(() => {
+        const el = audioRef.current;
+        if (!el) return;
+        el.muted = false;
+        setAudioUnlocked(true);
+        if (!muted && pendingCountRef.current > 0) {
+            const p = el.play();
+            if (p && typeof p.then === "function") {
+                p.then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true));
+            }
+        }
+    }, [muted]);
+
     const manageAlertSound = useCallback((count) => {
         const el = audioRef.current;
         if (!el) return;
         if (count > 0 && !muted) {
             if (el.paused) {
+                el.muted = false;
+                if (!audioUnlocked) {
+                    setAudioBlocked(true);
+                    return;
+                }
                 el.currentTime = 0;
                 const p = el.play();
                 if (p && typeof p.then === "function") {
@@ -167,7 +186,7 @@ export default function AdminOrders() {
                 el.currentTime = 0;
             }
         }
-    }, [muted]);
+    }, [audioUnlocked, muted]);
 
     // Store latest manageAlertSound in a ref so polling can always call the current version
     const manageAlertSoundRef = useRef(manageAlertSound);
@@ -189,12 +208,16 @@ export default function AdminOrders() {
             pollingRef.current = true;
             try {
                 const { data } = await api.get("/online-orders/pending-count");
+                const prevCount = pendingCountRef.current;
                 const count = data.pending_count || 0;
                 pendingCountRef.current = count;
                 tickCountRef.current = (tickCountRef.current + 1) % LIST_REFRESH_EVERY;
                 const newOrderArrived = data.latest_id && data.latest_id !== lastPendingIdRef.current;
                 if (newOrderArrived) lastPendingIdRef.current = data.latest_id;
-                if ((newOrderArrived || tickCountRef.current === 0) && loadRef.current) {
+
+                const countChanged = count !== prevCount;
+                const shouldRefresh = newOrderArrived || countChanged || tickCountRef.current === 0 || viewMode === "live" || viewMode === "all";
+                if (shouldRefresh && loadRef.current) {
                     loadRef.current();
                 }
                 if (manageAlertSoundRef.current) {
@@ -239,7 +262,7 @@ export default function AdminOrders() {
             clearInterval(intervalId);
             clearInterval(countdownId);
         };
-    }, []);
+    }, [viewMode]);
 
     // Re-check the pending count immediately after a staff action instead of
     // waiting up to POLL_MS for the next tick — otherwise the ring carries on
@@ -250,16 +273,22 @@ export default function AdminOrders() {
             const { data } = await api.get("/online-orders/pending-count");
             const count = data.pending_count || 0;
             pendingCountRef.current = count;
-            manageAlertSound(count);
+            if (loadRef.current) loadRef.current();
+            if (manageAlertSoundRef.current) manageAlertSoundRef.current(count);
         } catch { /* next poll will catch up */ }
     };
 
     const enableAudio = () => {
         const el = audioRef.current;
         if (!el) return;
+        setAudioUnlocked(true);
         el.muted = false;
-        el.play().then(() => { setAudioBlocked(false); el.pause(); }).catch(() => {});
-        manageAlertSound(pendingCountRef.current);
+        if (pendingCountRef.current > 0 && !muted) {
+            el.play().then(() => { setAudioBlocked(false); }).catch(() => {});
+        } else {
+            el.pause();
+            el.currentTime = 0;
+        }
     };
 
     // Accept / Reject / Modify action handlers
@@ -381,13 +410,19 @@ export default function AdminOrders() {
                         </span>
                     )}
                     <button
-                        onClick={() => setMuted((m) => !m)}
+                        onClick={() => {
+                            setMuted((m) => !m);
+                            if (!muted) unlockAudio();
+                        }}
                         data-testid="toggle-mute-btn"
                         className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition-colors ${muted ? "bg-neutral-200 text-neutral-700 hover:bg-neutral-300" : "bg-brand-ink text-white hover:bg-brand-red"}`}
                     >
                         {muted ? <><VolumeX className="w-4 h-4" /> Unmute</> : <><Volume2 className="w-4 h-4" /> Mute</>}
                     </button>
-                    <button onClick={() => loadRef.current()} data-testid="orders-refresh" className="inline-flex items-center gap-2 bg-white border border-neutral-200 rounded-full px-4 py-2 text-sm font-semibold hover:bg-neutral-100">
+                    <button onClick={() => {
+                        unlockAudio();
+                        if (loadRef.current) loadRef.current();
+                    }} data-testid="orders-refresh" className="inline-flex items-center gap-2 bg-white border border-neutral-200 rounded-full px-4 py-2 text-sm font-semibold hover:bg-neutral-100">
                         <RefreshCw className="w-4 h-4" /> Refresh
                     </button>
                 </div>

@@ -21,6 +21,7 @@ export default function AdminLoginPage() {
                 return;
             }
             localStorage.setItem("knb_admin_token", data.token);
+            localStorage.setItem("staff_auth_token", data.token);
             toast.success("Welcome, Admin!");
             navigate("/admin");
         } catch (err) {

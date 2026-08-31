@@ -76,21 +76,43 @@ api.interceptors.response.use((res) => {
     const adminToken = localStorage.getItem("knb_admin_token");
     const authorization = config.headers?.Authorization;
     const isStaffRequest = authorization === `Bearer ${staffToken}` || authorization === `Bearer ${adminToken}`;
-    if (error.response?.status !== 401 || config._staffRetried || !isStaffRequest) {
+    if (error.response?.status !== 401 || config._adminRetried || config._staffRetried || !isStaffRequest) {
         return Promise.reject(error);
     }
-    config._staffRetried = true;
-    try {
-        const token = await refreshStaffToken();
-        config.headers = config.headers || {};
-        config.headers.Authorization = `Bearer ${token}`;
-        return api(config);
-    } catch (refreshError) {
-        localStorage.removeItem("staff_auth_token");
-        localStorage.removeItem("knb_admin_token");
-        window.location.href = "/admin/sign-in";
-        return Promise.reject(refreshError);
+    // Try to refresh the admin token first (online store orders)
+    if (adminToken) {
+        config._adminRetried = true;
+        try {
+            const { data } = await axios.post(`${API}/auth/admin/refresh`, {}, {
+                headers: { Authorization: `Bearer ${adminToken}` }
+            });
+            if (data.token) {
+                localStorage.setItem("knb_admin_token", data.token);
+                config.headers = config.headers || {};
+                config.headers.Authorization = `Bearer ${data.token}`;
+                return api(config);
+            }
+        } catch (refreshError) {
+            // Admin refresh failed; fall through to staff refresh below
+        }
     }
+    // If no admin token or admin refresh failed, try staff token refresh
+    if (staffToken) {
+        config._staffRetried = true;
+        try {
+            const token = await refreshStaffToken();
+            config.headers = config.headers || {};
+            config.headers.Authorization = `Bearer ${token}`;
+            return api(config);
+        } catch (refreshError) {
+            // Both failed; clear and redirect
+        }
+    }
+    // Both refresh attempts failed; clear tokens and redirect to login
+    localStorage.removeItem("staff_auth_token");
+    localStorage.removeItem("knb_admin_token");
+    window.location.href = "/admin/sign-in";
+    return Promise.reject(error);
 });
 
 export function formatApiError(detail) {

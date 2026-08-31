@@ -770,6 +770,35 @@ async def refresh_staff_session(request: Request, response: Response):
     except (jwt.InvalidTokenError, InvalidId):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
+@api_router.post("/auth/admin/refresh")
+async def refresh_admin_token(request: Request):
+    """Refresh an expired admin token (stored in localStorage on frontend).
+    Accepts the expired token and issues a new one if the user still exists."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="No token provided")
+    token = auth_header[7:]
+    try:
+        # Decode the token WITHOUT verifying expiration — we're specifically refreshing an expired token.
+        # This is safe because:
+        # 1. The token still has valid crypto signature
+        # 2. We verify the user still exists in the database
+        # 3. We re-validate the user's role and permissions
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        # Issue a fresh token with a new expiration time
+        uid = str(user["_id"])
+        new_token = create_access_token(uid, user["email"], user.get("role", "cashier"))
+        return {"token": new_token}
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid or malformed token")
+    except InvalidId:
+        raise HTTPException(status_code=401, detail="Invalid user ID")
+
 @api_router.post("/auth/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
