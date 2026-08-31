@@ -799,6 +799,31 @@ async def refresh_admin_token(request: Request):
     except InvalidId:
         raise HTTPException(status_code=401, detail="Invalid user ID")
 
+@api_router.post("/customer/refresh")
+async def refresh_customer_token(request: Request):
+    """Refresh an expired customer token. Called by mobile app when its access token
+    expires during order placement or other operations."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="No token provided")
+    token = auth_header[7:]
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+        if payload.get("type") != "customer":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        cust = await db.customers.find_one({"_id": ObjectId(payload["sub"])})
+        if not cust:
+            raise HTTPException(status_code=401, detail="Customer not found")
+        # Issue a fresh token with new expiration (7 days for customers)
+        cid = str(cust["_id"])
+        email = cust.get("email", "")
+        new_token = jwt.encode({"sub": cid, "email": email, "role": "customer", "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "customer", "iid": INSTANCE_ID}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+        return {"token": new_token}
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid or malformed token")
+    except InvalidId:
+        raise HTTPException(status_code=401, detail="Invalid customer ID")
+
 @api_router.post("/auth/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")

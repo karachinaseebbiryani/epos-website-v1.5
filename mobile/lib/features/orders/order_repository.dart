@@ -178,6 +178,7 @@ final orderRepositoryProvider = Provider<OrderRepository>(
 );
 
 /// Live tracking for one order. `.family` keyed by "orderId|token".
+
 /// One-shot read (used for pull-to-refresh / manual invalidation).
 final orderTrackingProvider =
     FutureProvider.family<Order, String>((ref, key) {

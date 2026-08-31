@@ -7,18 +7,36 @@ export function AuthProvider({ children }) {
     const [user, setUser] = useState(undefined); // undefined = checking, null = no user
     const [token, setToken] = useState(localStorage.getItem("knb_token"));
 
+    const refreshUser = async () => {
+        const currentToken = localStorage.getItem("knb_token");
+        if (!currentToken) {
+            setUser(null);
+            return null;
+        }
+
+        try {
+            const { data } = await api.get("/customer/me");
+            setUser(data);
+            return data;
+        } catch {
+            localStorage.removeItem("knb_token");
+            setToken(null);
+            setUser(null);
+            return null;
+        }
+    };
+
     useEffect(() => {
         if (!token) { setUser(null); return; }
-        api.get("/customer/me")
-            .then((r) => setUser(r.data))
-            .catch(() => { localStorage.removeItem("knb_token"); setToken(null); setUser(null); });
+        refreshUser();
     }, [token]);
 
     const login = async (email, password) => {
         const { data } = await api.post("/customer/login", { email, password });
         localStorage.setItem("knb_token", data.token);
         setToken(data.token);
-        setUser(data);
+        const fullProfile = await refreshUser();
+        setUser(fullProfile || data);
         try { window.dispatchEvent(new Event("diamondsUpdated")); } catch { /* */ }
         return data;
     };
@@ -27,7 +45,8 @@ export function AuthProvider({ children }) {
         const { data } = await api.post("/customer/register", payload);
         localStorage.setItem("knb_token", data.token);
         setToken(data.token);
-        setUser(data);
+        const fullProfile = await refreshUser();
+        setUser(fullProfile || data);
         try { window.dispatchEvent(new Event("diamondsUpdated")); } catch { /* */ }
         return data;
     };
@@ -44,7 +63,8 @@ export function AuthProvider({ children }) {
         const { data } = await api.post(endpoint, payload);
         localStorage.setItem("knb_token", data.token);
         setToken(data.token);
-        setUser(data);
+        const fullProfile = await refreshUser();
+        setUser(fullProfile || data);
         try { window.dispatchEvent(new Event("diamondsUpdated")); } catch { /* */ }
         return data;
     };
@@ -68,7 +88,7 @@ export function AuthProvider({ children }) {
     };
 
     return (
-        <AuthContext.Provider value={{ user, token, login, register, logout, socialLogin, verifyEmail, resendOtp }}>
+        <AuthContext.Provider value={{ user, token, login, register, logout, socialLogin, verifyEmail, resendOtp, refreshUser }}>
             {children}
         </AuthContext.Provider>
     );

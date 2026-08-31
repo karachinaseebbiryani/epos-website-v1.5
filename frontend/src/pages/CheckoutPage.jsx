@@ -43,7 +43,7 @@ function saveGuestPrefill(form) {
 
 export default function CheckoutPage() {
     const { items, subtotal, clear } = useCart();
-    const { user } = useAuth();
+    const { user, refreshUser } = useAuth();
     // Wallet redemption (store credit from refunds). Server-authoritative: we
     // only send the intent; the backend atomically applies min(balance, total).
     const [useWallet, setUseWallet] = useState(false);
@@ -394,6 +394,12 @@ export default function CheckoutPage() {
                 reward_id: rewardId, // NEW: Diamond reward redemption
                 use_wallet: !!(user && useWallet && Number(user.wallet_balance) > 0),
             });
+
+            // Refresh the signed-in customer record immediately after placement so
+            // any wallet deduction / refund credit changes are visible without a page reload.
+            if (user) {
+                try { await refreshUser(); } catch { /* silent */ }
+            }
 
             // Wallet covered the whole bill → the order is already PAID on the
             // server; skip any gateway redirect and go straight to tracking.

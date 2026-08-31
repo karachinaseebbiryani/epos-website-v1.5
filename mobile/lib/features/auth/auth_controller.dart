@@ -1,10 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:dio/dio.dart';
 
 import 'dart:async';
 
 import '../../core/api_client.dart';
+import '../../core/config.dart';
 import '../../core/push.dart';
 import '../../core/session_events.dart';
 import '../../core/token_store.dart';
@@ -20,16 +22,43 @@ final tokenStoreProvider = Provider<TokenStore>(
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(
     ref.watch(tokenStoreProvider),
-    // No customer refresh endpoint yet: return false to force re-login.
-    // When you add POST /customer/refresh, call it here, store the new access
-    // token via TokenStore.write(), and return true.
-    onRefresh: () async => false,
+    // Refresh customer token when it expires during API calls (e.g. order placement).
+    // The backend's POST /customer/refresh accepts the expired token and issues a new one.
+    onRefresh: () async {
+      try {
+        final tokenStore = ref.watch(tokenStoreProvider);
+        final oldToken = await tokenStore.read();
+        if (oldToken == null || oldToken.isEmpty) return false;
+        
+        final refreshDio = Dio(BaseOptions(
+          baseUrl: AppConfig.apiRoot,
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 20),
+        ));
+        final res = await refreshDio.post(
+          '/customer/refresh',
+          options: Options(headers: {'Authorization': 'Bearer $oldToken'}),
+        );
+        
+        if (res.statusCode == 200 && res.data is Map) {
+          final newToken = res.data['token'];
+          if (newToken != null && newToken.isNotEmpty) {
+            await tokenStore.write(newToken);
+            return true;
+          }
+        }
+        return false;
+      } catch (_) {
+        return false;
+      }
+    },
     // Signal session expiry through a decoupled singleton so this provider does
     // NOT reference authControllerProvider (which would form an initializer
     // cycle). AuthController listens to sessionEvents and logs out.
     onSessionExpired: () => sessionEvents.notifyExpired(),
   );
 });
+
 
 final authRepositoryProvider = Provider<AuthRepository>(
   (ref) => AuthRepository(
@@ -117,6 +146,16 @@ class AuthController extends StateNotifier<AuthState> {
         customer: res.customer,
       );
       _registerPush();
+      // Fetch the full customer profile (includes wallet_balance, etc)
+      // immediately after login so the UI has complete data.
+      try {
+        final fullCustomer = await _repo.me();
+        if (fullCustomer != null) {
+          state = state.copyWith(customer: fullCustomer);
+        }
+      } catch (_) {
+        // Fallback: we have the basic customer data, app is usable
+      }
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
@@ -150,6 +189,16 @@ class AuthController extends StateNotifier<AuthState> {
         otpEmailFailed: res.otpSent == false,
       );
       _registerPush();
+      // Fetch the full customer profile (includes wallet_balance, etc)
+      // immediately after registration so the UI has complete data.
+      try {
+        final fullCustomer = await _repo.me();
+        if (fullCustomer != null) {
+          state = state.copyWith(customer: fullCustomer);
+        }
+      } catch (_) {
+        // Fallback: we have the basic customer data, app is usable
+      }
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
@@ -167,6 +216,16 @@ class AuthController extends StateNotifier<AuthState> {
       state = state.copyWith(
           status: AuthStatus.authenticated, customer: res.customer);
       _registerPush();
+      // Fetch the full customer profile (includes wallet_balance, etc)
+      // immediately after sign-in so the UI has complete data.
+      try {
+        final fullCustomer = await _repo.me();
+        if (fullCustomer != null) {
+          state = state.copyWith(customer: fullCustomer);
+        }
+      } catch (_) {
+        // Fallback: we have the basic customer data, app is usable
+      }
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
@@ -184,6 +243,16 @@ class AuthController extends StateNotifier<AuthState> {
       state = state.copyWith(
           status: AuthStatus.authenticated, customer: res.customer);
       _registerPush();
+      // Fetch the full customer profile (includes wallet_balance, etc)
+      // immediately after sign-in so the UI has complete data.
+      try {
+        final fullCustomer = await _repo.me();
+        if (fullCustomer != null) {
+          state = state.copyWith(customer: fullCustomer);
+        }
+      } catch (_) {
+        // Fallback: we have the basic customer data, app is usable
+      }
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
@@ -235,6 +304,16 @@ class AuthController extends StateNotifier<AuthState> {
       state = state.copyWith(
           status: AuthStatus.authenticated, customer: res.customer);
       _registerPush();
+      // Fetch the full customer profile (includes wallet_balance, etc)
+      // immediately after sign-in so the UI has complete data.
+      try {
+        final fullCustomer = await _repo.me();
+        if (fullCustomer != null) {
+          state = state.copyWith(customer: fullCustomer);
+        }
+      } catch (_) {
+        // Fallback: we have the basic customer data, app is usable
+      }
       return true;
     } on ApiException catch (e) {
       state = state.copyWith(error: e.message);
