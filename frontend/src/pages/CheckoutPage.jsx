@@ -327,6 +327,11 @@ export default function CheckoutPage() {
         rewardDiscountPreview = Math.min(Number(reward.reward_value || 0), total);
     }
     const totalAfterReward = Math.max(0, total - rewardDiscountPreview);
+
+    // Wallet credit preview: show how much will be deducted and what they'll actually pay
+    const walletBalance = user ? Number(user.wallet_balance || 0) : 0;
+    const walletWillApply = useWallet ? Math.min(walletBalance, totalAfterReward) : 0;
+    const finalAmountToPay = Math.max(0, totalAfterReward - walletWillApply);
     // Hosted wallet gateways are flagged separately from payment_methods —
     // the backend reports them true only when enabled AND credentialed.
     const enabledMethods = {
@@ -750,15 +755,27 @@ export default function CheckoutPage() {
                                     <span>− Rs. {rewardDiscountPreview.toFixed(0)}</span>
                                 </div>
                             )}
+                            {walletWillApply > 0 && (
+                                <div data-testid="checkout-wallet-discount" className="flex justify-between text-emerald-600 font-semibold">
+                                    <span className="inline-flex items-center gap-1">
+                                        👛 Wallet Credit
+                                    </span>
+                                    <span>− Rs. {walletWillApply.toFixed(0)}</span>
+                                </div>
+                            )}
                             <div className="flex justify-between pt-2 border-t border-neutral-100">
-                                <span className="font-display font-bold text-brand-ink">Total</span>
-                                <span data-testid="checkout-total" className="font-display font-black text-2xl text-brand-red">Rs. {totalAfterReward.toFixed(0)}</span>
+                                <span className="font-display font-bold text-brand-ink">
+                                    {walletWillApply > 0 ? "Amount to Pay" : "Total"}
+                                </span>
+                                <span data-testid="checkout-total" className="font-display font-black text-2xl text-brand-red">
+                                    Rs. {finalAmountToPay.toFixed(0)}
+                                </span>
                             </div>
                         </div>
 
                         <button type="submit" disabled={loading || isClosed} data-testid="checkout-place-order"
                             className="w-full mt-6 bg-brand-red hover:bg-brand-red-dark disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-full px-8 py-3.5 font-bold transition-colors">
-                            {isClosed ? "Closed — try again later" : (loading ? "Processing..." : `Place Order — Rs. ${total.toFixed(0)}`)}
+                            {isClosed ? "Closed — try again later" : (loading ? "Processing..." : `Place Order — Rs. ${finalAmountToPay.toFixed(0)}`)}
                         </button>
                         <p className="text-[11px] text-neutral-400 text-center mt-3">
                             {order_type === "delivery" ? "Estimated delivery 30–45 min" : "Ready for pickup in 30–45 min"}

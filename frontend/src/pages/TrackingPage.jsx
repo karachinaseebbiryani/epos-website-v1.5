@@ -298,8 +298,15 @@ export default function TrackingPage() {
                         {walletApplied > 0 && <div className="flex justify-between text-purple-600 font-semibold"><span>Wallet used</span><span>− Rs. {walletApplied.toFixed(0)}</span></div>}
                         {order.delivery_fee > 0 && <div className="flex justify-between"><span className="text-neutral-500">Delivery</span><span>Rs. {Number(order.delivery_fee || 0).toFixed(0)}</span></div>}
                         <div className="flex justify-between pt-2 border-t border-neutral-100">
-                            <span className="font-display font-bold text-brand-ink">Total</span>
-                            <span data-testid="track-total" className="font-display font-black text-xl text-brand-red">Rs. {Number(order.total_price || 0).toFixed(0)}</span>
+                            <span className="font-display font-bold text-brand-ink">
+                                {walletApplied > 0 ? "Amount Paid/Due" : "Total"}
+                            </span>
+                            <span data-testid="track-total" className="font-display font-black text-xl text-brand-red">
+                                Rs. {Number(order.total_price || 0).toFixed(0)}
+                                {walletApplied > 0 && order.total_price === 0 && (
+                                    <span className="ml-2 text-xs font-semibold text-green-600">(Paid via Wallet)</span>
+                                )}
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -358,7 +365,9 @@ export default function TrackingPage() {
                     )}
 
                     <div className="mt-4 pt-4 border-t border-neutral-100 text-xs text-neutral-500">
-                        <div>Payment: <span className="font-semibold uppercase text-brand-ink">{order.payment_method}</span></div>
+                        <div>Payment: <span className="font-semibold uppercase text-brand-ink">
+                            {walletApplied > 0 && order.total_price === 0 ? "WALLET/CREDIT" : order.payment_method}
+                        </span></div>
                         <div className="mt-1">Payment Status: <span className={`font-semibold uppercase ${order.payment_status === "paid" ? "text-green-700" : order.payment_status === "pending_verification" ? "text-yellow-700" : "text-neutral-600"}`}>{order.payment_status?.replace(/_/g, " ")}</span></div>
                     </div>
                 </div>

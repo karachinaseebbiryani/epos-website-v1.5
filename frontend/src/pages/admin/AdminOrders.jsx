@@ -667,9 +667,21 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                 </div>
                 <div className="text-right md:text-left">
                     <div className="text-xs text-neutral-500 uppercase font-semibold tracking-wider">Total</div>
-                    <div className="font-display font-black text-2xl text-brand-red">Rs. {o.total_price?.toFixed(0)}</div>
-                    <div className="text-xs text-neutral-500 uppercase">{o.payment_method?.toUpperCase()}</div>
+                    <div className="font-display font-black text-2xl text-brand-red">Rs. {(Number(o.total_price || 0) + Number(o.wallet_applied || 0)).toFixed(0)}</div>
+                    {Number(o.wallet_applied || 0) > 0 && (
+                        <div className="text-xs text-purple-700 font-bold mt-1">
+                            Wallet: −Rs. {Number(o.wallet_applied).toFixed(0)}
+                        </div>
+                    )}
+                    <div className="text-xs text-neutral-500 uppercase mt-1">
+                        {Number(o.wallet_applied || 0) > 0 && o.total_price === 0
+                            ? "WALLET/CREDIT"
+                            : o.payment_method?.toUpperCase()}
+                    </div>
                     <PaymentBadge status={o.payment_status} />
+                    {Number(o.wallet_applied || 0) > 0 && o.total_price === 0 && (
+                        <div className="text-[10px] text-green-700 font-bold mt-1">✓ Fully paid via wallet</div>
+                    )}
                 </div>
             </div>
 
