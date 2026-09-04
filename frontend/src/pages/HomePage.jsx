@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import api, { resolveImageUrl } from "../lib/api";
 import { fetchCached, getCached } from "../lib/menuCache";
 import { useCart } from "../contexts/CartContext";
-import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame } from "lucide-react";
+import { ArrowRight, Star, Clock, Phone, Award, Plus, Flame, Truck, HelpCircle, Gift, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 import { VariationPicker, PriceBlock, Badges } from "./MenuPage";
 import { OfferCountdown } from "./OffersPage";
@@ -213,6 +213,61 @@ export default function HomePage() {
                     </div>
                 </section>
             )}
+
+            {/* EVERYTHING YOU NEED TO KNOW - Internal linking section for SEO */}
+            <section className="max-w-6xl mx-auto px-4 md:px-8 py-16 md:py-20" data-testid="quick-links-section">
+                <div className="text-center mb-10">
+                    <span className="text-brand-red text-xs uppercase tracking-[0.2em] font-bold">Helpful Info</span>
+                    <h2 className="font-display font-black text-3xl md:text-5xl text-brand-ink mt-2 mb-3">Everything You Need to Know</h2>
+                    <p className="text-neutral-500 max-w-2xl mx-auto">Quick answers, delivery info, and ways to save on your next order</p>
+                </div>
+
+                <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                    <Link to="/delivery" data-testid="quick-link-delivery" className="bg-white border-2 border-neutral-200 rounded-2xl p-6 hover:border-brand-red hover:shadow-lg transition-all group">
+                        <div className="w-12 h-12 rounded-full bg-brand-red/10 text-brand-red flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                            <Truck className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-display font-bold text-lg text-brand-ink mb-2">Delivery Areas</h3>
+                        <p className="text-sm text-neutral-500 leading-relaxed">Where we deliver in Lahore, timings & fees</p>
+                        <div className="mt-4 text-brand-red text-sm font-semibold inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+                            Learn more <ArrowRight className="w-3.5 h-3.5" />
+                        </div>
+                    </Link>
+
+                    <Link to="/faq" data-testid="quick-link-faq" className="bg-white border-2 border-neutral-200 rounded-2xl p-6 hover:border-brand-red hover:shadow-lg transition-all group">
+                        <div className="w-12 h-12 rounded-full bg-brand-red/10 text-brand-red flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                            <HelpCircle className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-display font-bold text-lg text-brand-ink mb-2">FAQ</h3>
+                        <p className="text-sm text-neutral-500 leading-relaxed">Common questions about ordering & delivery</p>
+                        <div className="mt-4 text-brand-red text-sm font-semibold inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+                            Get answers <ArrowRight className="w-3.5 h-3.5" />
+                        </div>
+                    </Link>
+
+                    <Link to="/rewards-program" data-testid="quick-link-rewards" className="bg-white border-2 border-neutral-200 rounded-2xl p-6 hover:border-brand-red hover:shadow-lg transition-all group">
+                        <div className="w-12 h-12 rounded-full bg-brand-red/10 text-brand-red flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                            <Gift className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-display font-bold text-lg text-brand-ink mb-2">Rewards Program</h3>
+                        <p className="text-sm text-neutral-500 leading-relaxed">Earn Diamonds & get free food with every order</p>
+                        <div className="mt-4 text-brand-red text-sm font-semibold inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+                            Start earning <ArrowRight className="w-3.5 h-3.5" />
+                        </div>
+                    </Link>
+
+                    <Link to="/contact" data-testid="quick-link-contact" className="bg-white border-2 border-neutral-200 rounded-2xl p-6 hover:border-brand-red hover:shadow-lg transition-all group">
+                        <div className="w-12 h-12 rounded-full bg-brand-red/10 text-brand-red flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                            <MessageCircle className="w-6 h-6" />
+                        </div>
+                        <h3 className="font-display font-bold text-lg text-brand-ink mb-2">Contact Us</h3>
+                        <p className="text-sm text-neutral-500 leading-relaxed">Get in touch via phone, WhatsApp or email</p>
+                        <div className="mt-4 text-brand-red text-sm font-semibold inline-flex items-center gap-1 group-hover:gap-2 transition-all">
+                            Reach out <ArrowRight className="w-3.5 h-3.5" />
+                        </div>
+                    </Link>
+                </div>
+            </section>
 
             {/* REVIEWS */}
             <section className="max-w-7xl mx-auto px-4 md:px-8 py-20 md:py-28" data-testid="reviews-section">

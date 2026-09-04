@@ -119,6 +119,28 @@ export default function RewardsPage() {
                 )}
             </div>
 
+            {/* SEO Content Section */}
+            <div className="mb-10 bg-neutral-50 rounded-2xl p-6 md:p-8 border border-neutral-200">
+                <h2 className="font-display font-bold text-2xl text-brand-ink mb-4">How Diamond Rewards Work</h2>
+                <div className="prose prose-neutral max-w-none text-neutral-600 leading-relaxed space-y-4">
+                    <p>
+                        <strong>Get free biryani, discounts and more</strong> with our Diamond Rewards loyalty program. Every time you order from Karachi Naseeb Biryani in Lahore, you earn Diamond points that can be redeemed for discounts, free items, and special perks. It's our way of thanking our loyal customers for choosing authentic Karachi-style biryani delivery.
+                    </p>
+                    <p>
+                        <strong>How to Earn Diamonds:</strong> Simply create an account and place orders online. You'll automatically earn Diamonds based on your order total. The more you order, the more you earn. Diamonds are added to your account after your order is delivered, and you can track your balance anytime from your profile or this rewards page.
+                    </p>
+                    <p>
+                        <strong>How to Redeem Diamonds:</strong> Browse the rewards catalog below and select any reward you can afford with your Diamond balance. Your reward will be automatically applied to your next order at checkout. Choose from percentage discounts, fixed amount discounts, or even free menu items. Rewards can be combined with our special <a href="/offers" className="text-brand-red font-semibold hover:underline">offers and deals</a> for maximum savings.
+                    </p>
+                    <p>
+                        <strong>No Expiry, No Catch:</strong> Your Diamonds never expire as long as your account remains active. There's no minimum purchase required to use your rewards, and you can redeem them on any order for delivery or pickup across Lahore including Johar Town, Model Town, DHA, Township, Garden Town and Punjab Small Industry. Check our <a href="/delivery" className="text-brand-red font-semibold hover:underline">delivery areas</a> for full coverage details.
+                    </p>
+                    <p>
+                        <strong>Start Earning Today:</strong> {user ? "Browse the rewards below and redeem your Diamonds on your next order!" : "Sign in or create an account to start earning Diamonds with every biryani, Murg Pulao or BBQ order. It's free to join and you'll start earning immediately."} Have questions? Check our <a href="/faq" className="text-brand-red font-semibold hover:underline">FAQ</a> or <a href="/contact" className="text-brand-red font-semibold hover:underline">contact us</a>.
+                    </p>
+                </div>
+            </div>
+
             {loading ? (
                 <div className="text-center py-16">
                     <div className="inline-block w-8 h-8 border-4 border-brand-red border-t-transparent rounded-full animate-spin"></div>

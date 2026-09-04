@@ -119,6 +119,28 @@ export default function OffersPage() {
                 <p className="text-neutral-500 mt-3 max-w-xl">Save more with our limited-time offers. Tap a code to copy.</p>
             </div>
 
+            {/* SEO Content Section */}
+            <div className="mb-12 bg-neutral-50 rounded-2xl p-6 md:p-8 border border-neutral-200">
+                <h2 className="font-display font-bold text-2xl text-brand-ink mb-4">Special Offers & Deals on Biryani Delivery in Lahore</h2>
+                <div className="prose prose-neutral max-w-none text-neutral-600 leading-relaxed space-y-4">
+                    <p>
+                        Craving authentic Karachi biryani at an amazing price? Check out our current special offers and combo deals on biryani, Murg Pulao, BBQ and Pakistani cuisine delivered across Lahore. All our offers are valid for both delivery and pickup orders, with free delivery available within our service area including Johar Town, Model Town, DHA, Township, Garden Town and Punjab Small Industry.
+                    </p>
+                    <p>
+                        <strong>How Our Offers Work:</strong> Browse our active promotions below. Discounts are automatically applied at checkout when you meet the qualifying conditions. Many offers can be combined with Diamond rewards for extra savings. Most offers have limited time periods or quantities, so order today to lock in the best deals on biryani delivery in Lahore.
+                    </p>
+                    <p>
+                        <strong>Delivery & Pickup Available:</strong> All special offers apply to both delivery and pickup orders. Order online for delivery to your home or office anywhere in our service area, or select pickup to collect from our Chatri Chowk, Punjab Small Industry location. Cash on Delivery is available for all orders, or pay online for instant confirmation.
+                    </p>
+                    <p>
+                        <strong>Earn Diamonds on Every Order:</strong> Don't forget — you earn Diamond rewards points on every order, even when using discount codes. Visit our <a href="/rewards-program" className="text-brand-red font-semibold hover:underline">Rewards Program page</a> to learn how to get free food with your points. Combined with our special offers, you can save big on authentic Karachi-style biryani in Lahore.
+                    </p>
+                    <p className="text-sm text-neutral-500 pt-2 border-t border-neutral-200">
+                        Questions about our offers? Check our <a href="/faq" className="text-brand-red font-semibold hover:underline">FAQ</a> or <a href="/contact" className="text-brand-red font-semibold hover:underline">contact us</a> directly. View <a href="/delivery" className="text-brand-red font-semibold hover:underline">delivery areas</a> and timings.
+                    </p>
+                </div>
+            </div>
+
             {/* Personal coupons block — shows the customer's own one-time codes
                 (e.g. the second-order bonus). Guests get a teaser card that opens
                 the sign-in gate when tapped. */}
