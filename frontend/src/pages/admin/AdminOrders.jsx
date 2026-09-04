@@ -839,20 +839,6 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     </>
                 )}
 
-                {/* One-tap "Mark Delivered" — designed for staff who don't want to fiddle with
-                    a dropdown. Big, green, unmissable. Only shows on non-terminal orders so once
-                    delivered it disappears. Anyone on the floor can press it. */}
-                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "cancelled" && (
-                    <button
-                        onClick={() => onUpdateStatus("delivered")}
-                        disabled={busyId === o.id}
-                        data-testid={`order-mark-delivered-${o.id}`}
-                        className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-full px-5 py-2.5 text-sm font-black uppercase tracking-wider shadow-md shadow-emerald-600/30 transition-colors disabled:opacity-60"
-                    >
-                        <CheckCircle2 className="w-5 h-5" /> Mark Delivered
-                    </button>
-                )}
-
                 {/* Cancel an already-accepted / in-flight order. Missing before, so once an
                     order left "pending" there was no way to stop it. Guarded by a confirm so
                     it isn't a one-tap mistake; backend accepts "cancelled" on the status route. */}
