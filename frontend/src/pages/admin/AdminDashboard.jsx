@@ -33,6 +33,7 @@ export default function AdminDashboard() {
 
     useEffect(() => {
         loadStats();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dateFrom, dateTo, statusFilter, paymentFilter, orderTypeFilter]);
 
     const loadStats = async () => {
