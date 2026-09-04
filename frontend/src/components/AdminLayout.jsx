@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import GlobalOrderAlert from "./GlobalOrderAlert";
 import PosInstall from "./PosInstall";
+import AdminNotificationBanner from "./AdminNotificationBanner";
 import { toast } from "sonner";
 import { useStaffAuth } from "../contexts/StaffAuthContext";
 
@@ -99,11 +100,15 @@ export default function AdminLayout() {
   if (!adminTokenOk) return null; // wait for redirect to fire
 
   return (
-    <div className="h-screen bg-neutral-50 flex overflow-hidden" data-testid="admin-layout">
+    <div className="h-screen bg-neutral-50 flex flex-col overflow-hidden" data-testid="admin-layout">
       {/* Global notification ringer — works on every admin page */}
       <GlobalOrderAlert />
 
-      <aside className="hidden md:flex w-64 bg-brand-ink text-white flex-col h-screen">
+      {/* Prominent notification enable banner */}
+      <AdminNotificationBanner />
+
+      <div className="flex flex-1 overflow-hidden">
+      <aside className="hidden md:flex w-64 bg-brand-ink text-white flex-col h-full">
         <Link to="/admin/pos" className="px-6 py-6 border-b border-white/10 flex items-center gap-3 flex-shrink-0">
           <div className="w-10 h-10 rounded-full bg-brand-red flex items-center justify-center font-display font-black">K</div>
           <div>
@@ -198,6 +203,7 @@ export default function AdminLayout() {
       <main className="flex-1 overflow-y-auto p-4 md:p-8 pb-24 md:pb-8">
         <Outlet />
       </main>
+      </div>
     </div>
   );
 }

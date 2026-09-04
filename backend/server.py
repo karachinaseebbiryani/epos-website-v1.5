@@ -5398,6 +5398,34 @@ async def admin_push_subscribe(body: PushSubscriptionIn, request: Request):
     return {"ok": True}
 
 
+@api_router.post("/admin/push/test")
+async def admin_push_test(request: Request):
+    """Send a test notification to verify push notifications are working for the current admin user."""
+    user = await get_current_user(request)
+    if not _has_perm(user, "online_orders"):
+        raise HTTPException(status_code=403, detail="You don't have permission to test order alerts.")
+
+    # Find subscriptions for this admin user
+    user_subs = await db.push_subscriptions.find({"role": "admin", "admin_user_id": str(user["_id"])}).to_list(10)
+
+    if not user_subs:
+        raise HTTPException(status_code=400, detail="No push subscription found. Please enable notifications first.")
+
+    # Send test notification to all this admin's devices
+    sent_count = 0
+    for sub in user_subs:
+        try:
+            await _send_web_push(sub, "🧪 Test Notification", "Push notifications are working! You'll receive alerts for new orders.", "/admin/orders")
+            sent_count += 1
+        except Exception as e:
+            logger.warning(f"Test push failed for subscription {sub.get('endpoint', '')[:50]}: {e}")
+
+    if sent_count == 0:
+        raise HTTPException(status_code=500, detail="Failed to send test notification. Your subscription may be expired.")
+
+    return {"ok": True, "sent_to_devices": sent_count}
+
+
 # =============================================================================
 # CUSTOMER REFUND REQUESTS (paid online orders)
 # =============================================================================
