@@ -4796,15 +4796,13 @@ async def update_online_order_status(order_id: str, body: OnlineOrderStatusUpdat
     # can mark the order delivered.
     if body.status == "out_for_delivery" and not order.get("rider_token"):
         update_fields["rider_token"] = secrets.token_urlsafe(16)
-    
-    res = await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
-    # If order is being cancelled/rejected at ANY step (accepted / preparing / ready /
-# out_for_delivery), return the wallet credit the customer spent on it. Idempotent
-# via the wallet_restored flag inside _restore_order_wallet, so re-cancelling is safe.
-    if body.status in {"cancelled", "rejected"} and old_status not in {"cancelled", "rejected"}:
-    await _restore_order_wallet(order)
 
-# Push notification to the customer's devices for every meaningful status flip.
+    res = await db.online_orders.update_one({"_id": ObjectId(order_id)}, {"$set": update_fields})
+
+    # Restore wallet credit when cancelling/rejecting at any non-terminal status.
+    if body.status in {"cancelled", "rejected"} and old_status not in {"cancelled", "rejected"}:
+        await _restore_order_wallet(order)
+
     # Push notification to the customer's devices for every meaningful status flip.
     # Done before the Diamond award block so the customer's phone buzzes immediately,
     # even if the diamond credit logic below takes a beat.
