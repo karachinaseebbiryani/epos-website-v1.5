@@ -667,7 +667,7 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                 </div>
                 <div className="text-right md:text-left">
                     <div className="text-xs text-neutral-500 uppercase font-semibold tracking-wider">Total</div>
-                    <div className="font-display font-black text-2xl text-brand-red">Rs. {(Number(o.total_price || 0) + Number(o.wallet_applied || 0)).toFixed(0)}</div>
+                    <div className="font-display font-black text-2xl text-brand-red">Rs. {Number(o.total_price || 0).toFixed(0)}</div>
                     {Number(o.wallet_applied || 0) > 0 && (
                         <div className="text-xs text-purple-700 font-bold mt-1">
                             Wallet: −Rs. {Number(o.wallet_applied).toFixed(0)}
