@@ -1,10 +1,32 @@
 {
   "rewrites": [
-    { "source": "/sitemap.xml", "destination": "https://knb-backend.fly.dev/api/sitemap.xml" },
-    { "source": "/robots.txt", "destination": "https://knb-backend.fly.dev/api/robots.txt" },
     { "source": "/llms.txt", "destination": "https://knb-backend.fly.dev/api/llms.txt" },
     { "source": "/v/:share_token/og-image.png", "destination": "https://knb-backend.fly.dev/api/v/:share_token/og-image.png" },
     { "source": "/v/:share_token", "destination": "https://knb-backend.fly.dev/api/v/:share_token" },
     { "source": "/((?!static/).*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/robots.txt",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "text/plain"
+        }
+      ]
+    },
+    {
+      "source": "/sitemap.xml",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "application/xml"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=3600, s-maxage=3600"
+        }
+      ]
+    }
   ]
 }

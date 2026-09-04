@@ -1,0 +1,28 @@
+User-agent: *
+Allow: /
+Allow: /menu
+Allow: /about
+Allow: /contact
+Allow: /offers
+Allow: /events
+Allow: /track/*
+
+# Block admin and internal pages from search engines
+Disallow: /admin
+Disallow: /admin/*
+Disallow: /dashboard
+Disallow: /dashboard/*
+Disallow: /api/
+
+# Allow Googlebot to access everything except admin
+User-agent: Googlebot
+Allow: /
+Disallow: /admin
+Disallow: /dashboard
+
+# Sitemap location
+Sitemap: https://www.karachinaseebbiryani.com/sitemap.xml
+
+# Crawl-delay for bots (optional, prevents aggressive crawling)
+User-agent: *
+Crawl-delay: 1
