@@ -842,7 +842,7 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                 {/* Cancel an already-accepted / in-flight order. Missing before, so once an
                     order left "pending" there was no way to stop it. Guarded by a confirm so
                     it isn't a one-tap mistake; backend accepts "cancelled" on the status route. */}
-                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "cancelled" && (
+                {!isPending && !isRejected && o.status !== "delivered" && o.status !== "picked_up" && o.status !== "cancelled" && (
                     <button
                         onClick={() => { if (window.confirm("Cancel this order? The customer will be notified.")) onUpdateStatus("cancelled"); }}
                         disabled={busyId === o.id}
@@ -857,7 +857,7 @@ function OrderCard({ o, busyId, onAccept, onReject, onModify, onUpdateStatus, on
                     This copies a WhatsApp-ready link the manager can text to the rider. The
                     rider opens it on their phone and gets a single-screen delivery view
                     (navigate, call, mark delivered) — no admin login needed. */}
-                {o.rider_token && o.status !== "delivered" && o.status !== "cancelled" && o.status !== "rejected" && (
+                {o.rider_token && o.status !== "delivered" && o.status !== "picked_up" && o.status !== "cancelled" && o.status !== "rejected" && (
                     <button
                         type="button"
                         onClick={() => {
