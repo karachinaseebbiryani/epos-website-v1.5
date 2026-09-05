@@ -548,27 +548,35 @@ function MenuItemCard({ item, category, onEdit, onDelete, onToggleAvailability, 
                         ))}
                     </div>
                 )}
-                <div className="flex items-center justify-between mt-auto pt-3">
-                    <span className="font-display font-black text-lg text-brand-red">
-                        {variations.length > 0 ? `From Rs. ${Math.min(...variations.map((v) => Number(v.price) || 0))}` : (
-                            hasDiscount ? <span className="inline-flex items-baseline gap-2"><span>Rs. {item.price}</span><span className="text-xs text-neutral-400 line-through font-normal">Rs. {item.original_price}</span></span> : <span>Rs. {item.price}</span>
-                        )}
-                    </span>
-                    <div className="flex gap-1">
+                <div className="mt-auto pt-3 space-y-3">
+                    {/* Availability Toggle Switch */}
+                    <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-neutral-600">Availability</span>
                         <button
                             type="button"
                             onClick={onToggleAvailability}
                             data-testid={`menu-toggle-availability-${item.id}`}
-                            title={isUnavailable ? "Mark as available" : "Mark as unavailable"}
-                            className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
-                                isUnavailable
-                                    ? 'hover:bg-green-50 text-neutral-400 hover:text-green-600'
-                                    : 'hover:bg-green-50 text-green-600'
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2 ${
+                                isUnavailable ? 'bg-neutral-300' : 'bg-green-500'
                             }`}>
-                            <Power className="w-4 h-4" />
+                            <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                    isUnavailable ? 'translate-x-1' : 'translate-x-6'
+                                }`}
+                            />
                         </button>
-                        <button type="button" onClick={onEdit} data-testid={`menu-edit-${item.id}`} className="w-9 h-9 rounded-full hover:bg-neutral-100 flex items-center justify-center"><Pencil className="w-4 h-4" /></button>
-                        <button type="button" onClick={onDelete} data-testid={`menu-delete-${item.id}`} className="w-9 h-9 rounded-full hover:bg-red-50 text-red-500 flex items-center justify-center"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                    {/* Price and Actions */}
+                    <div className="flex items-center justify-between">
+                        <span className="font-display font-black text-lg text-brand-red">
+                            {variations.length > 0 ? `From Rs. ${Math.min(...variations.map((v) => Number(v.price) || 0))}` : (
+                                hasDiscount ? <span className="inline-flex items-baseline gap-2"><span>Rs. {item.price}</span><span className="text-xs text-neutral-400 line-through font-normal">Rs. {item.original_price}</span></span> : <span>Rs. {item.price}</span>
+                            )}
+                        </span>
+                        <div className="flex gap-1">
+                            <button type="button" onClick={onEdit} data-testid={`menu-edit-${item.id}`} className="w-9 h-9 rounded-full hover:bg-neutral-100 flex items-center justify-center"><Pencil className="w-4 h-4" /></button>
+                            <button type="button" onClick={onDelete} data-testid={`menu-delete-${item.id}`} className="w-9 h-9 rounded-full hover:bg-red-50 text-red-500 flex items-center justify-center"><Trash2 className="w-4 h-4" /></button>
+                        </div>
                     </div>
                 </div>
             </div>
