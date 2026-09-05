@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import api, { formatApiError, resolveImageUrl } from "../../lib/api";
-import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award, Download, FileSpreadsheet, Loader2, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, X, Upload, Link2, GripVertical, Star, Award, Download, FileSpreadsheet, Loader2, Search, Power } from "lucide-react";
 import { toast } from "sonner";
 import {
     DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors,
@@ -222,6 +222,20 @@ export default function AdminMenu() {
         }
     };
 
+    const toggleAvailability = async (item) => {
+        const newStatus = !item.is_available;
+        try {
+            await api.put(`/menu-items/${item.id}`, {
+                ...item,
+                is_available: newStatus
+            });
+            toast.success(newStatus ? "Item is now available" : "Item marked as unavailable");
+            load();
+        } catch (err) {
+            toast.error(formatApiError(err.response?.data?.detail));
+        }
+    };
+
     return (
         <div data-testid="admin-menu-page">
             <div className="flex items-end justify-between flex-wrap gap-3 mb-6">
@@ -305,6 +319,7 @@ export default function AdminMenu() {
                                 category={data.categories.find((c) => c.id === item.category_id)}
                                 onEdit={() => openEdit(item)}
                                 onDelete={() => remove(item.id)}
+                                onToggleAvailability={() => toggleAvailability(item)}
                             />
                         ))}
                     </div>
@@ -319,6 +334,7 @@ export default function AdminMenu() {
                                     category={data.categories.find((c) => c.id === item.category_id)}
                                     onEdit={() => openEdit(item)}
                                     onDelete={() => remove(item.id)}
+                                    onToggleAvailability={() => toggleAvailability(item)}
                                 />
                             ))}
                         </div>
@@ -489,7 +505,7 @@ export default function AdminMenu() {
 
 // Draggable wrapper — sets up the sortable node and hands the drag handle to the
 // shared card. Used only in the unfiltered view where reordering is meaningful.
-function SortableMenuItem({ item, category, onEdit, onDelete }) {
+function SortableMenuItem({ item, category, onEdit, onDelete, onToggleAvailability }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.id });
     const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 10 : 1 };
     const dragHandle = (
@@ -498,12 +514,12 @@ function SortableMenuItem({ item, category, onEdit, onDelete }) {
             <GripVertical className="w-4 h-4" />
         </button>
     );
-    return <MenuItemCard item={item} category={category} onEdit={onEdit} onDelete={onDelete} innerRef={setNodeRef} style={style} dragHandle={dragHandle} />;
+    return <MenuItemCard item={item} category={category} onEdit={onEdit} onDelete={onDelete} onToggleAvailability={onToggleAvailability} innerRef={setNodeRef} style={style} dragHandle={dragHandle} />;
 }
 
 // Presentational menu card. `dragHandle` is optional so the same markup serves both
 // the draggable grid and the filtered/search grid (which has no drag).
-function MenuItemCard({ item, category, onEdit, onDelete, innerRef, style, dragHandle = null }) {
+function MenuItemCard({ item, category, onEdit, onDelete, onToggleAvailability, innerRef, style, dragHandle = null }) {
     const variations = Array.isArray(item.variations) ? item.variations : [];
     const hasDiscount = item.original_price && item.original_price > item.price;
     const isUnavailable = item.is_available === false;
@@ -539,6 +555,18 @@ function MenuItemCard({ item, category, onEdit, onDelete, innerRef, style, dragH
                         )}
                     </span>
                     <div className="flex gap-1">
+                        <button
+                            type="button"
+                            onClick={onToggleAvailability}
+                            data-testid={`menu-toggle-availability-${item.id}`}
+                            title={isUnavailable ? "Mark as available" : "Mark as unavailable"}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center transition-colors ${
+                                isUnavailable
+                                    ? 'hover:bg-green-50 text-neutral-400 hover:text-green-600'
+                                    : 'hover:bg-green-50 text-green-600'
+                            }`}>
+                            <Power className="w-4 h-4" />
+                        </button>
                         <button type="button" onClick={onEdit} data-testid={`menu-edit-${item.id}`} className="w-9 h-9 rounded-full hover:bg-neutral-100 flex items-center justify-center"><Pencil className="w-4 h-4" /></button>
                         <button type="button" onClick={onDelete} data-testid={`menu-delete-${item.id}`} className="w-9 h-9 rounded-full hover:bg-red-50 text-red-500 flex items-center justify-center"><Trash2 className="w-4 h-4" /></button>
                     </div>
