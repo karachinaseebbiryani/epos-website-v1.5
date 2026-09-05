@@ -16,6 +16,7 @@ const EMPTY_FORM = {
     discount_type: "", discount_value: 0,
     variations: [],
     related_item_ids: [],
+    is_available: true,
 };
 
 export default function AdminMenu() {
@@ -458,7 +459,7 @@ export default function AdminMenu() {
                                 </div>
                             </div>
 
-                            <div className="flex gap-4">
+                            <div className="flex flex-wrap gap-4">
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input type="checkbox" checked={form.is_popular} onChange={(e) => setForm({ ...form, is_popular: e.target.checked })} data-testid="menu-form-popular" />
                                     <span className="text-sm font-semibold inline-flex items-center gap-1"><Star className="w-3.5 h-3.5 text-brand-yellow" /> Popular</span>
@@ -466,6 +467,12 @@ export default function AdminMenu() {
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input type="checkbox" checked={form.is_bestseller} onChange={(e) => setForm({ ...form, is_bestseller: e.target.checked })} data-testid="menu-form-bestseller" />
                                     <span className="text-sm font-semibold inline-flex items-center gap-1"><Award className="w-3.5 h-3.5 text-brand-red" /> Bestseller</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" checked={form.is_available !== false} onChange={(e) => setForm({ ...form, is_available: e.target.checked })} data-testid="menu-form-available" />
+                                    <span className="text-sm font-semibold inline-flex items-center gap-1">
+                                        <span className={`w-2 h-2 rounded-full ${form.is_available !== false ? 'bg-green-500' : 'bg-red-500'}`} /> Available
+                                    </span>
                                 </label>
                             </div>
                         </div>
@@ -499,13 +506,15 @@ function SortableMenuItem({ item, category, onEdit, onDelete }) {
 function MenuItemCard({ item, category, onEdit, onDelete, innerRef, style, dragHandle = null }) {
     const variations = Array.isArray(item.variations) ? item.variations : [];
     const hasDiscount = item.original_price && item.original_price > item.price;
+    const isUnavailable = item.is_available === false;
     return (
         <div ref={innerRef} style={style} data-testid={`admin-menu-item-${item.id}`}
-            className="bg-white border border-neutral-200 rounded-2xl overflow-hidden flex flex-col">
+            className={`bg-white border border-neutral-200 rounded-2xl overflow-hidden flex flex-col ${isUnavailable ? 'opacity-60' : ''}`}>
             <div className="aspect-[4/3] bg-neutral-100 overflow-hidden relative">
                 {dragHandle}
                 {item.image_url && item.image_url.trim() && <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-full h-full object-cover" />}
                 <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
+                    {isUnavailable && <span className="bg-neutral-700 text-white text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Out of Stock</span>}
                     {item.is_bestseller && <span className="bg-brand-red text-white text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Bestseller</span>}
                     {item.is_popular && <span className="bg-brand-yellow text-brand-ink text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">Popular</span>}
                     {hasDiscount && <span className="bg-green-600 text-white text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full">{item.discount_percent}% OFF</span>}

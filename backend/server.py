@@ -465,6 +465,7 @@ class MenuItemCreate(BaseModel):
     discount_value: Optional[float] = 0
     is_bestseller: Optional[bool] = False
     is_popular: Optional[bool] = False
+    is_available: Optional[bool] = True  # Availability toggle: False = hidden from website/app (out of stock)
     image_url: Optional[str] = ""
     image_type: Optional[str] = None
     description: Optional[str] = ""
@@ -494,6 +495,7 @@ class MenuItemUpdate(BaseModel):
     discount_value: Optional[float] = None
     is_bestseller: Optional[bool] = None
     is_popular: Optional[bool] = None
+    is_available: Optional[bool] = None  # Availability toggle
     image_url: Optional[str] = None
     image_type: Optional[str] = None
     description: Optional[str] = None
@@ -1074,6 +1076,7 @@ async def create_menu_item(item: MenuItemCreate, request: Request):
         "ingredients": _norm_ingredients([ing.model_dump() for ing in (item.ingredients or [])]),
         "discount_type": item.discount_type, "discount_value": item.discount_value or 0,
         "is_bestseller": bool(item.is_bestseller), "is_popular": bool(item.is_popular),
+        "is_available": True if item.is_available is None else bool(item.is_available),  # Default to available
         "image_url": persisted_image_url, "image_type": "url" if persisted_image_url.startswith("/api/uploads/") else (item.image_type or ("upload" if (item.image_url or "").startswith("data:") else "url")),
         "description": item.description or "",
         "related_item_ids": list(item.related_item_ids or []),
@@ -4068,7 +4071,8 @@ async def get_public_menu(request: Request, response: Response):
         response.headers["Cache-Control"] = "public, max-age=30"
         return cached["value"]
     cats = await db.categories.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(200)
-    items = await db.menu_items.find({}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
+    # Only fetch available items for public menu (website/mobile app)
+    items = await db.menu_items.find({"is_available": {"$ne": False}}).sort([("sort_order", 1), ("created_at", 1)]).to_list(500)
     cat_list = [{"id": str(c["_id"]), "name": c["name"], "color": c.get("color")} for c in cats]
     item_list = []
     for i in items:
@@ -4132,6 +4136,9 @@ async def get_menu_item(item_id: str):
         raise HTTPException(status_code=404, detail="Item not found")
     if not i:
         raise HTTPException(status_code=404, detail="Item not found")
+    # Check if item is available for public menu
+    if i.get("is_available", True) is False:
+        raise HTTPException(status_code=404, detail="Item not available")
     return {
         "id": str(i["_id"]),
         "name": i["name"],
