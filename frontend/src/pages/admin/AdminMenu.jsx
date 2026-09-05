@@ -222,11 +222,23 @@ export default function AdminMenu() {
         }
     };
 
-    const toggleAvailability = async (item) => {
+    const toggleAvailability = async (item, e) => {
+        e.stopPropagation(); // Prevent event bubbling
         const newStatus = !item.is_available;
         try {
             await api.put(`/menu-items/${item.id}`, {
-                ...item,
+                name: item.name,
+                price: Number(item.original_price || item.price) || 0,
+                category_id: item.category_id,
+                stock: item.stock,
+                image_url: item.image_url || "",
+                description: item.description || "",
+                is_popular: !!item.is_popular,
+                is_bestseller: !!item.is_bestseller,
+                discount_type: item.discount_type || null,
+                discount_value: Number(item.discount_value) || 0,
+                variations: Array.isArray(item.variations) ? item.variations : [],
+                related_item_ids: Array.isArray(item.related_item_ids) ? item.related_item_ids : [],
                 is_available: newStatus
             });
             toast.success(newStatus ? "Item is now available" : "Item marked as unavailable");
@@ -319,7 +331,7 @@ export default function AdminMenu() {
                                 category={data.categories.find((c) => c.id === item.category_id)}
                                 onEdit={() => openEdit(item)}
                                 onDelete={() => remove(item.id)}
-                                onToggleAvailability={() => toggleAvailability(item)}
+                                onToggleAvailability={(e) => toggleAvailability(item, e)}
                             />
                         ))}
                     </div>
@@ -334,7 +346,7 @@ export default function AdminMenu() {
                                     category={data.categories.find((c) => c.id === item.category_id)}
                                     onEdit={() => openEdit(item)}
                                     onDelete={() => remove(item.id)}
-                                    onToggleAvailability={() => toggleAvailability(item)}
+                                    onToggleAvailability={(e) => toggleAvailability(item, e)}
                                 />
                             ))}
                         </div>
